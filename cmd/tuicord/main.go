@@ -37,7 +37,7 @@ func run() error {
 	token, err := auth.ResolveToken(ctx, auth.Options{
 		Store: auth.KeyringStore{},
 		Prompt: func(ctx context.Context) (string, error) {
-			return ui.RunLogin(ctx, styles)
+			return ui.RunLogin(ctx, styles, theme(cfg))
 		},
 	})
 	if err != nil {
@@ -57,25 +57,31 @@ func run() error {
 	shell := ui.NewShell(orch, mv, cfg, styles, stop)
 	orch.OnReady(mv.Refresh)
 	orch.OnChange(mv.RefreshChannels)
+	orch.OnError(func(err error) {
+		shell.ShowToast("Discord error", err)
+	})
 	orch.RegisterHandlers()
+	orch.LoadGuilds(100)
 
 	go func() {
 		if err := orch.Connect(ctx); err != nil && ctx.Err() == nil {
-			fmt.Fprintln(os.Stderr, "tuicord: gateway:", err)
-			stop()
+			uiApp.Post(func() {
+				shell.ShowToast("Gateway error", err)
+			})
 		}
 	}()
 
 	return uiApp.RunContext(ctx, shell)
 }
 
-// uiStyles resolves the configured theme into the palette the widgets draw with.
+// uiStyles resolves the configured colors into the palette the widgets draw with.
 func uiStyles(cfg config.Config) ui.Styles {
-	s := cfg.Theme.Styles()
+	s := cfg.Colors.Styles()
 	return ui.Styles{
 		Text:    s.Text,
 		Muted:   s.Muted,
 		Accent:  s.Accent,
+		Border:  s.Border,
 		Pending: s.Muted,
 		Error:   s.Error,
 	}
@@ -83,13 +89,14 @@ func uiStyles(cfg config.Config) ui.Styles {
 
 // theme maps the configured palette onto the toolkit's Theme carrier.
 func theme(cfg config.Config) tui.Theme {
-	s := cfg.Theme.Styles()
+	s := cfg.Colors.Styles()
 	return tui.Theme{
-		Text:      s.Text,
-		Muted:     s.Muted,
-		Accent:    s.Accent,
-		Selection: s.Selection,
-		Border:    s.Border,
-		Error:     s.Error,
+		Background: s.Background,
+		Text:       s.Text,
+		Muted:      s.Muted,
+		Accent:     s.Accent,
+		Selection:  s.Selection,
+		Border:     s.Border,
+		Error:      s.Error,
 	}
 }

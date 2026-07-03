@@ -1,3 +1,7 @@
 .idea/
+.env
 *.test
 coverage.out
+
+# Built binaries
+/tuicord

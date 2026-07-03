@@ -53,6 +53,18 @@ func TestFocusReplacePreservesCurrent(t *testing.T) {
 	}
 }
 
+func TestFocusReplaceUsesPreferredWhenNoCurrent(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := &preferredWidget{testWidget: *newTestWidget("second", true)}
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, second})
+
+	if got := focus.Focused(); !sameWidget(got, second) {
+		t.Fatalf("Focused() = %v, want preferred second", got)
+	}
+}
+
 type testWidget struct {
 	name     string
 	focus    bool
@@ -71,3 +83,9 @@ func (w *testWidget) Draw(screen.Region)   {}
 func (w *testWidget) Handle(Event) bool    { w.handled++; return false }
 func (w *testWidget) CanFocus() bool       { return w.focus }
 func (w *testWidget) Children() []Widget   { return w.children }
+
+type preferredWidget struct {
+	testWidget
+}
+
+func (w *preferredWidget) PreferredFocus() bool { return true }

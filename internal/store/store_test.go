@@ -20,6 +20,16 @@ func TestGuildsPreserveFirstSeenOrder(t *testing.T) {
 	}
 }
 
+func TestUpsertGuildKeepsNameWhenUpdateIsEmpty(t *testing.T) {
+	s := New(0)
+	s.UpsertGuild(Guild{ID: 1, Name: "gophers"})
+	s.UpsertGuild(Guild{ID: 1})
+
+	if name, ok := s.GuildName(1); !ok || name != "gophers" {
+		t.Fatalf("GuildName = %q,%v; want gophers,true", name, ok)
+	}
+}
+
 func TestChannelsSortedByPositionThenID(t *testing.T) {
 	s := New(0)
 	s.UpsertChannel(Channel{ID: 20, GuildID: 1, Name: "b", Position: 1})
@@ -95,14 +105,33 @@ func TestMarkFailed(t *testing.T) {
 
 func TestMemberAndChannelResolution(t *testing.T) {
 	s := New(0)
-	s.UpsertMember(1, Member{ID: 42, Name: "alice"})
+	s.UpsertGuild(Guild{ID: 1, Name: "gophers"})
+	s.UpsertMember(1, Member{ID: 42, Name: "alice", RoleIDs: []RoleID{10, 11}})
+	s.UpsertRole(1, Role{ID: 10, Name: "admin", Position: 10, Hoist: true})
+	s.UpsertRole(1, Role{ID: 11, Name: "member", Position: 1})
 	s.UpsertChannel(Channel{ID: 5, GuildID: 1, Name: "general"})
 
+	if name, ok := s.GuildName(1); !ok || name != "gophers" {
+		t.Errorf("GuildName = %q,%v; want gophers,true", name, ok)
+	}
+	if _, ok := s.GuildName(999); ok {
+		t.Error("GuildName ok for unknown guild")
+	}
 	if name, ok := s.MemberName(1, 42); !ok || name != "alice" {
 		t.Errorf("MemberName = %q,%v; want alice,true", name, ok)
 	}
+	if member, ok := s.Member(1, 42); !ok || len(member.RoleIDs) != 2 || member.RoleIDs[0] != 10 {
+		t.Errorf("Member = %+v,%v; want alice with role IDs", member, ok)
+	}
 	if _, ok := s.MemberName(1, 999); ok {
 		t.Error("MemberName ok for unknown user")
+	}
+	if role, ok := s.Role(1, 10); !ok || role.Name != "admin" || !role.Hoist {
+		t.Errorf("Role = %+v,%v; want admin,true", role, ok)
+	}
+	roles := s.Roles(1)
+	if len(roles) != 2 || roles[0].ID != 10 || roles[1].ID != 11 {
+		t.Errorf("Roles = %+v; want position-sorted admin,member", roles)
 	}
 	if name, ok := s.ChannelName(5); !ok || name != "general" {
 		t.Errorf("ChannelName = %q,%v; want general,true", name, ok)
@@ -116,5 +145,27 @@ func TestMessagesUnknownChannelIsNil(t *testing.T) {
 	s := New(0)
 	if got := s.Messages(123); got != nil {
 		t.Errorf("Messages(unknown) = %v, want nil", got)
+	}
+}
+
+func TestSetMessagesReplacesHistoryOldestFirst(t *testing.T) {
+	s := New(2)
+	s.AppendMessage(Message{ID: 1, ChannelID: 7, Content: "old"})
+
+	s.SetMessages(7, []Message{
+		{ID: 2, Content: "two"},
+		{ID: 3, Content: "three"},
+		{ID: 4, Content: "four"},
+	})
+
+	got := s.Messages(7)
+	if len(got) != 2 {
+		t.Fatalf("want 2 messages after bounded replace, got %d", len(got))
+	}
+	if got[0].ID != 3 || got[1].ID != 4 {
+		t.Fatalf("messages = %+v, want ids 3,4 oldest-first", got)
+	}
+	if got[0].ChannelID != 7 || got[1].ChannelID != 7 {
+		t.Fatalf("messages channel ids = %d,%d; want 7,7", got[0].ChannelID, got[1].ChannelID)
 	}
 }

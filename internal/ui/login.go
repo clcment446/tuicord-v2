@@ -21,11 +21,11 @@ var ErrLoginAborted = errors.New("login aborted")
 //
 // It satisfies auth.PromptFunc when wrapped: the returned token is persisted by
 // auth.ResolveToken.
-func RunLogin(ctx context.Context, styles Styles) (string, error) {
+func RunLogin(ctx context.Context, styles Styles, theme tui.Theme) (string, error) {
 	loginCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	app := tui.New()
+	app := tui.New(tui.WithTheme(theme))
 
 	var token string
 	setToken := func(t string) {
@@ -66,9 +66,9 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 	qr := NewQRPanel(ctx, app, styles, setToken)
 
 	root := widget.NewSplit(titled("Login", tokenPanel), titled("QR Code", qr)).
-		Basis(44).
+		Basis(36).
 		MinFirst(30).
-		Horizontal()
+		Vertical()
 	return newCancelRoot(root, cancel)
 }
 

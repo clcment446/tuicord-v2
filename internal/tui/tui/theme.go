@@ -4,11 +4,15 @@ import "awesomeProject/internal/tui/screen"
 
 // Theme is a small palette of styles the application applies to its widgets.
 //
-// The runtime does not draw with the theme itself; widgets are styled
-// explicitly by the caller. Carrying the theme on the App gives a single place
-// for configuration (loaded from disk, say) to reach the code that builds the
-// widget tree.
+// Widgets are styled explicitly by the caller, but the runtime does paint the
+// theme Background across the whole buffer before drawing so panel gaps and
+// dividers share the palette rather than showing the terminal default. Carrying
+// the theme on the App gives a single place for configuration (loaded from
+// disk, say) to reach the code that builds the widget tree.
 type Theme struct {
+	// Background is painted behind the whole screen each frame. The zero value
+	// leaves the terminal default background in place.
+	Background screen.Color
 	// Text is the default style for body text.
 	Text screen.Style
 	// Muted is a dimmed style for secondary text.

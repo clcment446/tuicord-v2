@@ -6,6 +6,22 @@
 // data. The orchestration layer (internal/app) translates gateway events into
 // store mutations.
 //
+// # Rich message content
+//
+// [Message] carries the full set of Discord rich content: [Attachment] slices,
+// [Embed] slices (which arrive asynchronously via MESSAGE_UPDATE once Discord
+// unfurls links), [Sticker] slices, [Reaction] slices, and [Component] slices
+// for interactive buttons and selects. Use [Store.UpdateMessage],
+// [Store.AddReaction], and [Store.RemoveReaction] to patch messages in place
+// after the initial append.
+//
+// # Role colors
+//
+// [Store.MemberColor] returns a member's effective display color following
+// Discord's rule: the highest-position role with a non-zero color wins.
+// [Role] carries a [Role.Colors] gradient triple for nitro gradient roles;
+// [LerpColor] and [Role.GradientAt] provide the interpolation math.
+//
 // # Concurrency
 //
 // The store is not safe for concurrent use. By convention it is mutated and
@@ -27,6 +43,8 @@ type (
 	MessageID uint64
 	// UserID identifies a user.
 	UserID uint64
+	// RoleID identifies a role within a guild.
+	RoleID uint64
 )
 
 // ChannelKind distinguishes the channel types the client renders.
@@ -60,22 +78,54 @@ type Channel struct {
 
 // Message is a single chat message. Pending marks an optimistic local message
 // awaiting the gateway echo; Failed marks one whose REST send returned an error.
+//
+// The rich-content fields (Attachments, Embeds, Stickers, Reactions,
+// Components) may be empty initially and patched later via UpdateMessage,
+// AddReaction, and RemoveReaction once the gateway delivers the full data.
 type Message struct {
 	ID        MessageID
 	ChannelID ChannelID
-	Author    string
-	Content   string
-	Timestamp time.Time
-	Nonce     string
-	Pending   bool
-	Failed    bool
+	// AuthorID is the snowflake of the sending user, used for role-color and
+	// profile lookups.
+	AuthorID    UserID
+	Author      string
+	Content     string
+	Timestamp   time.Time
+	Nonce       string
+	Pending     bool
+	Failed      bool
+	Attachments []Attachment
+	Embeds      []Embed
+	Stickers    []Sticker
+	Reactions   []Reaction
+	Components  []Component
 }
 
 // Member is a guild member, used to resolve mentions.
 type Member struct {
-	ID    UserID
-	Name  string
-	Color uint32
+	ID      UserID
+	Name    string
+	Color   uint32
+	RoleIDs []RoleID
+}
+
+// Role is a Discord role used to interpret member role IDs.
+//
+// Nitro gradient roles carry up to three color stops in Colors. When Colors is
+// all zero the role uses the flat Color value. Use GradientAt to obtain the
+// interpolated color for a given position along the name.
+type Role struct {
+	ID          RoleID
+	Name        string
+	Position    int
+	Color       uint32
+	Hoist       bool
+	Mentionable bool
+	// Colors holds the gradient color stops [Primary, Secondary, Tertiary].
+	// A zero entry means the stop is unset. Only Primary non-zero → solid
+	// color; Primary+Secondary → two-stop linear; all three → holographic
+	// three-stop interpolation.
+	Colors [3]uint32
 }
 
 // DefaultHistoryLimit is the per-channel message ring size when none is given.
@@ -94,6 +144,7 @@ type Store struct {
 	messages map[ChannelID]*ring
 
 	members map[GuildID]map[UserID]Member
+	roles   map[GuildID]map[RoleID]Role
 
 	unread map[ChannelID]int
 }
@@ -110,6 +161,7 @@ func New(historyLimit int) *Store {
 		channels:     map[ChannelID]Channel{},
 		messages:     map[ChannelID]*ring{},
 		members:      map[GuildID]map[UserID]Member{},
+		roles:        map[GuildID]map[RoleID]Role{},
 		unread:       map[ChannelID]int{},
 	}
 }
@@ -131,6 +183,9 @@ func (s *Store) Unread(channel ChannelID) int {
 
 // UpsertGuild inserts or updates a guild, preserving first-seen order.
 func (s *Store) UpsertGuild(g Guild) {
+	if existing, ok := s.guilds[g.ID]; ok && g.Name == "" {
+		g.Name = existing.Name
+	}
 	if _, ok := s.guilds[g.ID]; !ok {
 		s.guildOrder = append(s.guildOrder, g.ID)
 	}
@@ -144,6 +199,12 @@ func (s *Store) Guilds() []Guild {
 		out = append(out, s.guilds[id])
 	}
 	return out
+}
+
+// GuildName resolves a guild's display name, returning ok=false when unknown.
+func (s *Store) GuildName(id GuildID) (string, bool) {
+	g, ok := s.guilds[id]
+	return g.Name, ok
 }
 
 // UpsertChannel inserts or updates a channel. Channels are returned from
@@ -181,6 +242,20 @@ func (s *Store) AppendMessage(m Message) {
 		s.messages[m.ChannelID] = r
 	}
 	r.push(m)
+}
+
+// SetMessages replaces a channel's history with messages in oldest-first order.
+func (s *Store) SetMessages(channel ChannelID, messages []Message) {
+	if len(messages) == 0 {
+		delete(s.messages, channel)
+		return
+	}
+	r := newRing(s.historyLimit)
+	for _, m := range messages {
+		m.ChannelID = channel
+		r.push(m)
+	}
+	s.messages[channel] = r
 }
 
 // ReplaceMessage swaps a pending optimistic message (matched by Nonce) for the
@@ -225,6 +300,11 @@ func (s *Store) UpsertMember(guild GuildID, m Member) {
 	byUser[m.ID] = m
 }
 
+// RemoveMember deletes a guild member.
+func (s *Store) RemoveMember(guild GuildID, user UserID) {
+	delete(s.members[guild], user)
+}
+
 // Members returns a guild's members in no particular order.
 func (s *Store) Members(guild GuildID) []Member {
 	byUser := s.members[guild]
@@ -235,6 +315,12 @@ func (s *Store) Members(guild GuildID) []Member {
 	return out
 }
 
+// Member returns a guild member by ID.
+func (s *Store) Member(guild GuildID, user UserID) (Member, bool) {
+	m, ok := s.members[guild][user]
+	return m, ok
+}
+
 // MemberName resolves a user's display name within a guild, returning ok=false
 // when the member is unknown.
 func (s *Store) MemberName(guild GuildID, user UserID) (string, bool) {
@@ -242,6 +328,38 @@ func (s *Store) MemberName(guild GuildID, user UserID) (string, bool) {
 		return m.Name, true
 	}
 	return "", false
+}
+
+// UpsertRole inserts or updates a guild role.
+func (s *Store) UpsertRole(guild GuildID, r Role) {
+	byRole := s.roles[guild]
+	if byRole == nil {
+		byRole = map[RoleID]Role{}
+		s.roles[guild] = byRole
+	}
+	byRole[r.ID] = r
+}
+
+// RemoveRole deletes a guild role.
+func (s *Store) RemoveRole(guild GuildID, role RoleID) {
+	delete(s.roles[guild], role)
+}
+
+// Role resolves a guild role by ID.
+func (s *Store) Role(guild GuildID, role RoleID) (Role, bool) {
+	r, ok := s.roles[guild][role]
+	return r, ok
+}
+
+// Roles returns all cached roles for a guild.
+func (s *Store) Roles(guild GuildID) []Role {
+	byRole := s.roles[guild]
+	out := make([]Role, 0, len(byRole))
+	for _, r := range byRole {
+		out = append(out, r)
+	}
+	sortRoles(out)
+	return out
 }
 
 // ChannelName resolves a channel's name, returning ok=false when unknown.
@@ -264,6 +382,21 @@ func sortChannels(cs []Channel) {
 func lessChannel(a, b Channel) bool {
 	if a.Position != b.Position {
 		return a.Position < b.Position
+	}
+	return a.ID < b.ID
+}
+
+func sortRoles(rs []Role) {
+	for i := 1; i < len(rs); i++ {
+		for j := i; j > 0 && lessRole(rs[j], rs[j-1]); j-- {
+			rs[j], rs[j-1] = rs[j-1], rs[j]
+		}
+	}
+}
+
+func lessRole(a, b Role) bool {
+	if a.Position != b.Position {
+		return a.Position > b.Position
 	}
 	return a.ID < b.ID
 }

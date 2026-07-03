@@ -3,6 +3,7 @@ package discord
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/diamondburned/arikawa/v3/api"
@@ -21,10 +22,13 @@ const (
 	clientBrowser      = "Chrome"
 	clientBrowserVer   = "143.0.0.0"
 	clientBrowserUA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
-	clientBuildNumber  = 482285
 	clientLocale       = discord.EnglishUS
 	clientCapabilities = 16381
 )
+
+// errNoBuildNumber reports that the client build number was not found in the
+// fetched Discord app page.
+var errNoBuildNumber = errors.New("discord: build number not found in app page")
 
 // NewSession creates an arikawa Session configured like the old tuicord client.
 func NewSession(token string) (*session.Session, error) {
@@ -60,7 +64,7 @@ func identifyProperties() gateway.IdentifyProperties {
 		"browser_version":       clientBrowserVer,
 		"browser_user_agent":    clientBrowserUA,
 
-		"client_build_number":         clientBuildNumber,
+		"client_build_number":         clientBuildNumber(),
 		"client_event_source":         nil,
 		"client_app_state":            "focused",
 		"client_launch_id":            uuid.NewString(),

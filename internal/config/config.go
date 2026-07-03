@@ -40,21 +40,28 @@ type Keys struct {
 	FocusComposer string `toml:"focus_composer"`
 }
 
-// Theme holds hex colors (e.g. "#5865F2") applied to the widget tree.
-type Theme struct {
-	Text      string `toml:"text"`
-	Muted     string `toml:"muted"`
-	Accent    string `toml:"accent"`
-	Selection string `toml:"selection"`
-	Border    string `toml:"border"`
-	Error     string `toml:"error"`
+// Colors holds hex colors (e.g. "#5865F2") applied to the widget tree.
+//
+// Default() ships a full dark palette (the "vivian" theme) so the client looks
+// cohesive out of the box on any terminal. A user may override any field in
+// config.toml; an explicitly empty field falls back to the terminal default for
+// that role.
+type Colors struct {
+	// Background is the base fill painted behind every panel.
+	Background string `toml:"background"`
+	Text       string `toml:"text"`
+	Muted      string `toml:"muted"`
+	Accent     string `toml:"accent"`
+	Selection  string `toml:"selection"`
+	Border     string `toml:"border"`
+	Error      string `toml:"error"`
 }
 
 // Config is the full user configuration.
 type Config struct {
 	Layout Layout `toml:"layout"`
 	Keys   Keys   `toml:"keys"`
-	Theme  Theme  `toml:"theme"`
+	Colors Colors `toml:"colors"`
 }
 
 // Default returns the built-in configuration used when no file exists and as
@@ -74,13 +81,15 @@ func Default() Config {
 			NextPanel:     "tab",
 			FocusComposer: "esc",
 		},
-		Theme: Theme{
-			Text:      "#dcddde",
-			Muted:     "#72767d",
-			Accent:    "#5865f2",
-			Selection: "#4f545c",
-			Border:    "#202225",
-			Error:     "#ed4245",
+		// The "miyabi" palette — Terafox teal dark theme.
+		Colors: Colors{
+			Background: "#152528",
+			Text:       "#e6eaea",
+			Muted:      "#3f585d",
+			Accent:     "#4d9c9f",
+			Selection:  "#1d3337",
+			Border:     "#233134",
+			Error:      "#eb746b",
 		},
 	}
 }
@@ -120,7 +129,32 @@ func loadFrom(path string) (Config, error) {
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse %s: %w", path, err)
 	}
+	// Migrate the legacy [theme] section: when the user has not set [colors]
+	// (so cfg.Colors is still the defaults), overlay any colors from [theme].
+	var legacy struct {
+		Theme Colors `toml:"theme"`
+	}
+	if err := toml.Unmarshal(data, &legacy); err == nil && cfg.Colors == Default().Colors && legacy.Theme != (Colors{}) {
+		cfg.Colors = overlayColors(cfg.Colors, legacy.Theme)
+	}
 	return cfg, nil
+}
+
+// overlayColors returns base with every non-empty field of over applied on top.
+func overlayColors(base, over Colors) Colors {
+	set := func(dst *string, src string) {
+		if src != "" {
+			*dst = src
+		}
+	}
+	set(&base.Background, over.Background)
+	set(&base.Text, over.Text)
+	set(&base.Muted, over.Muted)
+	set(&base.Accent, over.Accent)
+	set(&base.Selection, over.Selection)
+	set(&base.Border, over.Border)
+	set(&base.Error, over.Error)
+	return base
 }
 
 func writeDefault(path string) error {

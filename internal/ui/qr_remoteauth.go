@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -50,7 +51,7 @@ type remoteAuth struct {
 // token instead.
 func runRemoteAuth(ctx context.Context, panel *QRPanel) {
 	ra := &remoteAuth{panel: panel}
-	if err := ra.run(ctx); err != nil && ctx.Err() == nil {
+	if err := ra.run(ctx); err != nil && ctx.Err() == nil && !isRemoteAuthClosed(err) {
 		panel.update(func() { panel.setStatus("QR login unavailable: " + err.Error()) })
 	}
 }
@@ -81,6 +82,9 @@ func (ra *remoteAuth) run(ctx context.Context) error {
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
+			if ctx.Err() != nil || isRemoteAuthClosed(err) {
+				return nil
+			}
 			return err
 		}
 		done, err := ra.dispatch(ctx, data)
@@ -91,6 +95,17 @@ func (ra *remoteAuth) run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func isRemoteAuthClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, net.ErrClosed) || websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "use of closed network connection") || strings.Contains(msg, "file already closed")
 }
 
 // dispatch handles one gateway frame. It returns done=true once a token has been

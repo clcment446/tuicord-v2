@@ -6,6 +6,9 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
+	"awesomeProject/internal/tui/screen"
+	"awesomeProject/internal/tui/tui"
+	"awesomeProject/internal/tui/widget"
 )
 
 func TestKeyMatches(t *testing.T) {
@@ -85,4 +88,83 @@ func TestShellTogglesOverlays(t *testing.T) {
 	if !handled || sh.overlay != nil {
 		t.Errorf("Esc did not close overlay (handled=%v, overlay=%v)", handled, sh.overlay)
 	}
+}
+
+func TestToastExpandsAndDismisses(t *testing.T) {
+	sh := &Shell{
+		cfg:   config.Default(),
+		mv:    &MainView{Root: widget.NewText("main")},
+		toast: NewToast("Gateway error", "line one line two line three", Styles{}),
+	}
+
+	if sh.toast.Expanded() {
+		t.Fatal("toast starts expanded")
+	}
+	if !sh.Handle(input.KeyEvent{Key: input.KeyEnter}) || !sh.toast.Expanded() {
+		t.Fatal("Enter did not expand toast")
+	}
+	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'x'}) || sh.toast != nil {
+		t.Fatal("x did not dismiss toast")
+	}
+}
+
+func TestToastConsumesUnderlyingInput(t *testing.T) {
+	cfg := config.Default()
+	sh := &Shell{
+		cfg:   cfg,
+		mv:    &MainView{Root: widget.NewText("main")},
+		toast: NewToast("Gateway error", "boom", Styles{}),
+	}
+
+	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}) {
+		t.Fatal("toast did not consume shortcut input")
+	}
+	if sh.overlay != nil {
+		t.Fatal("shortcut leaked through toast and opened overlay")
+	}
+
+	if !sh.Handle(input.MouseEvent{Btn: input.ButtonRight, Kind: input.MousePress}) || sh.toast != nil {
+		t.Fatal("right click did not dismiss toast")
+	}
+}
+
+func TestToastRendersOverShell(t *testing.T) {
+	sh := &Shell{
+		cfg: config.Default(),
+		mv:  &MainView{Root: widget.NewText("main")},
+	}
+	sh.ShowToast("Message failed", assertErr("send failed"))
+
+	buf := tui.New().Render(sh, tui.Size{W: 60, H: 8})
+	if !bufferContains(buf, "Message failed") {
+		t.Fatal("rendered shell does not contain toast title")
+	}
+	if !bufferContains(buf, "send failed") {
+		t.Fatal("rendered shell does not contain toast detail")
+	}
+}
+
+type assertErr string
+
+func (e assertErr) Error() string { return string(e) }
+
+func bufferContains(buf *screen.Buffer, want string) bool {
+	for y := 0; y < buf.Height(); y++ {
+		if rowText(buf, y) == want {
+			return true
+		}
+		if containsText(rowText(buf, y), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsText(s, want string) bool {
+	for i := 0; i+len(want) <= len(s); i++ {
+		if s[i:i+len(want)] == want {
+			return true
+		}
+	}
+	return false
 }
