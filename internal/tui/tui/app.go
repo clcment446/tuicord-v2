@@ -23,6 +23,7 @@ type App struct {
 	dirty bool
 	posts []func()
 	wake  chan struct{}
+	theme Theme
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -99,6 +100,8 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 
 	root.Measure(size)
 	hits := BuildHitIndex(root, size)
+	measureHits(hits)
+	hits = BuildHitIndex(root, size)
 	drawTree(buf, root, hits)
 	widgets := collectWidgets(root)
 
@@ -314,12 +317,23 @@ func syncOutput(w frameWriter) bool {
 func drawTree(buf *screen.Buffer, root Widget, hits HitIndex) {
 	entries := hits.Entries()
 	for _, entry := range entries {
-		entry.Widget.Draw(buf.Clip(screen.Rect{
+		entry.Widget.Draw(buf.ClipWithin(screen.Rect{
 			X: entry.Rect.X,
 			Y: entry.Rect.Y,
 			W: entry.Rect.W,
 			H: entry.Rect.H,
+		}, screen.Rect{
+			X: entry.Clip.X,
+			Y: entry.Clip.Y,
+			W: entry.Clip.W,
+			H: entry.Clip.H,
 		}))
+	}
+}
+
+func measureHits(hits HitIndex) {
+	for _, entry := range hits.Entries() {
+		entry.Widget.Measure(Size{W: entry.Rect.W, H: entry.Rect.H})
 	}
 }
 

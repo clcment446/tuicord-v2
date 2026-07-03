@@ -160,10 +160,10 @@ func hidden(n *Node, rootWidth int) bool {
 }
 
 func inset(r Rect, p Insets) Rect {
-	left := max(p.Left, 0)
-	right := max(p.Right, 0)
-	top := max(p.Top, 0)
-	bottom := max(p.Bottom, 0)
+	left := p.Left
+	right := p.Right
+	top := p.Top
+	bottom := p.Bottom
 	return Rect{
 		X: r.X + left,
 		Y: r.Y + top,

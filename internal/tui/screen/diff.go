@@ -21,17 +21,56 @@ func Diff(prev, next *Buffer) []byte {
 // Frame wraps Diff in synchronized output markers when sync is true.
 func Frame(prev, next *Buffer, sync bool) []byte {
 	diff := Diff(prev, next)
-	if len(diff) == 0 {
+	clears, graphics := GraphicDiff(prev, next)
+	if len(diff) == 0 && len(clears) == 0 && len(graphics) == 0 {
 		return nil
 	}
+	frame := make([]byte, 0, len(clears)+len(diff)+len(graphics))
+	frame = append(frame, clears...)
+	frame = append(frame, diff...)
+	frame = append(frame, graphics...)
 	if !sync {
-		return diff
+		return frame
 	}
-	out := make([]byte, 0, len(syncBegin)+len(diff)+len(syncEnd))
+	out := make([]byte, 0, len(syncBegin)+len(frame)+len(syncEnd))
 	out = append(out, syncBegin...)
-	out = append(out, diff...)
+	out = append(out, frame...)
 	out = append(out, syncEnd...)
 	return out
+}
+
+// GraphicDiff returns terminal protocol bytes needed to transform prev graphics
+// into next graphics. Clears should be emitted before cell diffs; graphics
+// should be emitted after cell diffs so terminal images sit on top of fallback
+// cells.
+func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
+	prevByKey := graphicMap(prev)
+	nextGraphics := next.Graphics()
+	nextByKey := make(map[string]Graphic, len(nextGraphics))
+	for _, g := range nextGraphics {
+		nextByKey[g.Key] = g
+	}
+
+	for key, old := range prevByKey {
+		next, ok := nextByKey[key]
+		if ok && equalGraphic(old, next) {
+			continue
+		}
+		if !ok || old.PayloadKey != next.PayloadKey {
+			clears = append(clears, old.Clear...)
+			clears = append(clears, old.Free...)
+		}
+	}
+	for _, g := range nextGraphics {
+		if old, ok := prevByKey[g.Key]; ok && equalGraphic(old, g) {
+			continue
+		}
+		if old, ok := prevByKey[g.Key]; !ok || old.PayloadKey != g.PayloadKey {
+			graphics = append(graphics, g.Upload...)
+		}
+		graphics = append(graphics, g.Data...)
+	}
+	return clears, graphics
 }
 
 func emitDiff(out *bytes.Buffer, prev, next *Buffer) {
@@ -85,6 +124,24 @@ func equalCell(a, b Cell) bool {
 		a.Wide == b.Wide &&
 		a.Style == b.Style &&
 		a.continuation == b.continuation
+}
+
+func graphicMap(buf *Buffer) map[string]Graphic {
+	graphics := buf.Graphics()
+	out := make(map[string]Graphic, len(graphics))
+	for _, g := range graphics {
+		out[g.Key] = g
+	}
+	return out
+}
+
+func equalGraphic(a, b Graphic) bool {
+	return a.Key == b.Key &&
+		a.PayloadKey == b.PayloadKey &&
+		a.Rect == b.Rect &&
+		bytes.Equal(a.Clear, b.Clear) &&
+		bytes.Equal(a.Free, b.Free) &&
+		bytes.Equal(a.Data, b.Data)
 }
 
 func move(out *bytes.Buffer, x, y int) {

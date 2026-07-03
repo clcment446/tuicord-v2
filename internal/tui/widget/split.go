@@ -182,36 +182,42 @@ func (w *Split) Draw(r screen.Region) {
 	}
 }
 
-// Handle adjusts the divider for Alt+arrow keyboard events.
+// Handle adjusts the divider for Alt+arrow keyboard events, then offers
+// unhandled events to panes from front to back.
 func (w *Split) Handle(ev tui.Event) bool {
 	if w == nil {
 		return false
 	}
 	key, ok := ev.(input.KeyEvent)
-	if !ok || key.Release || key.Mods&input.Alt == 0 {
-		return false
+	if ok && !key.Release && key.Mods&input.Alt != 0 {
+		switch key.Key {
+		case input.KeyLeft:
+			if w.dir == layout.Row {
+				w.Basis(w.basis - 1)
+				return true
+			}
+		case input.KeyRight:
+			if w.dir == layout.Row {
+				w.Basis(w.basis + 1)
+				return true
+			}
+		case input.KeyUp:
+			if w.dir == layout.Column {
+				w.Basis(w.basis - 1)
+				return true
+			}
+		case input.KeyDown:
+			if w.dir == layout.Column {
+				w.Basis(w.basis + 1)
+				return true
+			}
+		}
 	}
-	switch key.Key {
-	case input.KeyLeft:
-		if w.dir == layout.Row {
-			w.Basis(w.basis - 1)
-			return true
-		}
-	case input.KeyRight:
-		if w.dir == layout.Row {
-			w.Basis(w.basis + 1)
-			return true
-		}
-	case input.KeyUp:
-		if w.dir == layout.Column {
-			w.Basis(w.basis - 1)
-			return true
-		}
-	case input.KeyDown:
-		if w.dir == layout.Column {
-			w.Basis(w.basis + 1)
-			return true
-		}
+	if w.second != nil && w.second.Handle(ev) {
+		return true
+	}
+	if w.first != nil && w.first.Handle(ev) {
+		return true
 	}
 	return false
 }

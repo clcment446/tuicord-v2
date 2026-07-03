@@ -38,3 +38,32 @@ func TestSplitGivesPaneChildFullWidth(t *testing.T) {
 		t.Fatalf("first pane was not full width; cell 4 = %q", got)
 	}
 }
+
+func TestSplitForwardsUnhandledInputToPane(t *testing.T) {
+	field := NewTextInput("")
+	split := NewSplit(field, NewText("right")).Basis(8)
+	app := tui.New()
+	app.Render(split, tui.Size{W: 20, H: 1})
+
+	if !app.Handle(input.PasteEvent{Text: "token"}) {
+		t.Fatal("paste was not handled")
+	}
+	if got := field.Value(); got != "token" {
+		t.Fatalf("field value = %q, want token", got)
+	}
+}
+
+func TestSplitAltArrowStillResizesBeforeForwarding(t *testing.T) {
+	field := NewTextInput("")
+	split := NewSplit(field, NewText("right")).Basis(8)
+
+	if !split.Handle(input.KeyEvent{Key: input.KeyLeft, Mods: input.Alt}) {
+		t.Fatal("alt-left was not handled")
+	}
+	if got, want := split.Layout().Children[0].Basis, 7; got != want {
+		t.Fatalf("basis = %d, want %d", got, want)
+	}
+	if got := field.Value(); got != "" {
+		t.Fatalf("field value = %q, want empty", got)
+	}
+}

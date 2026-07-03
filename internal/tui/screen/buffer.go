@@ -4,8 +4,9 @@ import "awesomeProject/internal/tui/text"
 
 // Buffer is a fixed-size grid of terminal cells.
 type Buffer struct {
-	w, h  int
-	cells []Cell
+	w, h     int
+	cells    []Cell
+	graphics []Graphic
 }
 
 // NewBuffer returns a blank buffer of w by h cells.
@@ -53,6 +54,7 @@ func (b *Buffer) Clear() {
 	for i := range b.cells {
 		b.cells[i] = Blank
 	}
+	b.graphics = b.graphics[:0]
 }
 
 // Cell returns the cell at x,y. Out-of-bounds reads return Blank.
@@ -103,10 +105,45 @@ func (b *Buffer) Fill(r Rect, c Cell) {
 
 // Clip returns a region that draws into r clipped to the buffer bounds.
 func (b *Buffer) Clip(r Rect) Region {
+	return b.ClipWithin(r, r)
+}
+
+// ClipWithin returns a region with local coordinates rooted at r and drawing
+// clipped to clip. This is useful for retained child widgets that are laid out
+// outside a scroll viewport but must draw only through the viewport window.
+func (b *Buffer) ClipWithin(r, clip Rect) Region {
 	if b == nil {
 		return Region{}
 	}
-	return Region{buf: b, rect: intersect(r, b.Bounds())}
+	return Region{
+		buf:    b,
+		origin: r,
+		clip:   intersect(intersect(r, clip), b.Bounds()),
+	}
+}
+
+// AddGraphic attaches terminal protocol output to this frame.
+func (b *Buffer) AddGraphic(g Graphic) {
+	if b == nil || g.Key == "" || len(g.Data) == 0 {
+		return
+	}
+	g.Rect = intersect(g.Rect, b.Bounds())
+	if g.Rect.W <= 0 || g.Rect.H <= 0 {
+		return
+	}
+	b.graphics = append(b.graphics, cloneGraphic(g))
+}
+
+// Graphics returns a copy of terminal protocol output attached to this frame.
+func (b *Buffer) Graphics() []Graphic {
+	if b == nil || len(b.graphics) == 0 {
+		return nil
+	}
+	out := make([]Graphic, len(b.graphics))
+	for i, g := range b.graphics {
+		out[i] = cloneGraphic(g)
+	}
+	return out
 }
 
 func (b *Buffer) inside(x, y int) bool {
@@ -153,6 +190,14 @@ func normalizeCell(c Cell) Cell {
 	c.Wide = false
 	c.continuation = false
 	return c
+}
+
+func cloneGraphic(g Graphic) Graphic {
+	g.Clear = append([]byte(nil), g.Clear...)
+	g.Free = append([]byte(nil), g.Free...)
+	g.Upload = append([]byte(nil), g.Upload...)
+	g.Data = append([]byte(nil), g.Data...)
+	return g
 }
 
 func intersect(a, b Rect) Rect {

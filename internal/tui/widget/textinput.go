@@ -18,6 +18,8 @@ type TextInput struct {
 	style            screen.Style
 	placeholderStyle screen.Style
 	cursorStyle      screen.Style
+	onSubmit         func(string)
+	onChange         func(string)
 	node             layout.Node
 }
 
@@ -95,6 +97,30 @@ func (w *TextInput) SetPlaceholderStyle(style screen.Style) {
 	w.placeholderStyle = style
 }
 
+// OnSubmit registers a callback invoked with the current value when the user
+// presses Enter. Passing nil clears the callback.
+func (w *TextInput) OnSubmit(fn func(string)) {
+	if w == nil {
+		return
+	}
+	w.onSubmit = fn
+}
+
+// OnChange registers a callback invoked with the current value whenever the
+// text changes (typing, deleting, pasting). Passing nil clears the callback.
+func (w *TextInput) OnChange(fn func(string)) {
+	if w == nil {
+		return
+	}
+	w.onChange = fn
+}
+
+func (w *TextInput) changed() {
+	if w.onChange != nil {
+		w.onChange(w.value)
+	}
+}
+
 // Measure returns a one-line preferred size.
 func (w *TextInput) Measure(avail tui.Size) tui.Size {
 	width := 1
@@ -156,8 +182,12 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 	}
 	switch ev := ev.(type) {
 	case input.PasteEvent:
-		w.insert(ev.Text)
-		return ev.Text != ""
+		if ev.Text != "" {
+			w.insert(ev.Text)
+			w.changed()
+			return true
+		}
+		return false
 	case input.KeyEvent:
 		if ev.Release {
 			return false
@@ -165,7 +195,14 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 		switch ev.Key {
 		case input.KeyRune:
 			w.insert(string(ev.Rune))
+			w.changed()
 			return true
+		case input.KeyEnter:
+			if w.onSubmit != nil {
+				w.onSubmit(w.value)
+				return true
+			}
+			return false
 		case input.KeyLeft:
 			w.cursor = tuitext.PrevBoundary(w.value, w.cursor)
 			return true
@@ -183,12 +220,14 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			if prev != w.cursor {
 				w.value = w.value[:prev] + w.value[w.cursor:]
 				w.cursor = prev
+				w.changed()
 			}
 			return true
 		case input.KeyDelete:
 			next := tuitext.NextBoundary(w.value, w.cursor)
 			if next != w.cursor {
 				w.value = w.value[:w.cursor] + w.value[next:]
+				w.changed()
 			}
 			return true
 		}

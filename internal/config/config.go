@@ -1,0 +1,140 @@
+// Package config loads and persists the tuicord user configuration.
+//
+// Configuration lives at ~/.config/tuicord/config.toml. Load returns sane
+// defaults when the file is absent and writes a commented default file on first
+// run, so a fresh install starts with a discoverable, editable config.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+
+	"github.com/BurntSushi/toml"
+)
+
+// AppName is the config/keyring namespace.
+const AppName = "tuicord"
+
+// Layout controls sidebar widths and the members panel.
+type Layout struct {
+	// GuildsWidth is the guild rail width in columns.
+	GuildsWidth int `toml:"guilds_width"`
+	// ChannelsWidth is the channel sidebar width in columns.
+	ChannelsWidth int `toml:"channels_width"`
+	// MembersWidth is the members sidebar width in columns.
+	MembersWidth int `toml:"members_width"`
+	// MembersAutoHide hides the members panel below MembersHideBelow columns.
+	MembersAutoHide bool `toml:"members_auto_hide"`
+	// MembersHideBelow is the terminal width under which members auto-hides.
+	MembersHideBelow int `toml:"members_hide_below"`
+}
+
+// Keys maps actions to key names understood by the UI.
+type Keys struct {
+	QuickSwitcher string `toml:"quick_switcher"`
+	Help          string `toml:"help"`
+	NextPanel     string `toml:"next_panel"`
+	FocusComposer string `toml:"focus_composer"`
+}
+
+// Theme holds hex colors (e.g. "#5865F2") applied to the widget tree.
+type Theme struct {
+	Text      string `toml:"text"`
+	Muted     string `toml:"muted"`
+	Accent    string `toml:"accent"`
+	Selection string `toml:"selection"`
+	Border    string `toml:"border"`
+	Error     string `toml:"error"`
+}
+
+// Config is the full user configuration.
+type Config struct {
+	Layout Layout `toml:"layout"`
+	Keys   Keys   `toml:"keys"`
+	Theme  Theme  `toml:"theme"`
+}
+
+// Default returns the built-in configuration used when no file exists and as
+// the base that a user's file is decoded over.
+func Default() Config {
+	return Config{
+		Layout: Layout{
+			GuildsWidth:      4,
+			ChannelsWidth:    24,
+			MembersWidth:     20,
+			MembersAutoHide:  true,
+			MembersHideBelow: 120,
+		},
+		Keys: Keys{
+			QuickSwitcher: "ctrl+k",
+			Help:          "ctrl+/",
+			NextPanel:     "tab",
+			FocusComposer: "esc",
+		},
+		Theme: Theme{
+			Text:      "#dcddde",
+			Muted:     "#72767d",
+			Accent:    "#5865f2",
+			Selection: "#4f545c",
+			Border:    "#202225",
+			Error:     "#ed4245",
+		},
+	}
+}
+
+// Path returns the config file path, honoring XDG_CONFIG_HOME.
+func Path() (string, error) {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, AppName, "config.toml"), nil
+}
+
+// Load reads the config file, layering it over Default. When the file does not
+// exist it writes the default file and returns Default. Decode errors are
+// returned so the user can fix a malformed file rather than silently losing it.
+func Load() (Config, error) {
+	path, err := Path()
+	if err != nil {
+		return Default(), err
+	}
+	return loadFrom(path)
+}
+
+func loadFrom(path string) (Config, error) {
+	cfg := Default()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		if werr := writeDefault(path); werr != nil {
+			return cfg, werr
+		}
+		return cfg, nil
+	}
+	if err != nil {
+		return cfg, err
+	}
+	if err := toml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+func writeDefault(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		// Lost a race or file appeared; not fatal for loading.
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	return toml.NewEncoder(f).Encode(Default())
+}

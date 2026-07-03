@@ -19,6 +19,10 @@ type Rect struct {
 	H int
 }
 
+func contains(r Rect, x, y int) bool {
+	return x >= r.X && y >= r.Y && x < r.X+r.W && y < r.Y+r.H
+}
+
 // Color is an RGB terminal color. The zero value means "default color".
 type Color struct {
 	R, G, B uint8
@@ -78,3 +82,19 @@ type Cell struct {
 
 // Blank is the default empty cell.
 var Blank = Cell{Content: " "}
+
+// Graphic is terminal protocol output attached to a buffer frame.
+//
+// Key identifies one retained terminal resource across frames. Clear removes
+// the previous placement before the next cell diff is emitted, Free releases
+// terminal-side payload when the resource disappears, Upload sends payload when
+// PayloadKey changes, and Data places the current resource after the cell diff.
+type Graphic struct {
+	Key        string
+	PayloadKey string
+	Rect       Rect
+	Clear      []byte
+	Free       []byte
+	Upload     []byte
+	Data       []byte
+}

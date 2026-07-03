@@ -47,3 +47,70 @@ func TestFrameSync(t *testing.T) {
 		t.Fatalf("Frame() = %q, want %q", got, want)
 	}
 }
+
+func TestFrameEmitsGraphicsAfterCellDiff(t *testing.T) {
+	next := NewBuffer(1, 1)
+	next.Set(0, 0, Cell{Content: "x"})
+	next.AddGraphic(Graphic{
+		Key:        "image:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{W: 1, H: 1},
+		Upload:     []byte("<upload>"),
+		Data:       []byte("<image>"),
+	})
+
+	got := string(Frame(nil, next, false))
+	want := "\x1b[1;1H\x1b[0mx\x1b[0m<upload><image>"
+	if got != want {
+		t.Fatalf("Frame() = %q, want %q", got, want)
+	}
+}
+
+func TestFrameMovesGraphicsWithoutReuploading(t *testing.T) {
+	prev := NewBuffer(2, 1)
+	prev.AddGraphic(Graphic{
+		Key:        "image:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{W: 1, H: 1},
+		Clear:      []byte("<clear>"),
+		Free:       []byte("<free>"),
+		Upload:     []byte("<old-upload>"),
+		Data:       []byte("<old>"),
+	})
+	next := NewBuffer(2, 1)
+	next.Set(1, 0, Cell{Content: "x"})
+	next.AddGraphic(Graphic{
+		Key:        "image:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{X: 1, W: 1, H: 1},
+		Clear:      []byte("<clear>"),
+		Free:       []byte("<free>"),
+		Upload:     []byte("<new-upload>"),
+		Data:       []byte("<new>"),
+	})
+
+	got := string(Frame(prev, next, false))
+	want := "\x1b[1;2H\x1b[0mx\x1b[0m<new>"
+	if got != want {
+		t.Fatalf("Frame() = %q, want %q", got, want)
+	}
+}
+
+func TestFrameFreesRemovedGraphics(t *testing.T) {
+	prev := NewBuffer(1, 1)
+	prev.AddGraphic(Graphic{
+		Key:        "image:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{W: 1, H: 1},
+		Clear:      []byte("<clear>"),
+		Free:       []byte("<free>"),
+		Data:       []byte("<old>"),
+	})
+	next := NewBuffer(1, 1)
+
+	got := string(Frame(prev, next, false))
+	want := "<clear><free>"
+	if got != want {
+		t.Fatalf("Frame() = %q, want %q", got, want)
+	}
+}

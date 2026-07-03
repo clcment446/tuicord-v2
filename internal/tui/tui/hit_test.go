@@ -55,3 +55,22 @@ func TestHitIndexTieBreaksLaterEntryAtSameDepth(t *testing.T) {
 		t.Fatalf("Hit() = %v, want front", hit.Widget)
 	}
 }
+
+func TestHitIndexClipsChildrenToParent(t *testing.T) {
+	child := newTestWidget("child", false)
+	child.node.Grow = 1
+	parent := newTestWidget("parent", false)
+	parent.node = &layout.Node{
+		Padding:  layout.Insets{Top: -1},
+		Children: []*layout.Node{child.node},
+	}
+	parent.children = []Widget{child}
+
+	hits := BuildHitIndex(parent, Size{W: 4, H: 2})
+	if hit, ok := hits.Hit(0, 0); !ok || !sameWidget(hit.Widget, child) {
+		t.Fatalf("Hit visible child = (%#v,%v), want child", hit, ok)
+	}
+	if hit, ok := hits.Hit(0, -1); ok {
+		t.Fatalf("Hit outside clip = %#v, want none", hit)
+	}
+}

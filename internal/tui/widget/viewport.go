@@ -13,6 +13,7 @@ import (
 // Viewport draws a scrollable set of plain text lines.
 type Viewport struct {
 	lines   []string
+	child   tui.Widget
 	offsetY int
 	offsetX int
 	style   screen.Style
@@ -21,7 +22,7 @@ type Viewport struct {
 
 // NewViewport returns an empty scrollable viewport.
 func NewViewport() *Viewport {
-	return &Viewport{node: layout.Node{Grow: 1}}
+	return &Viewport{node: layout.Node{Dir: layout.Column, Grow: 1}}
 }
 
 // SetContent replaces the viewport content, splitting it on newlines.
@@ -65,7 +66,39 @@ func (w *Viewport) SetScroll(x, y int) {
 		return
 	}
 	w.offsetX = maxInt(x, 0)
-	w.offsetY = clampInt(y, 0, maxInt(len(w.lines)-1, 0))
+	if w.child != nil {
+		w.offsetY = maxInt(y, 0)
+	} else {
+		w.offsetY = clampInt(y, 0, maxInt(len(w.lines)-1, 0))
+	}
+	w.rebuild()
+}
+
+// Child returns the retained child widget, if this viewport hosts one.
+func (w *Viewport) Child() tui.Widget {
+	if w == nil {
+		return nil
+	}
+	return w.child
+}
+
+// SetChild makes the viewport host a retained child tree instead of plain text
+// lines. The child is laid out at the negative scroll offset and clipped by the
+// viewport's region.
+func (w *Viewport) SetChild(child tui.Widget) {
+	if w == nil {
+		return
+	}
+	w.child = child
+	w.rebuild()
+}
+
+// Children returns the hosted child for retained-tree traversal.
+func (w *Viewport) Children() []tui.Widget {
+	if w == nil || w.child == nil {
+		return nil
+	}
+	return []tui.Widget{w.child}
 }
 
 // SetStyle sets the style used for viewport text.
@@ -85,6 +118,9 @@ func (w *Viewport) CanFocus() bool {
 func (w *Viewport) Measure(avail tui.Size) tui.Size {
 	if w == nil {
 		return tui.Size{}
+	}
+	if w.child != nil {
+		return w.child.Measure(avail)
 	}
 	width := 0
 	for _, line := range w.lines {
@@ -114,6 +150,9 @@ func (w *Viewport) Draw(r screen.Region) {
 		return
 	}
 	clear(r, w.style)
+	if w.child != nil {
+		return
+	}
 	for y := 0; y < r.Height(); y++ {
 		index := w.offsetY + y
 		if index >= len(w.lines) {
@@ -173,4 +212,12 @@ func (w *Viewport) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+func (w *Viewport) rebuild() {
+	w.node.Padding = layout.Insets{Top: -w.offsetY, Left: -w.offsetX}
+	w.node.Children = nil
+	if w.child != nil {
+		w.node.Children = []*layout.Node{w.child.Layout()}
+	}
 }

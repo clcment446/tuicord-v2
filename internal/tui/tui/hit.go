@@ -8,6 +8,8 @@ type HitEntry struct {
 	Widget Widget
 	// Rect is the widget rectangle in root coordinates.
 	Rect Rect
+	// Clip is the visible rectangle inherited from ancestor containers.
+	Clip Rect
 	// Depth is the retained tree depth, where the root is zero.
 	Depth int
 	// Order is the insertion order. Later entries are considered above earlier
@@ -36,18 +38,28 @@ func BuildHitIndex(root Widget, bounds Size) HitIndex {
 		return idx
 	}
 	rects := layout.Solve(root.Layout(), bounds.W, bounds.H)
-	addHitTree(&idx, root, rects, 0)
+	addHitTree(&idx, root, rects, Rect{W: bounds.W, H: bounds.H}, 0)
 	return idx
 }
 
 // Add inserts a widget rectangle into the index.
 func (h *HitIndex) Add(w Widget, r Rect, depth int) {
+	h.AddClipped(w, r, r, depth)
+}
+
+// AddClipped inserts a widget rectangle with an inherited visible clip.
+func (h *HitIndex) AddClipped(w Widget, r, clip Rect, depth int) {
 	if h == nil || w == nil || r.W <= 0 || r.H <= 0 {
+		return
+	}
+	clip = intersectRect(r, clip)
+	if clip.W <= 0 || clip.H <= 0 {
 		return
 	}
 	h.entries = append(h.entries, HitEntry{
 		Widget: w,
 		Rect:   r,
+		Clip:   clip,
 		Depth:  depth,
 		Order:  len(h.entries),
 	})
@@ -73,7 +85,7 @@ func (h HitIndex) Hit(x, y int) (Hit, bool) {
 func (h HitIndex) Path(x, y int) []Hit {
 	var out []Hit
 	for _, entry := range h.entries {
-		if !contains(entry.Rect, x, y) {
+		if !contains(entry.Rect, x, y) || !contains(entry.Clip, x, y) {
 			continue
 		}
 		hit := Hit{
@@ -87,25 +99,38 @@ func (h HitIndex) Path(x, y int) []Hit {
 	return out
 }
 
-func addHitTree(idx *HitIndex, w Widget, rects map[*layout.Node]layout.Rect, depth int) {
+func addHitTree(idx *HitIndex, w Widget, rects map[*layout.Node]layout.Rect, clip Rect, depth int) {
 	if w == nil {
 		return
 	}
 	node := w.Layout()
+	nextClip := clip
 	if r, ok := rects[node]; ok {
-		idx.Add(w, r, depth)
+		idx.AddClipped(w, r, clip, depth)
+		nextClip = intersectRect(r, clip)
 	}
 	container, ok := w.(Container)
 	if !ok {
 		return
 	}
 	for _, child := range container.Children() {
-		addHitTree(idx, child, rects, depth+1)
+		addHitTree(idx, child, rects, nextClip, depth+1)
 	}
 }
 
 func contains(r Rect, x, y int) bool {
 	return x >= r.X && y >= r.Y && x < r.X+r.W && y < r.Y+r.H
+}
+
+func intersectRect(a, b Rect) Rect {
+	x1 := max(a.X, b.X)
+	y1 := max(a.Y, b.Y)
+	x2 := min(a.X+a.W, b.X+b.W)
+	y2 := min(a.Y+a.H, b.Y+b.H)
+	if x2 <= x1 || y2 <= y1 {
+		return Rect{X: x1, Y: y1}
+	}
+	return Rect{X: x1, Y: y1, W: x2 - x1, H: y2 - y1}
 }
 
 func sortHits(hits []Hit) {
