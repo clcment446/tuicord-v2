@@ -77,12 +77,21 @@ func (w *ItemList) Selected() int {
 
 // SetSelected selects row index after clamping it to the list bounds.
 func (w *ItemList) SetSelected(index int) {
+	w.setSelected(index, true)
+}
+
+// SetSelectedSilent selects row index without invoking the selection callback.
+func (w *ItemList) SetSelectedSilent(index int) {
+	w.setSelected(index, false)
+}
+
+func (w *ItemList) setSelected(index int, notify bool) {
 	if w == nil || len(w.items) == 0 {
 		return
 	}
 	prev := w.selected
 	w.selected = clampInt(index, 0, len(w.items)-1)
-	if w.selected != prev && w.onSelect != nil {
+	if notify && w.selected != prev && w.onSelect != nil {
 		w.onSelect(w.selected)
 	}
 }
@@ -233,16 +242,30 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 			return true
 		}
 	case input.MouseEvent:
-		if ev.Kind != input.MouseWheel {
-			return false
-		}
-		switch ev.Btn {
-		case input.ButtonWheelUp:
-			w.SetSelected(w.selected - 1)
+		switch ev.Kind {
+		case input.MousePress:
+			if ev.Btn != input.ButtonLeft {
+				return false
+			}
+			index := w.offset + ev.Y
+			if index < 0 || index >= len(w.items) {
+				return false
+			}
+			same := index == w.selected
+			w.SetSelected(index)
+			if same && w.onSelect != nil {
+				w.onSelect(index)
+			}
 			return true
-		case input.ButtonWheelDown:
-			w.SetSelected(w.selected + 1)
-			return true
+		case input.MouseWheel:
+			switch ev.Btn {
+			case input.ButtonWheelUp:
+				w.SetSelected(w.selected - 1)
+				return true
+			case input.ButtonWheelDown:
+				w.SetSelected(w.selected + 1)
+				return true
+			}
 		}
 	}
 	return false

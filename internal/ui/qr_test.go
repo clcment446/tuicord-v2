@@ -33,13 +33,27 @@ func TestDrawQRRowsPacked(t *testing.T) {
 		{false, false},
 	}
 	buf := screen.NewBuffer(2, 4)
-	rows := drawQR(buf.Clip(buf.Bounds()), matrix)
+	rows, ok := drawQR(buf.Clip(buf.Bounds()), matrix)
+	if !ok {
+		t.Fatal("drawQR reported matrix did not fit")
+	}
 	if rows != 2 {
 		t.Errorf("drawQR packed into %d rows, want 2", rows)
 	}
 	// Top-left cell: upper=dark, lower=light → "▀".
 	if got := buf.Cell(0, 0).Content; got != "▀" {
 		t.Errorf("cell(0,0) = %q, want ▀", got)
+	}
+}
+
+func TestDrawQRRejectsClipping(t *testing.T) {
+	matrix := [][]bool{
+		{true, false, true},
+		{false, true, false},
+	}
+	buf := screen.NewBuffer(2, 1)
+	if _, ok := drawQR(buf.Clip(buf.Bounds()), matrix); ok {
+		t.Fatal("drawQR reported fit for a QR wider than the region")
 	}
 }
 

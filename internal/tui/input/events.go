@@ -143,7 +143,11 @@ type FocusEvent struct {
 	Focused bool
 }
 
+// TickEvent is a synthetic runtime event used for time-based widget updates.
+type TickEvent struct{}
+
 func (KeyEvent) inputEvent()   {}
 func (MouseEvent) inputEvent() {}
 func (PasteEvent) inputEvent() {}
 func (FocusEvent) inputEvent() {}
+func (TickEvent) inputEvent()  {}

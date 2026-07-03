@@ -43,14 +43,18 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv := &MainView{app: a, cfg: cfg, styles: styles}
 
 	mv.guildList = widget.NewItemList(nil)
+	mv.guildList.SetStyle(styles.Text)
 	mv.guildList.SetSelectedStyle(styles.Accent)
 	mv.guildList.OnSelect(mv.onGuildSelected)
 
 	mv.channelList = widget.NewItemList(nil)
+	mv.channelList.SetStyle(styles.Text)
 	mv.channelList.SetSelectedStyle(styles.Accent)
+	mv.channelList.SetBadgeStyle(styles.Accent)
 	mv.channelList.OnSelect(mv.onChannelSelected)
 
 	mv.memberList = widget.NewItemList(nil)
+	mv.memberList.SetStyle(styles.Text)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 
@@ -63,13 +67,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 }
 
 func (mv *MainView) compose() tui.Widget {
-	guildRail := titled("Servers", mv.guildList)
-	channels := titled("Channels", mv.channelList)
-	members := titled("Members", mv.memberList)
+	guildRail := mv.titled("Servers", mv.guildList)
+	channels := mv.titled("Channels", mv.channelList)
+	members := mv.titled("Members", mv.memberList)
 
 	chatColumn := widget.Column(
-		titled("Messages", mv.chat),
-		titled("Composer", mv.composer),
+		mv.titled("Messages", mv.chat),
+		mv.titled("Composer", mv.composer),
 	)
 	// Chat grows, composer is a fixed 3-row box (border + one line).
 	chatColumn.Children()[0].Layout().Grow = 1
@@ -77,22 +81,26 @@ func (mv *MainView) compose() tui.Widget {
 	composerNode.Basis = 3
 	composerNode.Grow = 0
 
-	// members | (chat) split so the members panel can auto-hide when narrow.
+	// chat | members split so members stays beside the messages/composer stack.
 	chatAndMembers := widget.NewSplit(chatColumn, members).
 		Basis(mv.termWidthMinusMembers()).
-		Horizontal()
+		MinSecond(mv.cfg.Layout.MembersWidth).
+		CollapsibleSecond().
+		Vertical()
 	membersNode := members.Layout()
 	membersNode.HideBelow = mv.cfg.Layout.MembersHideBelow
 
 	channelsAndRest := widget.NewSplit(channels, chatAndMembers).
 		Basis(mv.cfg.Layout.ChannelsWidth).
 		MinFirst(12).
-		MaxFirst(40)
+		MaxFirst(40).
+		CollapsibleFirst()
 
 	root := widget.NewSplit(guildRail, channelsAndRest).
 		Basis(mv.cfg.Layout.GuildsWidth).
 		MinFirst(3).
-		MaxFirst(24)
+		MaxFirst(24).
+		CollapsibleFirst()
 	return root
 }
 
@@ -109,15 +117,24 @@ func (mv *MainView) Refresh() {
 	guilds := mv.app.Store().Guilds()
 	mv.guildIDs = mv.guildIDs[:0]
 	items := make([]widget.Item, 0, len(guilds))
+	activeIndex := -1
 	for _, g := range guilds {
+		if g.ID == mv.app.ActiveGuild() {
+			activeIndex = len(mv.guildIDs)
+		}
 		mv.guildIDs = append(mv.guildIDs, g.ID)
 		items = append(items, widget.Item{Label: g.Name})
 	}
 	mv.guildList.SetItems(items)
 
-	if mv.app.ActiveGuild() == 0 && len(mv.guildIDs) > 0 {
+	switch {
+	case activeIndex >= 0:
+		mv.guildList.SetSelectedSilent(activeIndex)
+		mv.refreshChannels()
+		mv.refreshMembers(mv.app.ActiveGuild())
+	case mv.app.ActiveGuild() == 0 && len(mv.guildIDs) > 0:
 		mv.onGuildSelected(0)
-	} else {
+	default:
 		mv.refreshChannels()
 	}
 }
@@ -128,10 +145,12 @@ func (mv *MainView) onGuildSelected(index int) {
 	}
 	guild := mv.guildIDs[index]
 	mv.app.SetActive(guild, 0)
+	mv.app.LoadRoles(guild)
+	mv.app.LoadChannels(guild)
 	mv.refreshChannels()
 	// Auto-select the first text channel.
 	if len(mv.channelIDs) > 0 {
-		mv.channelList.SetSelected(0)
+		mv.channelList.SetSelectedSilent(0)
 		mv.onChannelSelected(0)
 	}
 	mv.refreshMembers(guild)
@@ -146,14 +165,29 @@ func (mv *MainView) refreshChannels() {
 	channels := mv.app.Store().Channels(guild)
 	mv.channelIDs = mv.channelIDs[:0]
 	items := make([]widget.Item, 0, len(channels))
+	activeIndex := -1
 	for _, c := range channels {
-		if c.Kind != store.ChannelText {
+		if c.Kind != store.ChannelText && c.Kind != store.ChannelDM {
 			continue
 		}
+		label := "# " + c.Name
+		if c.Kind == store.ChannelDM {
+			label = c.Name
+		}
+		if c.ID == mv.app.ActiveChannel() {
+			activeIndex = len(mv.channelIDs)
+		}
 		mv.channelIDs = append(mv.channelIDs, c.ID)
-		items = append(items, widget.Item{Label: "# " + c.Name, Badge: unreadBadge(mv.app.Store().Unread(c.ID))})
+		items = append(items, widget.Item{Label: label, Badge: unreadBadge(mv.app.Store().Unread(c.ID))})
 	}
 	mv.channelList.SetItems(items)
+	switch {
+	case activeIndex >= 0:
+		mv.channelList.SetSelectedSilent(activeIndex)
+	case mv.app.ActiveChannel() == 0 && len(mv.channelIDs) > 0:
+		mv.channelList.SetSelectedSilent(0)
+		mv.onChannelSelected(0)
+	}
 }
 
 // unreadBadge formats an unread count, capping the display at 99+.
@@ -181,7 +215,9 @@ func (mv *MainView) onChannelSelected(index int) {
 	if index < 0 || index >= len(mv.channelIDs) {
 		return
 	}
-	mv.app.SetActive(mv.app.ActiveGuild(), mv.channelIDs[index])
+	channel := mv.channelIDs[index]
+	mv.app.SetActive(mv.app.ActiveGuild(), channel)
+	mv.app.LoadHistory(channel, 50)
 }
 
 // resolver builds a markup resolver bound to the active guild, so mentions and
@@ -195,6 +231,16 @@ func (mv *MainView) resolver() markup.Resolver {
 		},
 		Channel: func(id uint64) (string, bool) {
 			return st.ChannelName(store.ChannelID(id))
+		},
+		Role: func(id uint64) (string, uint32, bool) {
+			r, ok := st.Role(guild, store.RoleID(id))
+			if !ok {
+				return "", 0, false
+			}
+			return r.Name, r.Color, true
+		},
+		Guild: func(id uint64) (string, bool) {
+			return st.GuildName(store.GuildID(id))
 		},
 	}
 }
@@ -211,5 +257,12 @@ func titled(title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
 	b.SetTitle(title)
 	b.SetStyle(screen.Style{})
+	return b
+}
+
+func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
+	b := titled(title, child)
+	b.SetStyle(mv.styles.Border)
+	b.SetFocusStyle(mv.styles.Accent)
 	return b
 }

@@ -1,6 +1,7 @@
 package widget
 
 import (
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/text"
@@ -31,11 +32,13 @@ var RoundedBorder = BorderChars{
 
 // Border draws a frame and exposes a padded child layout.
 type Border struct {
-	child tui.Widget
-	title string
-	chars BorderChars
-	style screen.Style
-	node  layout.Node
+	child      tui.Widget
+	title      string
+	chars      BorderChars
+	style      screen.Style
+	focusStyle screen.Style
+	focused    bool
+	node       layout.Node
 }
 
 // NewBorder returns a border around child.
@@ -94,6 +97,22 @@ func (w *Border) SetStyle(style screen.Style) {
 	w.style = style
 }
 
+// SetFocusStyle sets the border style while focus is inside the border.
+func (w *Border) SetFocusStyle(style screen.Style) {
+	if w == nil {
+		return
+	}
+	w.focusStyle = style
+}
+
+// SetFocused records whether keyboard focus is inside this border.
+func (w *Border) SetFocused(focused bool) {
+	if w == nil {
+		return
+	}
+	w.focused = focused
+}
+
 // SetChars replaces the border glyphs.
 func (w *Border) SetChars(chars BorderChars) {
 	if w == nil {
@@ -136,6 +155,9 @@ func (w *Border) Handle(ev tui.Event) bool {
 	if w == nil || w.child == nil {
 		return false
 	}
+	if _, ok := ev.(input.MouseEvent); ok {
+		return false
+	}
 	return w.child.Handle(ev)
 }
 
@@ -151,23 +173,27 @@ func (w *Border) rebuild() {
 }
 
 func (w *Border) drawFrame(r screen.Region) {
+	style := w.style
+	if w.focused && w.focusStyle != (screen.Style{}) {
+		style = w.focusStyle
+	}
 	lastX := r.Width() - 1
 	lastY := r.Height() - 1
 	for x := 0; x < r.Width(); x++ {
-		r.Set(x, 0, styled(w.chars.Horizontal, w.style))
-		r.Set(x, lastY, styled(w.chars.Horizontal, w.style))
+		r.Set(x, 0, styled(w.chars.Horizontal, style))
+		r.Set(x, lastY, styled(w.chars.Horizontal, style))
 	}
 	for y := 0; y < r.Height(); y++ {
-		r.Set(0, y, styled(w.chars.Vertical, w.style))
-		r.Set(lastX, y, styled(w.chars.Vertical, w.style))
+		r.Set(0, y, styled(w.chars.Vertical, style))
+		r.Set(lastX, y, styled(w.chars.Vertical, style))
 	}
-	r.Set(0, 0, styled(w.chars.TopLeft, w.style))
-	r.Set(lastX, 0, styled(w.chars.TopRight, w.style))
-	r.Set(0, lastY, styled(w.chars.BottomLeft, w.style))
-	r.Set(lastX, lastY, styled(w.chars.BottomRight, w.style))
+	r.Set(0, 0, styled(w.chars.TopLeft, style))
+	r.Set(lastX, 0, styled(w.chars.TopRight, style))
+	r.Set(0, lastY, styled(w.chars.BottomLeft, style))
+	r.Set(lastX, lastY, styled(w.chars.BottomRight, style))
 	if w.title == "" || r.Width() <= 4 {
 		return
 	}
 	title := " " + text.Truncate(w.title, r.Width()-4, text.Ellipsis) + " "
-	drawText(r, 1, 0, title, w.style)
+	drawText(r, 1, 0, title, style)
 }

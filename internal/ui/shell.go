@@ -23,6 +23,7 @@ type Shell struct {
 	cfg     config.Config
 	styles  Styles
 	overlay tui.Widget // nil = show the main view
+	toast   *Toast
 	cancel  context.CancelFunc
 	node    layout.Node
 }
@@ -54,10 +55,23 @@ func (s *Shell) Layout() *layout.Node {
 // Draw is a no-op; children draw themselves.
 func (s *Shell) Draw(screen.Region) {}
 
+func (s *Shell) DrawOverlay(r screen.Region) {
+	if s != nil && s.toast != nil {
+		s.toast.Draw(r)
+	}
+}
+
 // Handle routes global shortcuts and overlay dismissal, delegating everything
 // else to the active subtree.
 func (s *Shell) Handle(ev tui.Event) bool {
 	key, isKey := ev.(input.KeyEvent)
+
+	if s.toast != nil && s.toast.Handle(ev) {
+		if s.toast.wantsDismiss(ev) {
+			s.toast = nil
+		}
+		return true
+	}
 
 	if s.overlay != nil {
 		// The help overlay has no focusable widgets, so its keys arrive here;
@@ -71,11 +85,6 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
-		case key.Key == input.KeyRune && key.Rune == 'c' && key.Mods&input.Ctrl != 0:
-			if s.cancel != nil {
-				s.cancel()
-			}
-			return true
 		case keyMatches(key, s.cfg.Keys.QuickSwitcher):
 			s.openQuickSwitcher()
 			return true
@@ -98,3 +107,19 @@ func (s *Shell) openQuickSwitcher() {
 }
 
 func (s *Shell) closeOverlay() { s.overlay = nil }
+
+// ShowToast displays a dismissible error popup over the active view.
+func (s *Shell) ShowToast(title string, err error) {
+	if s == nil || err == nil {
+		return
+	}
+	s.toast = NewToast(title, err.Error(), s.styles)
+}
+
+// Toast returns the current popup, if any.
+func (s *Shell) Toast() *Toast {
+	if s == nil {
+		return nil
+	}
+	return s.toast
+}

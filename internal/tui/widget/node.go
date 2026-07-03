@@ -1,6 +1,7 @@
 package widget
 
 import (
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
@@ -71,6 +72,9 @@ func (n *Node) Draw(screen.Region) {}
 // Handle offers events to children from front to back.
 func (n *Node) Handle(ev tui.Event) bool {
 	if n == nil {
+		return false
+	}
+	if _, ok := ev.(input.MouseEvent); ok {
 		return false
 	}
 	for i := len(n.children) - 1; i >= 0; i-- {

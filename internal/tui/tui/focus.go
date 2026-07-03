@@ -49,7 +49,16 @@ func (f *FocusManager) Replace(widgets []Widget) {
 	}
 	f.current = 0
 	if prev != nil {
-		_ = f.Set(prev)
+		if f.Set(prev) {
+			return
+		}
+	}
+	for i, w := range f.ring {
+		preferred, ok := w.(PreferredFocus)
+		if ok && preferred.PreferredFocus() {
+			f.current = i
+			return
+		}
 	}
 }
 

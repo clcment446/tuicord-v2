@@ -64,7 +64,13 @@ func (p *QRPanel) Draw(r screen.Region) {
 	}
 	y := 0
 	if p.matrix != nil {
-		y = drawQR(r, p.matrix)
+		var ok bool
+		y, ok = drawQR(r, p.matrix)
+		if !ok {
+			drawText(r, 0, 0, "Terminal too small for QR code.", p.styles.Muted)
+			drawText(r, 0, min(1, r.Height()-1), "Make this pane wider or taller.", p.styles.Muted)
+			return
+		}
 	}
 	drawText(r, 0, min(y+1, r.Height()-1), p.status, p.styles.Muted)
 }
@@ -73,24 +79,45 @@ func (p *QRPanel) Draw(r screen.Region) {
 func (p *QRPanel) Handle(tui.Event) bool { return false }
 
 // drawQR renders the module matrix using the upper/lower half-block technique:
-// each character row encodes two module rows via foreground (top) and
-// background (bottom) colors. Returns the next free row.
-func drawQR(r screen.Region, matrix [][]bool) int {
+// each character row encodes two module rows. Returns the next free row and
+// whether the whole code fit; clipped QR codes are usually unscannable.
+func drawQR(r screen.Region, matrix [][]bool) (int, bool) {
 	on := screen.Style{Fg: screen.RGB(0, 0, 0), Bg: screen.RGB(255, 255, 255)}
 	rows := len(matrix)
+	cols := qrCols(matrix)
+	qrRows := (rows + 1) / 2
+	if rows == 0 || cols == 0 {
+		return 0, true
+	}
+	if cols > r.Width() || qrRows > r.Height() {
+		return 0, false
+	}
+
+	x0 := (r.Width() - cols) / 2
 	y := 0
 	for top := 0; top < rows; top += 2 {
-		if y >= r.Height() {
-			break
-		}
-		for x := 0; x < len(matrix[top]) && x < r.Width(); x++ {
-			upper := matrix[top][x]
-			lower := top+1 < rows && matrix[top+1][x]
-			r.Set(x, y, halfBlock(upper, lower, on))
+		for x := 0; x < cols; x++ {
+			upper := qrModule(matrix, top, x)
+			lower := qrModule(matrix, top+1, x)
+			r.Set(x0+x, y, halfBlock(upper, lower, on))
 		}
 		y++
 	}
-	return y
+	return y, true
+}
+
+func qrCols(matrix [][]bool) int {
+	cols := 0
+	for _, row := range matrix {
+		if len(row) > cols {
+			cols = len(row)
+		}
+	}
+	return cols
+}
+
+func qrModule(matrix [][]bool, row, col int) bool {
+	return row >= 0 && row < len(matrix) && col >= 0 && col < len(matrix[row]) && matrix[row][col]
 }
 
 // halfBlock picks the glyph/colors so a light module is shown as the terminal's

@@ -1,8 +1,10 @@
 package markup
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // parser is a single-pass scanner over message content.
@@ -28,6 +30,18 @@ func (p *parser) run() {
 // matchAt tries every special construct at position i. It returns the index just
 // past the consumed construct, or i if nothing matched.
 func (p *parser) matchAt(i int) int {
+	if p.atLineStart(i) {
+		switch {
+		case p.has(i, "#"):
+			if n := p.scanHeader(i); n > i {
+				return n
+			}
+		case p.src[i] == '>':
+			if n := p.scanQuote(i); n > i {
+				return n
+			}
+		}
+	}
 	switch {
 	case p.has(i, "```"):
 		return p.scanFenced(i)
@@ -35,6 +49,12 @@ func (p *parser) matchAt(i int) int {
 		return p.scanInlineCode(i)
 	case p.has(i, "**"):
 		return p.scanDelimited(i, "**", Kind_Bold)
+	case p.has(i, "__"):
+		return p.scanDelimited(i, "__", Kind_Underline)
+	case p.has(i, "~~"):
+		return p.scanDelimited(i, "~~", Kind_Strike)
+	case p.has(i, "||"):
+		return p.scanDelimited(i, "||", Kind_Spoiler)
 	case p.src[i] == '*':
 		return p.scanDelimited(i, "*", Kind_Italic)
 	case p.src[i] == '_':
@@ -43,6 +63,11 @@ func (p *parser) matchAt(i int) int {
 		return p.scanLink(i)
 	case p.src[i] == '<':
 		return p.scanEntity(i)
+	case p.has(i, "https://discord."):
+		if n := p.scanDiscordURL(i); n > i {
+			return n
+		}
+		return i
 	default:
 		return i
 	}
@@ -50,6 +75,61 @@ func (p *parser) matchAt(i int) int {
 
 func (p *parser) has(i int, s string) bool {
 	return strings.HasPrefix(p.src[i:], s)
+}
+
+// atLineStart reports whether i begins a line (start of input or after \n).
+func (p *parser) atLineStart(i int) bool {
+	return i == 0 || p.src[i-1] == '\n'
+}
+
+// scanHeader consumes a "# ", "## ", or "### " heading. The rest of the line
+// (up to but not including the newline) becomes one Kind_Header span. Inner
+// inline markup is not parsed in v1.
+func (p *parser) scanHeader(i int) int {
+	level := 0
+	for level < 3 && i+level < len(p.src) && p.src[i+level] == '#' {
+		level++
+	}
+	marker := i + level
+	if level == 0 || marker >= len(p.src) || p.src[marker] != ' ' {
+		return i
+	}
+	start := marker + 1
+	end := lineEnd(p.src, start)
+	p.emit(Span{Kind: Kind_Header, Text: p.src[start:end]})
+	return end
+}
+
+// scanQuote consumes a "> " line quote, or ">>> " for a quote running to the
+// end of the message. The quoted text becomes one Kind_Quote span prefixed with
+// a gutter bar. Inner inline markup is not parsed in v1.
+func (p *parser) scanQuote(i int) int {
+	switch {
+	case p.has(i, ">>> "):
+		text := strings.TrimRight(p.src[i+4:], "\n")
+		p.emit(Span{Kind: Kind_Quote, Text: quoteText(text)})
+		return len(p.src)
+	case p.has(i, "> "):
+		end := lineEnd(p.src, i+2)
+		p.emit(Span{Kind: Kind_Quote, Text: quoteText(p.src[i+2 : end])})
+		return end
+	default:
+		return i
+	}
+}
+
+// quoteText prefixes each line of a blockquote with a gutter bar so the quote
+// reads as a distinct block in the flat span stream.
+func quoteText(s string) string {
+	return "▏ " + strings.ReplaceAll(s, "\n", "\n▏ ")
+}
+
+// lineEnd returns the index of the next newline at or after start, or len(s).
+func lineEnd(s string, start int) int {
+	if nl := strings.IndexByte(s[start:], '\n'); nl >= 0 {
+		return start + nl
+	}
+	return len(s)
 }
 
 func (p *parser) flush() {
@@ -117,8 +197,8 @@ func (p *parser) scanLink(i int) int {
 	return urlStart + closeURL + 1
 }
 
-// scanEntity consumes a Discord entity: <@id>, <@!id>, <#id>, <:name:id>,
-// <a:name:id>.
+// scanEntity consumes a Discord entity: <@id>, <@!id>, <@&id>, <#id>,
+// <:name:id>, <a:name:id>, <t:unix>, <t:unix:style>.
 func (p *parser) scanEntity(i int) int {
 	close := strings.IndexByte(p.src[i:], '>')
 	if close < 0 {
@@ -130,6 +210,8 @@ func (p *parser) scanEntity(i int) int {
 	switch {
 	case strings.HasPrefix(body, "@!"):
 		return p.entityMention(body[2:], next, i)
+	case strings.HasPrefix(body, "@&"):
+		return p.entityRoleMention(body[2:], next, i)
 	case strings.HasPrefix(body, "@"):
 		return p.entityMention(body[1:], next, i)
 	case strings.HasPrefix(body, "#"):
@@ -137,9 +219,16 @@ func (p *parser) scanEntity(i int) int {
 			p.emit(Span{Kind: Kind_ChannelMention, Text: "#" + p.res.channel(id)})
 			return next
 		}
+	case strings.HasPrefix(body, "t:"):
+		return p.entityTimestamp(body[2:], next, i)
 	case strings.HasPrefix(body, ":") || strings.HasPrefix(body, "a:"):
-		if name, ok := emojiName(body); ok {
-			p.emit(Span{Kind: Kind_Emoji, Text: ":" + name + ":"})
+		if name, id, animated, ok := emojiParts(body); ok {
+			p.emit(Span{
+				Kind:          Kind_Emoji,
+				Text:          ":" + name + ":",
+				EmojiID:       id,
+				EmojiAnimated: animated,
+			})
 			return next
 		}
 	}
@@ -154,6 +243,190 @@ func (p *parser) entityMention(idStr string, next, fallback int) int {
 	return fallback
 }
 
+// entityRoleMention handles <@&id> role mentions.
+func (p *parser) entityRoleMention(idStr string, next, fallback int) int {
+	if id, ok := parseID(idStr); ok {
+		name, color := p.res.role(id)
+		p.emit(Span{Kind: Kind_RoleMention, Text: "@" + name, FG: color})
+		return next
+	}
+	return fallback
+}
+
+// entityTimestamp handles <t:unix> and <t:unix:style> timestamps.
+// body is the content after the "t:" prefix.
+func (p *parser) entityTimestamp(body string, next, fallback int) int {
+	unix, style := body, "f"
+	if idx := strings.IndexByte(body, ':'); idx >= 0 {
+		unix = body[:idx]
+		if s := body[idx+1:]; s != "" {
+			style = s
+		}
+	}
+	unixSec, ok := parseID(unix)
+	if !ok {
+		return fallback
+	}
+	t := time.Unix(int64(unixSec), 0).UTC()
+	p.emit(Span{Kind: Kind_Timestamp, Text: formatTimestamp(t, style, p.res)})
+	return next
+}
+
+// formatTimestamp converts a UTC time and a Discord style letter to a
+// human-readable string. The style letters follow Discord's spec:
+// t=short time, T=long time, d=short date, D=long date, f=short datetime
+// (default), F=full datetime, R=relative.
+func formatTimestamp(t time.Time, style string, res Resolver) string {
+	switch style {
+	case "t":
+		return t.Format("15:04")
+	case "T":
+		return t.Format("15:04:05")
+	case "d":
+		return t.Format("02/01/2006")
+	case "D":
+		return t.Format("02 January 2006")
+	case "F":
+		return t.Format("Monday, 02 January 2006 15:04")
+	case "R":
+		return formatRelative(t, res.now())
+	default: // "f" and unrecognised styles
+		return t.Format("02 January 2006 15:04")
+	}
+}
+
+// formatRelative returns a Discord-style relative time string such as
+// "3 hours ago" or "in 2 days".
+func formatRelative(t, now time.Time) string {
+	d := now.Sub(t)
+	if d < 0 {
+		return "in " + durationLabel(-d)
+	}
+	return durationLabel(d) + " ago"
+}
+
+// durationLabel returns a coarse human label for a duration (always positive).
+func durationLabel(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return "a few seconds"
+	case d < 2*time.Minute:
+		return "a minute"
+	case d < time.Hour:
+		return fmt.Sprintf("%d minutes", int(d.Minutes()))
+	case d < 2*time.Hour:
+		return "an hour"
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d hours", int(d.Hours()))
+	case d < 48*time.Hour:
+		return "a day"
+	default:
+		return fmt.Sprintf("%d days", int(d.Hours()/24))
+	}
+}
+
+// scanDiscordURL tries to parse a bare Discord URL starting at i.
+// Recognised patterns: discord.com/channels URLs and discord.gg/discord.com/invite
+// invite links. All other bare URLs are left as plain text.
+func (p *parser) scanDiscordURL(i int) int {
+	end := urlEnd(p.src, i)
+	if end == i {
+		return i
+	}
+	raw := p.src[i:end]
+
+	// discord.com/channels/<g>/<c>[/<m>]
+	const chanPrefix = "https://discord.com/channels/"
+	if strings.HasPrefix(raw, chanPrefix) {
+		parts := strings.SplitN(raw[len(chanPrefix):], "/", 4)
+		switch len(parts) {
+		case 2:
+			_, gok := parseID(parts[0])
+			c, cok := parseID(parts[1])
+			if gok && cok {
+				p.emit(Span{
+					Kind:   Kind_ChannelLink,
+					Text:   "#" + p.res.channel(c),
+					Action: &Action{Kind: ActionChannelLink, Target: parts[0] + "/" + parts[1]},
+				})
+				return end
+			}
+		case 3:
+			_, gok := parseID(parts[0])
+			c, cok := parseID(parts[1])
+			_, mok := parseID(parts[2])
+			if gok && cok && mok {
+				target := parts[0] + "/" + parts[1] + "/" + parts[2]
+				p.emit(Span{
+					Kind:   Kind_MessageLink,
+					Text:   "#" + p.res.channel(c) + " ↷ " + parts[2],
+					Action: &Action{Kind: ActionMessageLink, Target: target},
+				})
+				return end
+			}
+		}
+		return i
+	}
+
+	// discord.gg/<code> or discord.com/invite/<code>
+	if code := extractInviteCode(raw); code != "" {
+		p.emit(Span{
+			Kind:   Kind_InviteLink,
+			Text:   "discord.gg/" + code,
+			Action: &Action{Kind: ActionInvite, Target: code},
+		})
+		return end
+	}
+	return i
+}
+
+// extractInviteCode returns the invite code for discord.gg and discord.com/invite
+// URLs, or empty string if the URL is not an invite.
+func extractInviteCode(raw string) string {
+	var code string
+	switch {
+	case strings.HasPrefix(raw, "https://discord.gg/"):
+		code = raw[len("https://discord.gg/"):]
+	case strings.HasPrefix(raw, "https://discord.com/invite/"):
+		code = raw[len("https://discord.com/invite/"):]
+	default:
+		return ""
+	}
+	if isValidInviteCode(code) {
+		return code
+	}
+	return ""
+}
+
+// isValidInviteCode reports whether s is a plausible Discord invite code
+// (non-empty, alphanumeric + hyphens only).
+func isValidInviteCode(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// urlEnd returns the index just past the URL-like run starting at i.
+func urlEnd(s string, i int) int {
+	end := i
+	for end < len(s) && isURLChar(s[end]) {
+		end++
+	}
+	return end
+}
+
+// isURLChar reports whether b is a character that can appear inside a bare URL.
+func isURLChar(b byte) bool {
+	return b > ' ' && b != '"' && b != '\'' && b != '<' && b != '>' && b != '`' && b != '[' && b != ']'
+}
+
 func parseID(s string) (uint64, bool) {
 	id, err := strconv.ParseUint(s, 10, 64)
 	if err != nil {
@@ -162,15 +435,18 @@ func parseID(s string) (uint64, bool) {
 	return id, true
 }
 
-// emojiName extracts the name from ":name:id" or "a:name:id".
-func emojiName(body string) (string, bool) {
+// emojiParts extracts name, snowflake ID, and animated flag from a Discord
+// emoji body: ":name:id" or "a:name:id".
+func emojiParts(body string) (name string, id uint64, animated bool, ok bool) {
+	animated = strings.HasPrefix(body, "a")
 	body = strings.TrimPrefix(body, "a")
 	parts := strings.Split(body, ":") // ["", name, id]
 	if len(parts) != 3 || parts[1] == "" {
-		return "", false
+		return "", 0, false, false
 	}
-	if _, ok := parseID(parts[2]); !ok {
-		return "", false
+	eid, eidOK := parseID(parts[2])
+	if !eidOK {
+		return "", 0, false, false
 	}
-	return parts[1], true
+	return parts[1], eid, animated, true
 }

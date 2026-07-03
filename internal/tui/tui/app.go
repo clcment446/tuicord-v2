@@ -5,25 +5,29 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"time"
 
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/term"
 )
 
+const tickInterval = 500 * time.Millisecond
+
 // Option configures an App.
 type Option func(*App)
 
 // App is the runtime coordinator for a retained widget tree.
 type App struct {
-	mu    sync.Mutex
-	root  Widget
-	size  Size
-	hits  HitIndex
-	dirty bool
-	posts []func()
-	wake  chan struct{}
-	theme Theme
+	mu       sync.Mutex
+	root     Widget
+	size     Size
+	hits     HitIndex
+	dirty    bool
+	posts    []func()
+	wake     chan struct{}
+	theme    Theme
+	escExits int
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -34,8 +38,9 @@ type App struct {
 // New returns an App with default runtime state.
 func New(opts ...Option) *App {
 	a := &App{
-		dirty: true,
-		wake:  make(chan struct{}, 1),
+		dirty:    true,
+		wake:     make(chan struct{}, 1),
+		escExits: 5,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -87,6 +92,9 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 		size.H = 0
 	}
 	buf := screen.NewBuffer(size.W, size.H)
+	if bg := a.theme.Background; bg.Set() {
+		buf.Fill(screen.Rect{W: size.W, H: size.H}, screen.Cell{Content: " ", Style: screen.Style{Bg: bg}})
+	}
 	if root == nil || size.W == 0 || size.H == 0 {
 		a.mu.Lock()
 		a.root = root
@@ -102,8 +110,10 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	hits := BuildHitIndex(root, size)
 	measureHits(hits)
 	hits = BuildHitIndex(root, size)
-	drawTree(buf, root, hits)
 	widgets := collectWidgets(root)
+	a.Focus.Replace(widgets)
+	applyFocusIndicators(widgets, a.Focus.Focused())
+	drawTree(buf, root, hits)
 
 	a.mu.Lock()
 	a.root = root
@@ -111,7 +121,6 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	a.hits = hits
 	a.dirty = false
 	a.mu.Unlock()
-	a.Focus.Replace(widgets)
 	return buf
 }
 
@@ -167,11 +176,17 @@ func (a *App) handleMouse(ev input.MouseEvent) bool {
 	}
 	path := hits.Path(ev.X, ev.Y)
 	for i := len(path) - 1; i >= 0; i-- {
-		if path[i].Widget.Handle(ev) {
+		if path[i].Widget.Handle(localMouse(ev, path[i])) {
 			return true
 		}
 	}
 	return false
+}
+
+func localMouse(ev input.MouseEvent, hit Hit) input.MouseEvent {
+	ev.X = hit.X
+	ev.Y = hit.Y
+	return ev
 }
 
 func (a *App) handleKey(ev input.KeyEvent) bool {
@@ -224,6 +239,9 @@ func (a *App) run(
 	size Size,
 ) error {
 	prev := (*screen.Buffer)(nil)
+	ticker := time.NewTicker(tickInterval)
+	defer ticker.Stop()
+
 	render := func() error {
 		a.drainPosts()
 		if !a.Dirty() {
@@ -251,8 +269,15 @@ func (a *App) run(
 			}
 			return ctx.Err()
 		case <-a.wake:
+		case <-ticker.C:
+			if a.Handle(input.TickEvent{}) {
+				a.Invalidate()
+			}
 		case ev, ok := <-events:
 			if !ok {
+				return nil
+			}
+			if a.shouldExit(ev) {
 				return nil
 			}
 			if a.Handle(ev) {
@@ -274,6 +299,22 @@ func (a *App) run(
 			}
 		}
 	}
+}
+
+func (a *App) shouldExit(ev Event) bool {
+	key, ok := ev.(input.KeyEvent)
+	if !ok || key.Release {
+		return false
+	}
+	if key.Key == input.KeyRune && key.Rune == 'c' && key.Mods&input.Ctrl != 0 {
+		return true
+	}
+	if key.Key == input.KeyEsc {
+		a.escExits--
+		return a.escExits <= 0
+	}
+	a.escExits = 5
+	return false
 }
 
 func (a *App) drainPosts() {
@@ -329,6 +370,23 @@ func drawTree(buf *screen.Buffer, root Widget, hits HitIndex) {
 			H: entry.Clip.H,
 		}))
 	}
+	for _, entry := range entries {
+		overlay, ok := entry.Widget.(Overlay)
+		if !ok {
+			continue
+		}
+		overlay.DrawOverlay(buf.ClipWithin(screen.Rect{
+			X: entry.Rect.X,
+			Y: entry.Rect.Y,
+			W: entry.Rect.W,
+			H: entry.Rect.H,
+		}, screen.Rect{
+			X: entry.Clip.X,
+			Y: entry.Clip.Y,
+			W: entry.Clip.W,
+			H: entry.Clip.H,
+		}))
+	}
 }
 
 func measureHits(hits HitIndex) {
@@ -353,4 +411,30 @@ func collectWidgets(root Widget) []Widget {
 	}
 	walk(root)
 	return widgets
+}
+
+func applyFocusIndicators(widgets []Widget, focused Widget) {
+	for _, w := range widgets {
+		indicator, ok := w.(FocusIndicator)
+		if !ok {
+			continue
+		}
+		indicator.SetFocused(focused != nil && containsWidget(w, focused))
+	}
+}
+
+func containsWidget(root, target Widget) bool {
+	if sameWidget(root, target) {
+		return true
+	}
+	container, ok := root.(Container)
+	if !ok {
+		return false
+	}
+	for _, child := range container.Children() {
+		if containsWidget(child, target) {
+			return true
+		}
+	}
+	return false
 }

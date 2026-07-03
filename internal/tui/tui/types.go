@@ -45,8 +45,26 @@ type Container interface {
 	Children() []Widget
 }
 
+// Overlay is implemented by widgets that draw transient UI above their normal
+// retained subtree after every child has drawn.
+type Overlay interface {
+	DrawOverlay(screen.Region)
+}
+
 // Focusable is implemented by widgets that can receive keyboard focus.
 type Focusable interface {
 	// CanFocus reports whether the widget should be present in the focus ring.
 	CanFocus() bool
+}
+
+// FocusIndicator is implemented by widgets that visually react when keyboard
+// focus is inside their retained subtree.
+type FocusIndicator interface {
+	SetFocused(bool)
+}
+
+// PreferredFocus is implemented by widgets that should receive initial focus
+// when no previous focused widget can be preserved.
+type PreferredFocus interface {
+	PreferredFocus() bool
 }
