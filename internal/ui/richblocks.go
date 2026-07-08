@@ -90,11 +90,15 @@ func stickerMediaSpec(width int) mediaSpec {
 }
 
 func messageMediaPlacementKey(m store.Message, kind string, index int, mediaURL string) string {
+	return fmt.Sprintf("%s:%s:%d:%s", messagePlacementPrefix(m), kind, index, mediaURL)
+}
+
+func messagePlacementPrefix(m store.Message) string {
 	id := fmt.Sprintf("pending:%s", m.Nonce)
 	if m.ID != 0 {
 		id = fmt.Sprintf("%d", m.ID)
 	}
-	return fmt.Sprintf("%d:%s:%s:%d:%s", m.ChannelID, id, kind, index, mediaURL)
+	return fmt.Sprintf("%d:%s", m.ChannelID, id)
 }
 
 // attachmentChip returns the one-line label for an attachment. Videos get a play
