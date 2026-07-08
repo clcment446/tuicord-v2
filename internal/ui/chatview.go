@@ -1,15 +1,23 @@
 package ui
 
 import (
+	"context"
+	"hash/fnv"
+	"image"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"awesomeProject/internal/markup"
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
+	"awesomeProject/internal/tui/widget"
 )
 
 // ChatView renders the active channel's messages, bottom-aligned so the newest
@@ -22,6 +30,28 @@ type ChatView struct {
 	styles   Styles
 	scroll   int
 	node     layout.Node
+
+	visibleLines       []chatLine
+	contextMessage     store.Message
+	contextMessageSet  bool
+	componentAction    ComponentAction
+	componentActionSet bool
+	componentFlashes   map[string]time.Time
+	expandedComponents map[string]bool
+	selectedComponents map[string]map[string]bool
+	multiPickers       map[string]bool
+	activePicker       componentAction
+	activePickerSet    bool
+
+	mediaCfg     media.Config
+	mediaFetcher *media.Fetcher
+	post         func(func())
+	media        map[string]*chatMediaState
+
+	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
+	// message currently being rendered a viewport-unique placement key.
+	emojiKeyPrefix string
+	emojiSeq       int
 }
 
 // Styles is the resolved palette the UI draws with.
@@ -42,7 +72,23 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		active:   active,
 		resolver: resolver,
 		styles:   styles,
+		mediaCfg: media.DefaultConfig(),
 		node:     layout.Node{Grow: 1},
+	}
+}
+
+// SetMedia enables asynchronous inline media loading for attachments, stickers,
+// emoji CDN links, and image embeds. post must schedule callbacks on the UI
+// goroutine; passing nil leaves text-chip fallbacks in place.
+func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(func())) {
+	if w == nil {
+		return
+	}
+	w.mediaFetcher = fetcher
+	w.mediaCfg = cfg
+	w.post = post
+	if w.media == nil {
+		w.media = map[string]*chatMediaState{}
 	}
 }
 
@@ -69,6 +115,149 @@ func (w *ChatView) Layout() *layout.Node { return &w.node }
 // CanFocus lets the chat view take focus for scrolling.
 func (w *ChatView) CanFocus() bool { return true }
 
+func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style, spec mediaSpec) []chatLine {
+	state := w.ensureMedia(url)
+	muted := mergeStyle(base, w.styles.Muted)
+	switch {
+	case state == nil:
+		return []chatLine{{segments: []chatSegment{{text: label, style: muted}}}}
+	case state.err != nil:
+		return []chatLine{{segments: []chatSegment{{text: label + " (failed)", style: muted}}}}
+	case state.img == nil:
+		return []chatLine{{segments: []chatSegment{{text: label + " (loading)", style: muted}}}}
+	default:
+		variant := w.mediaVariant(state, spec)
+		if placementKey == "" {
+			placementKey = url
+		}
+		block := &inlineMedia{url: url, label: label, placementKey: placementKey, cols: variant.cols, rows: variant.rows, img: variant.img}
+		lines := make([]chatLine, variant.rows)
+		for i := range lines {
+			lines[i] = chatLine{media: block, mediaRow: i}
+		}
+		return lines
+	}
+}
+
+func (w *ChatView) ensureMedia(url string) *chatMediaState {
+	if w == nil || url == "" || !w.mediaCfg.Enabled {
+		return nil
+	}
+	if w.media == nil {
+		w.media = map[string]*chatMediaState{}
+	}
+	state := w.media[url]
+	if state != nil {
+		return state
+	}
+	if w.mediaFetcher == nil || w.post == nil {
+		return nil
+	}
+	state = &chatMediaState{loading: true}
+	w.media[url] = state
+	go w.fetchMedia(url)
+	return state
+}
+
+func (w *ChatView) fetchMedia(url string) {
+	img, err := w.mediaFetcher.Fetch(context.Background(), url)
+	w.post(func() {
+		state := w.media[url]
+		if state == nil {
+			state = &chatMediaState{}
+			w.media[url] = state
+		}
+		state.loading = false
+		state.img = img
+		state.err = err
+		state.variants = nil
+	})
+}
+
+func (w *ChatView) mediaMaxRows() int {
+	maxRows := w.mediaCfg.MaxHeightCells
+	if maxRows <= 0 {
+		maxRows = media.DefaultConfig().MaxHeightCells
+	}
+	return max(maxRows, 1)
+}
+
+func (w *ChatView) mediaVariant(state *chatMediaState, spec mediaSpec) chatMediaVariant {
+	if state == nil || state.img == nil {
+		return chatMediaVariant{cols: 1, rows: 1}
+	}
+	spec = w.normalizeMediaSpec(spec)
+	key := spec.key()
+	if state.variants != nil {
+		if variant, ok := state.variants[key]; ok {
+			return variant
+		}
+	}
+	srcW, srcH := spec.sourceW, spec.sourceH
+	if srcW <= 0 || srcH <= 0 {
+		b := state.img.Bounds()
+		srcW, srcH = b.Dx(), b.Dy()
+	}
+	if spec.square {
+		side := max(srcW, srcH)
+		if side <= 0 {
+			side = 1
+		}
+		srcW, srcH = side, side
+	}
+	cols, rows := fitMediaCells(srcW, srcH, spec.maxCols, spec.maxRows)
+	variant := chatMediaVariant{img: state.img, cols: cols, rows: rows}
+	if state.variants == nil {
+		state.variants = map[string]chatMediaVariant{}
+	}
+	state.variants[key] = variant
+	return variant
+}
+
+func (w *ChatView) normalizeMediaSpec(spec mediaSpec) mediaSpec {
+	if spec.maxCols <= 0 {
+		spec.maxCols = 1
+	}
+	if spec.maxRows <= 0 {
+		spec.maxRows = w.mediaMaxRows()
+	}
+	spec.maxRows = min(spec.maxRows, w.mediaMaxRows())
+	if spec.square {
+		spec.maxRows = min(spec.maxRows, max(spec.maxCols/2, 1))
+		spec.maxCols = min(spec.maxCols, spec.maxRows*2)
+	}
+	return spec
+}
+
+func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia, width int) {
+	if block == nil || block.img == nil {
+		return
+	}
+	cols := block.cols
+	if cols <= 0 || x+cols > width {
+		cols = max(min(width-x, block.cols), 1)
+	}
+	rows := max(block.rows, 1)
+	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url))
+	if block.placementKey != "" {
+		img.SetPlacementID(stableImageID(block.placementKey))
+	}
+	if b := block.img.Bounds(); b.Dx() > 0 && b.Dy() > 0 {
+		img.SetPixelSize(b.Dx(), b.Dy())
+	}
+	img.Draw(r.Clip(screen.Rect{X: x, Y: y, W: cols, H: rows}))
+}
+
+func stableImageID(s string) uint32 {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	id := h.Sum32()
+	if id == 0 {
+		return 1
+	}
+	return id
+}
+
 // Draw renders wrapped message lines, newest at the bottom.
 func (w *ChatView) Draw(r screen.Region) {
 	fill(r, w.styles.Text)
@@ -79,22 +268,140 @@ func (w *ChatView) Draw(r screen.Region) {
 	// Bottom-align: show the last r.Height() lines, offset by scroll.
 	start := max(len(lines)-r.Height()-w.scroll, 0)
 	end := min(start+r.Height(), len(lines))
+	w.visibleLines = append(w.visibleLines[:0], lines[start:end]...)
 	y := 0
+	drawnMedia := map[*inlineMedia]struct{}{}
 	for i := start; i < end; i++ {
-		drawChatLine(r, 0, y, lines[i])
+		line := lines[i]
+		if line.media != nil {
+			if _, ok := drawnMedia[line.media]; !ok {
+				drawnMedia[line.media] = struct{}{}
+				w.drawInlineMedia(r, 0, y-line.mediaRow, line.media, r.Width())
+			}
+			y++
+			continue
+		}
+		drawChatLine(r, 0, y, line)
+		for _, inline := range line.inlineMedia {
+			w.drawInlineMedia(r, inline.col, y, inline.media, r.Width())
+		}
 		y++
 	}
 }
 
 type chatLine struct {
-	text     string
-	style    screen.Style
-	segments []chatSegment
+	text        string
+	style       screen.Style
+	segments    []chatSegment
+	message     store.Message
+	media       *inlineMedia
+	mediaRow    int
+	inlineMedia []positionedInlineMedia
+	actions     []componentHit
 }
 
 type chatSegment struct {
 	text  string
 	style screen.Style
+}
+
+type inlineMedia struct {
+	url          string
+	label        string
+	placementKey string
+	cols         int
+	rows         int
+	img          image.Image
+}
+
+type positionedInlineMedia struct {
+	media *inlineMedia
+	col   int
+}
+
+type chatMediaState struct {
+	loading  bool
+	img      image.Image
+	err      error
+	variants map[string]chatMediaVariant
+}
+
+type chatMediaVariant struct {
+	img        image.Image
+	cols, rows int
+}
+
+type mediaSpec struct {
+	maxCols, maxRows int
+	sourceW, sourceH int
+	square           bool
+}
+
+func (s mediaSpec) key() string {
+	return strconv.Itoa(s.maxCols) + "x" + strconv.Itoa(s.maxRows) + ":" +
+		strconv.Itoa(s.sourceW) + "x" + strconv.Itoa(s.sourceH) + ":" +
+		strconv.FormatBool(s.square)
+}
+
+func fitMediaCells(srcW, srcH, maxCols, maxRows int) (cols, rows int) {
+	if srcW <= 0 {
+		srcW = 1
+	}
+	if srcH <= 0 {
+		srcH = 1
+	}
+	if maxCols <= 0 {
+		maxCols = 1
+	}
+	if maxRows <= 0 {
+		maxRows = 1
+	}
+	budgetH := maxRows * 2
+	scaleW := float64(maxCols) / float64(srcW)
+	scaleH := float64(budgetH) / float64(srcH)
+	scale := minFloat(scaleW, scaleH)
+	if scale > 1 {
+		scale = 1
+	}
+	cols = max(min(int(float64(srcW)*scale), maxCols), 1)
+	pixelsH := max(min(int(float64(srcH)*scale), budgetH), 1)
+	rows = max(min((pixelsH+1)/2, maxRows), 1)
+	return cols, rows
+}
+
+func mediaQuerySize(raw string) (width, height int, ok bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return 0, 0, false
+	}
+	q := u.Query()
+	width = queryPositiveInt(q, "width")
+	height = queryPositiveInt(q, "height")
+	if width <= 0 && height <= 0 {
+		if size := queryPositiveInt(q, "size"); size > 0 {
+			width, height = size, size
+		}
+	}
+	return width, height, width > 0 && height > 0
+}
+
+func queryPositiveInt(q url.Values, key string) int {
+	value := q.Get(key)
+	if value == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // render turns the active channel's messages into wrapped, styled lines. Each
@@ -106,6 +413,8 @@ func (w *ChatView) render(width int) []chatLine {
 	msgs := w.store.Messages(channel)
 	var lines []chatLine
 	for _, m := range msgs {
+		w.emojiKeyPrefix = messagePlacementPrefix(m)
+		w.emojiSeq = 0
 		style := w.styles.Text
 		switch {
 		case m.Failed:
@@ -125,15 +434,24 @@ func (w *ChatView) render(width int) []chatLine {
 		if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
 			authorStyle.Fg = rgbColor(color)
 		}
-		lines = append(lines, chatLine{text: header, style: authorStyle})
+		lines = append(lines, chatLine{text: header, style: authorStyle, message: m})
 		if m.Content != "" && !suppressContent(m) {
-			lines = append(lines, w.renderContent(m.Content, width, style)...)
+			lines = append(lines, stampMessage(w.renderContent(m.Content, width, style), m)...)
 		}
-		lines = append(lines, w.renderMedia(m, style)...)
-		lines = append(lines, w.renderEmbeds(m, width, style)...)
+		lines = append(lines, stampMessage(w.renderMedia(m, width, style), m)...)
+		lines = append(lines, stampMessage(w.renderEmbeds(m, width, style), m)...)
+		lines = append(lines, stampMessage(w.renderComponentTree(m, width, style), m)...)
 		if line, ok := w.renderReactions(m.Reactions); ok {
+			line.message = m
 			lines = append(lines, line)
 		}
+	}
+	return lines
+}
+
+func stampMessage(lines []chatLine, m store.Message) []chatLine {
+	for i := range lines {
+		lines[i].message = m
 	}
 	return lines
 }
@@ -153,18 +471,16 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 	}
 	var lines []chatLine
 	var line []chatSegment
+	var inline []positionedInlineMedia
 	used := 0
 	flush := func() {
-		lines = append(lines, chatLine{segments: line})
+		lines = append(lines, chatLine{segments: line, inlineMedia: inline})
 		line = nil
+		inline = nil
 		used = 0
 	}
-	for _, span := range markup.Parse(content, res) {
-		style := w.markupStyle(span.Kind, base)
-		if span.FG != 0 {
-			style.Fg = rgbColor(span.FG)
-		}
-		parts := strings.Split(span.Text, "\n")
+	appendText := func(s string, style screen.Style) {
+		parts := strings.Split(s, "\n")
 		for i, part := range parts {
 			if i > 0 {
 				flush()
@@ -181,15 +497,65 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 			}
 		}
 	}
+	for _, span := range markup.Parse(content, res) {
+		style := w.markupStyle(span, base)
+		if span.FG != 0 {
+			style.Fg = rgbColor(span.FG)
+		}
+		if span.Kind == markup.Kind_Emoji && span.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
+			const emojiCols = 2
+			if width > 0 && used > 0 && used+emojiCols > width {
+				flush()
+			}
+			emojiURL := customEmojiURL(span)
+			state := w.ensureMedia(emojiURL)
+			line = appendChatSegment(line, chatSegment{text: strings.Repeat(" ", emojiCols), style: style})
+			if state != nil && state.err == nil && state.img != nil {
+				variant := w.mediaVariant(state, mediaSpec{
+					maxCols: emojiCols,
+					maxRows: 1,
+					sourceW: 48,
+					sourceH: 48,
+					square:  true,
+				})
+				w.emojiSeq++
+				inline = append(inline, positionedInlineMedia{
+					col: used,
+					media: &inlineMedia{
+						url:          emojiURL,
+						label:        span.Text,
+						placementKey: w.emojiKeyPrefix + ":emoji:" + strconv.Itoa(w.emojiSeq) + ":" + emojiURL,
+						cols:         emojiCols,
+						rows:         1,
+						img:          variant.img,
+					},
+				})
+			}
+			used += emojiCols
+			continue
+		}
+		appendText(span.Text, style)
+	}
 	if len(line) > 0 || len(lines) == 0 {
 		flush()
 	}
 	return lines
 }
 
-func (w *ChatView) markupStyle(kind markup.Kind, base screen.Style) screen.Style {
+func customEmojiURL(span markup.Span) string {
+	ext := "webp"
+	if span.EmojiAnimated {
+		ext = "gif"
+	}
+	name := url.QueryEscape(strings.Trim(span.Text, ":"))
+	return "https://cdn.discordapp.com/emojis/" +
+		strconv.FormatUint(span.EmojiID, 10) + "." + ext +
+		"?size=48&name=" + name + "&lossless=true"
+}
+
+func (w *ChatView) markupStyle(span markup.Span, base screen.Style) screen.Style {
 	style := base
-	switch kind {
+	switch span.Kind {
 	case markup.Kind_Bold:
 		style.Attrs |= screen.Bold
 	case markup.Kind_Italic:
@@ -217,6 +583,21 @@ func (w *ChatView) markupStyle(kind markup.Kind, base screen.Style) screen.Style
 		style.Attrs |= screen.Underline
 	case markup.Kind_Timestamp:
 		style = mergeStyle(style, w.styles.Muted)
+	}
+	if span.Format&markup.FormatBold != 0 {
+		style.Attrs |= screen.Bold
+	}
+	if span.Format&markup.FormatItalic != 0 {
+		style.Attrs |= screen.Italic
+	}
+	if span.Format&markup.FormatUnderline != 0 {
+		style.Attrs |= screen.Underline
+	}
+	if span.Format&markup.FormatStrike != 0 {
+		style.Attrs |= screen.Strike
+	}
+	if span.Format&markup.FormatSpoiler != 0 {
+		style.Attrs |= screen.Reverse
 	}
 	return style
 }
@@ -264,9 +645,21 @@ func mergeStyle(base, overlay screen.Style) screen.Style {
 // Handle scrolls the chat view.
 func (w *ChatView) Handle(ev tui.Event) bool {
 	switch ev := ev.(type) {
+	case input.TickEvent:
+		return w.expireComponentFlashes(time.Now())
 	case input.KeyEvent:
 		if ev.Release {
 			return false
+		}
+		if ev.Key == input.KeyEnter || (ev.Key == input.KeyRune && ev.Rune == ' ') {
+			if w.submitActiveComponentPicker() {
+				return true
+			}
+		}
+		if shortcut, ok := componentShortcutRune(ev); ok {
+			if w.activateShortcut(shortcut) {
+				return true
+			}
 		}
 		switch ev.Key {
 		case input.KeyUp:
@@ -277,6 +670,21 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			return true
 		}
 	case input.MouseEvent:
+		if ev.Kind == input.MousePress && ev.Btn == input.ButtonLeft {
+			if w.activateAt(ev.X, ev.Y, ev.Mods&input.Shift != 0) {
+				return true
+			}
+		}
+		if ev.Kind == input.MousePress && ev.Btn == input.ButtonRight {
+			if ev.Y >= 0 && ev.Y < len(w.visibleLines) {
+				msg := w.visibleLines[ev.Y].message
+				if msg.ID != 0 {
+					w.contextMessage = msg
+					w.contextMessageSet = true
+				}
+			}
+			return false
+		}
 		if ev.Kind != input.MouseWheel {
 			return false
 		}
@@ -290,6 +698,273 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+func componentShortcutRune(ev input.KeyEvent) (rune, bool) {
+	if ev.Key != input.KeyRune {
+		return 0, false
+	}
+	switch ev.Rune {
+	case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+		return ev.Rune, true
+	case '&':
+		return '1', true
+	case 'é', 'É':
+		return '2', true
+	case '"':
+		return '3', true
+	case '\'':
+		return '4', true
+	case '(':
+		return '5', true
+	case '-':
+		return '6', true
+	case 'è', 'È':
+		return '7', true
+	case '_':
+		return '8', true
+	case 'ç', 'Ç':
+		return '9', true
+	case 'à', 'À':
+		return '0', true
+	default:
+		return 0, false
+	}
+}
+
+func (w *ChatView) activateShortcut(shortcut rune) bool {
+	for _, line := range w.visibleLines {
+		for _, hit := range line.actions {
+			if hit.action.shortcut == shortcut {
+				return w.setComponentAction(hit.action)
+			}
+		}
+	}
+	return false
+}
+
+// activateAt dispatches the component under (x, y). Shift-clicking an option of
+// a single-select flips that control into multi mode: options toggle like
+// checkboxes and the picker submits all checked values on Enter or refold.
+// Discord strips min/max_values from incoming selects (arikawa never
+// unmarshals them), so shift-click is the user's explicit multi override.
+func (w *ChatView) activateAt(x, y int, shiftMulti bool) bool {
+	if y < 0 || y >= len(w.visibleLines) {
+		return false
+	}
+	for _, hit := range w.visibleLines[y].actions {
+		if x >= hit.start && x < hit.end {
+			action := hit.action
+			if shiftMulti && action.option && !action.multi && action.kind == store.ComponentSelect {
+				w.enableComponentMulti(action)
+				action.multi = true
+			}
+			return w.setComponentAction(action)
+		}
+	}
+	return false
+}
+
+func (w *ChatView) enableComponentMulti(action componentAction) {
+	if w.multiPickers == nil {
+		w.multiPickers = map[string]bool{}
+	}
+	w.multiPickers[action.controlKey()] = true
+}
+
+func (w *ChatView) componentMultiEnabled(controlKey string) bool {
+	return w.multiPickers[controlKey]
+}
+
+func (w *ChatView) setComponentAction(action componentAction) bool {
+	if action.disabled {
+		return false
+	}
+	key := action.key()
+	if w.componentFlashes == nil {
+		w.componentFlashes = map[string]time.Time{}
+	}
+	w.componentFlashes[key] = time.Now().Add(500 * time.Millisecond)
+	if action.option {
+		w.setComponentSelection(action)
+	} else if action.expandable {
+		if w.expandedComponents == nil {
+			w.expandedComponents = map[string]bool{}
+		}
+		key := action.controlKey()
+		if w.expandedComponents[key] {
+			w.expandedComponents[key] = false
+			return w.submitComponentPicker(action)
+		}
+		w.expandedComponents[key] = true
+		w.activePicker = action
+		w.activePickerSet = true
+		return true
+	}
+	if action.option {
+		w.activePicker = action
+		w.activePickerSet = true
+		if action.multi {
+			return true
+		}
+		if w.expandedComponents != nil {
+			w.expandedComponents[action.controlKey()] = false
+		}
+		return w.submitComponentPicker(action)
+	}
+	w.componentAction = ComponentAction{
+		Shortcut: action.shortcut,
+		CustomID: action.customID,
+		Label:    action.label,
+		Kind:     action.kind,
+		RawType:  action.rawType,
+		Value:    action.value,
+		URL:      action.url,
+		Message:  action.message,
+	}
+	w.componentActionSet = true
+	return true
+}
+
+func (w *ChatView) setComponentSelection(action componentAction) {
+	if w.selectedComponents == nil {
+		w.selectedComponents = map[string]map[string]bool{}
+	}
+	key := action.controlKey()
+	if !action.multi {
+		w.selectedComponents[key] = map[string]bool{action.value: true}
+		return
+	}
+	selected := w.selectedComponents[key]
+	if selected == nil {
+		selected = componentValuesMap(action.defaults)
+		w.selectedComponents[key] = selected
+	}
+	if selected[action.value] {
+		delete(selected, action.value)
+	} else {
+		selected[action.value] = true
+	}
+}
+
+func (w *ChatView) submitActiveComponentPicker() bool {
+	if !w.activePickerSet {
+		return false
+	}
+	action := w.activePicker
+	if w.expandedComponents != nil && !w.expandedComponents[action.controlKey()] {
+		return false
+	}
+	if w.expandedComponents != nil {
+		w.expandedComponents[action.controlKey()] = false
+	}
+	return w.submitComponentPicker(action)
+}
+
+func (w *ChatView) submitComponentPicker(action componentAction) bool {
+	if action.disabled || (!action.expandable && !action.option) {
+		return false
+	}
+	multi := action.multi || w.componentMultiEnabled(action.controlKey())
+	values := w.componentSelectedValues(action)
+	label := action.label
+	if action.option && multi && action.controlLabel != "" {
+		label = action.controlLabel
+	}
+	value := action.value
+	if multi || !action.option {
+		value = ""
+		if len(values) == 1 {
+			value = values[0]
+		}
+	}
+	delete(w.multiPickers, action.controlKey())
+	w.componentAction = ComponentAction{
+		Shortcut: action.shortcut,
+		CustomID: action.customID,
+		Label:    label,
+		Kind:     action.kind,
+		RawType:  action.rawType,
+		Value:    value,
+		Values:   values,
+		URL:      action.url,
+		Message:  action.message,
+	}
+	w.componentActionSet = true
+	return true
+}
+
+func (w *ChatView) componentSelectedValues(action componentAction) []string {
+	selected, ok := w.selectedComponents[action.controlKey()]
+	if !ok {
+		selected = componentValuesMap(action.defaults)
+	}
+	var values []string
+	seen := map[string]bool{}
+	for _, opt := range action.options {
+		value := componentOptionValue(opt)
+		if selected[value] {
+			values = append(values, value)
+			seen[value] = true
+		}
+	}
+	for value := range selected {
+		if !seen[value] {
+			values = append(values, value)
+		}
+	}
+	if len(values) == 0 && action.option && action.value != "" && !action.multi {
+		values = append(values, action.value)
+	}
+	return values
+}
+
+func componentValuesMap(values []string) map[string]bool {
+	out := map[string]bool{}
+	for _, value := range values {
+		if value != "" {
+			out[value] = true
+		}
+	}
+	return out
+}
+
+func (w *ChatView) expireComponentFlashes(now time.Time) bool {
+	if len(w.componentFlashes) == 0 {
+		return false
+	}
+	changed := false
+	for key, until := range w.componentFlashes {
+		if !now.Before(until) {
+			delete(w.componentFlashes, key)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// TakeContextMessage returns the message most recently right-clicked during the
+// current event bubble. It clears the pending value so one click opens one menu.
+func (w *ChatView) TakeContextMessage() (store.Message, bool) {
+	if w == nil || !w.contextMessageSet {
+		return store.Message{}, false
+	}
+	msg := w.contextMessage
+	w.contextMessage = store.Message{}
+	w.contextMessageSet = false
+	return msg, true
+}
+
+// TakeComponentAction returns the most recent button/select activation captured
+// by mouse or numeric shortcut. Live Discord submission is handled above ChatView.
+func (w *ChatView) TakeComponentAction() (ComponentAction, bool) {
+	if w == nil || !w.componentActionSet {
+		return ComponentAction{}, false
+	}
+	action := w.componentAction
+	w.componentAction = ComponentAction{}
+	w.componentActionSet = false
+	return action, true
 }
 
 func (w *ChatView) scrollUp() {

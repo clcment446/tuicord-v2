@@ -12,6 +12,7 @@ import (
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
@@ -25,11 +26,15 @@ type MainView struct {
 	cfg    config.Config
 	styles Styles
 
-	guildList   *widget.ItemList
-	channelList *widget.ItemList
-	memberList  *widget.ItemList
-	chat        *ChatView
-	composer    *widget.TextInput
+	guildList      *widget.ItemList
+	channelList    *widget.ItemList
+	memberList     *widget.ItemList
+	chat           *ChatView
+	composerStatus *widget.Text
+	composer       *widget.TextInput
+	composerMode   composerMode
+	composerTarget store.Message
+	replyMention   bool
 
 	guildIDs   []store.GuildID
 	channelIDs []store.ChannelID
@@ -37,6 +42,14 @@ type MainView struct {
 	// Root is the composed widget passed to App.Run.
 	Root tui.Widget
 }
+
+type composerMode int
+
+const (
+	composerNormal composerMode = iota
+	composerReply
+	composerEdit
+)
 
 // NewMainView assembles the four-panel layout and wires selection callbacks.
 func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
@@ -57,6 +70,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.memberList.SetStyle(styles.Text)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	if fetcher := newChatMediaFetcher(); fetcher != nil {
+		mv.chat.SetMedia(fetcher, media.DefaultConfig(), a.Post)
+	}
+
+	mv.composerStatus = widget.NewText("")
+	mv.composerStatus.SetStyle(styles.Muted)
+	mv.composerStatus.SetWrap(false)
 
 	mv.composer = widget.NewTextInput("Message")
 	mv.composer.SetStyle(styles.Text)
@@ -71,14 +91,20 @@ func (mv *MainView) compose() tui.Widget {
 	channels := mv.titled("Channels", mv.channelList)
 	members := mv.titled("Members", mv.memberList)
 
+	composerArea := widget.Column(mv.composerStatus, mv.composer)
+	composerArea.Children()[0].Layout().Basis = 1
+	composerArea.Children()[0].Layout().Grow = 0
+	composerArea.Children()[1].Layout().Basis = 1
+	composerArea.Children()[1].Layout().Grow = 0
+
 	chatColumn := widget.Column(
 		mv.titled("Messages", mv.chat),
-		mv.titled("Composer", mv.composer),
+		mv.titled("Composer", composerArea),
 	)
 	// Chat grows, composer is a fixed 3-row box (border + one line).
 	chatColumn.Children()[0].Layout().Grow = 1
 	composerNode := chatColumn.Children()[1].Layout()
-	composerNode.Basis = 3
+	composerNode.Basis = 4
 	composerNode.Grow = 0
 
 	// chat | members split so members stays beside the messages/composer stack.
@@ -109,6 +135,14 @@ func (mv *MainView) termWidthMinusMembers() int {
 	// Split basis is the first child's width; a large value lets chat take the
 	// remainder while members keeps its configured width via its own Min.
 	return 200
+}
+
+func newChatMediaFetcher() *media.Fetcher {
+	cache, err := media.NewCache(0, "")
+	if err != nil {
+		return nil
+	}
+	return &media.Fetcher{Cache: cache}
 }
 
 // Refresh repopulates the guild and channel lists from the store. Call on the
@@ -249,8 +283,71 @@ func (mv *MainView) onSend(content string) {
 	if content == "" {
 		return
 	}
-	mv.app.Send(content)
+	switch mv.composerMode {
+	case composerReply:
+		mv.app.Reply(content, mv.composerTarget, mv.replyMention)
+		mv.CancelComposerMode()
+	case composerEdit:
+		mv.app.EditMessage(mv.composerTarget.ChannelID, mv.composerTarget.ID, content)
+		mv.CancelComposerMode()
+	default:
+		mv.app.Send(content)
+	}
 	mv.composer.SetValue("")
+}
+
+// BeginReply puts the composer into inline-reply mode.
+func (mv *MainView) BeginReply(msg store.Message, mention bool) {
+	if mv == nil {
+		return
+	}
+	mv.composerMode = composerReply
+	mv.composerTarget = msg
+	mv.replyMention = mention
+	mv.updateComposerStatus()
+}
+
+// BeginEdit puts the composer into edit mode and preloads the message content.
+func (mv *MainView) BeginEdit(msg store.Message) {
+	if mv == nil {
+		return
+	}
+	mv.composerMode = composerEdit
+	mv.composerTarget = msg
+	mv.replyMention = false
+	mv.composer.SetValue(msg.Content)
+	mv.updateComposerStatus()
+}
+
+// CancelComposerMode clears reply/edit state. It reports whether there was a
+// mode to cancel, so Shell can consume Esc only when it did useful work.
+func (mv *MainView) CancelComposerMode() bool {
+	if mv == nil || mv.composerMode == composerNormal {
+		return false
+	}
+	mv.composerMode = composerNormal
+	mv.composerTarget = store.Message{}
+	mv.replyMention = false
+	mv.updateComposerStatus()
+	return true
+}
+
+func (mv *MainView) updateComposerStatus() {
+	if mv == nil || mv.composerStatus == nil {
+		return
+	}
+	switch mv.composerMode {
+	case composerReply:
+		mode := "on"
+		if !mv.replyMention {
+			mode = "off"
+		}
+		mv.composerStatus.SetContent("replying to " + mv.composerTarget.Author + " [mention: " + mode + "]")
+	case composerEdit:
+		mv.composerStatus.SetContent("editing")
+	default:
+		mv.composerStatus.SetContent("")
+	}
 }
 
 func titled(title string, child tui.Widget) *widget.Border {

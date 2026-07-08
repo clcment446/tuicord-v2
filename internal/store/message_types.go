@@ -128,6 +128,36 @@ const (
 	ComponentLinkButton
 	// ComponentSelect is a drop-down select menu (rendered disabled in v1).
 	ComponentSelect
+	// ComponentActionRow groups interactive children horizontally.
+	ComponentActionRow
+	// ComponentContainer groups rich V2 children under an optional accent.
+	ComponentContainer
+	// ComponentSection pairs text children with a thumbnail or button accessory.
+	ComponentSection
+	// ComponentTextDisplay is rich markdown-like text inside a V2 message.
+	ComponentTextDisplay
+	// ComponentThumbnail is a compact media accessory.
+	ComponentThumbnail
+	// ComponentMediaGallery is a collection of one or more media items.
+	ComponentMediaGallery
+	// ComponentFile is a downloadable file component.
+	ComponentFile
+	// ComponentSeparator is vertical spacing and an optional divider.
+	ComponentSeparator
+	// ComponentUnknown is a component type the client does not yet understand.
+	ComponentUnknown
+	// ComponentTextInput is a text input field inside a modal-like layout.
+	ComponentTextInput
+	// ComponentLabel wraps an input with label and description text.
+	ComponentLabel
+	// ComponentFileUpload is a file picker/upload input.
+	ComponentFileUpload
+	// ComponentRadioGroup is a single-choice option list.
+	ComponentRadioGroup
+	// ComponentCheckboxGroup is a multi-choice option list.
+	ComponentCheckboxGroup
+	// ComponentCheckbox is a single boolean input.
+	ComponentCheckbox
 )
 
 // Component is a single interactive V2 message component (button, link, or
@@ -146,4 +176,77 @@ type Component struct {
 	URL string
 	// Disabled reports whether the component is non-interactive.
 	Disabled bool
+}
+
+// ComponentState tracks local UI feedback for an interactive component.
+type ComponentState int
+
+const (
+	// ComponentStateIdle is the default, ready state.
+	ComponentStateIdle ComponentState = iota
+	// ComponentStatePending means the user activated the control and is waiting
+	// for acknowledgement.
+	ComponentStatePending
+	// ComponentStateSuccess means the last activation completed successfully.
+	ComponentStateSuccess
+	// ComponentStateError means the last activation failed.
+	ComponentStateError
+)
+
+// ComponentOption is one selectable option inside a string select menu.
+type ComponentOption struct {
+	Label       string
+	Value       string
+	Description string
+	Default     bool
+}
+
+// ComponentMedia is a media or file payload referenced by a V2 component.
+type ComponentMedia struct {
+	URL         string
+	ProxyURL    string
+	Description string
+	ContentType string
+	W, H        int
+	Size        int64
+	Spoiler     bool
+	Name        string
+}
+
+// ComponentNode is a normalized hierarchical Discord component. It supports
+// Components V2 layouts while still representing legacy action rows.
+type ComponentNode struct {
+	Kind ComponentKind
+	// RawType keeps the Discord component type number for unknown/fallback
+	// rendering and debugging.
+	RawType int
+	// ID is the optional numeric component ID used by Components V2.
+	ID int
+
+	CustomID    string
+	Label       string
+	Description string
+	Content     string
+	Placeholder string
+	Style       int
+	URL         string
+	Disabled    bool
+	State       ComponentState
+	InputField  bool
+	Required    bool
+	Value       string
+	Values      []string
+	MinValues   int
+	MaxValues   int
+
+	AccentColor uint32
+	Spoiler     bool
+	Divider     bool
+	Spacing     int
+
+	Options []ComponentOption
+	Media   []ComponentMedia
+
+	Children  []ComponentNode
+	Accessory *ComponentNode
 }

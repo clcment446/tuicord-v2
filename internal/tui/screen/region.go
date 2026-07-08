@@ -51,6 +51,21 @@ func (r Region) Fill(rect Rect, c Cell) {
 	r.buf.Fill(intersect(rect, r.clip), c)
 }
 
+// Clip returns a child region rooted at rect in this region's local coordinate
+// space and clipped to the current visible area.
+func (r Region) Clip(rect Rect) Region {
+	if r.buf == nil {
+		return Region{}
+	}
+	rect.X += r.origin.X
+	rect.Y += r.origin.Y
+	return Region{
+		buf:    r.buf,
+		origin: rect,
+		clip:   intersect(rect, r.clip),
+	}
+}
+
 // AddGraphic attaches terminal protocol output to this region. Graphic.Rect is
 // interpreted in region-local coordinates; an empty Rect uses the whole region.
 func (r Region) AddGraphic(g Graphic) {

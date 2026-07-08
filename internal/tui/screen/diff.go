@@ -45,10 +45,15 @@ func Frame(prev, next *Buffer, sync bool) []byte {
 // cells.
 func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
 	prevByKey := graphicMap(prev)
+	prevPayloads := graphicPayloadSet(prev)
 	nextGraphics := next.Graphics()
 	nextByKey := make(map[string]Graphic, len(nextGraphics))
+	nextPayloads := make(map[string]struct{}, len(nextGraphics))
 	for _, g := range nextGraphics {
 		nextByKey[g.Key] = g
+		if g.PayloadKey != "" {
+			nextPayloads[g.PayloadKey] = struct{}{}
+		}
 	}
 
 	for key, old := range prevByKey {
@@ -58,14 +63,22 @@ func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
 		}
 		if !ok || old.PayloadKey != next.PayloadKey {
 			clears = append(clears, old.Clear...)
-			clears = append(clears, old.Free...)
+			if _, stillUsed := nextPayloads[old.PayloadKey]; !stillUsed {
+				clears = append(clears, old.Free...)
+			}
 		}
 	}
+	uploaded := map[string]struct{}{}
 	for _, g := range nextGraphics {
 		if old, ok := prevByKey[g.Key]; ok && equalGraphic(old, g) {
 			continue
 		}
-		if old, ok := prevByKey[g.Key]; !ok || old.PayloadKey != g.PayloadKey {
+		if _, alreadyPresent := prevPayloads[g.PayloadKey]; !alreadyPresent {
+			if _, alreadyUploaded := uploaded[g.PayloadKey]; !alreadyUploaded {
+				graphics = append(graphics, g.Upload...)
+				uploaded[g.PayloadKey] = struct{}{}
+			}
+		} else if old, ok := prevByKey[g.Key]; ok && old.PayloadKey != g.PayloadKey {
 			graphics = append(graphics, g.Upload...)
 		}
 		graphics = append(graphics, g.Data...)
@@ -131,6 +144,17 @@ func graphicMap(buf *Buffer) map[string]Graphic {
 	out := make(map[string]Graphic, len(graphics))
 	for _, g := range graphics {
 		out[g.Key] = g
+	}
+	return out
+}
+
+func graphicPayloadSet(buf *Buffer) map[string]struct{} {
+	graphics := buf.Graphics()
+	out := make(map[string]struct{}, len(graphics))
+	for _, g := range graphics {
+		if g.PayloadKey != "" {
+			out[g.PayloadKey] = struct{}{}
+		}
 	}
 	return out
 }

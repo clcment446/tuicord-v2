@@ -2,6 +2,7 @@ package widget
 
 import (
 	"bytes"
+	"encoding/base64"
 	"image"
 	"image/color"
 	"testing"
@@ -123,6 +124,98 @@ func TestImageDrawRegistersKittyGraphic(t *testing.T) {
 	}
 }
 
+func TestImageKittyDoesNotDrawFallbackUnderTransparentPixels(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	img.SetRGBA(1, 1, color.RGBA{R: 255, G: 0, B: 0, A: 255})
+	w := NewKittyImageFrom(img)
+	w.SetID(15)
+
+	buf := screen.NewBuffer(4, 2)
+	w.Draw(buf.Clip(buf.Bounds()))
+
+	for y := 0; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			if got := buf.Cell(x, y).Content; got != " " {
+				t.Fatalf("fallback cell %d,%d = %q, want blank under kitty image", x, y, got)
+			}
+		}
+	}
+	if graphics := buf.Graphics(); len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1 kitty placement", len(graphics))
+	}
+}
+
+func TestKittyUploadUsesStraightAlpha(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 1, 1))
+	img.SetRGBA(0, 0, color.RGBA{R: 128, G: 0, B: 0, A: 128})
+
+	upload, err := kittyUpload(img, 1, 1, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := kittyPayload(t, upload)
+	if got, want := payload, []byte{255, 0, 0, 128}; !bytes.Equal(got, want) {
+		t.Fatalf("payload = %v, want straight-alpha %v", got, want)
+	}
+}
+
+func TestImageDrawClipsKittyGraphicWithoutSquashing(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 6))
+	w := NewKittyImageFrom(img)
+	w.SetID(13)
+
+	buf := screen.NewBuffer(4, 2)
+	w.Draw(buf.ClipWithin(
+		screen.Rect{X: 0, Y: -1, W: 4, H: 3},
+		screen.Rect{X: 0, Y: 0, W: 4, H: 2},
+	))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1", len(graphics))
+	}
+	g := graphics[0]
+	for _, want := range [][]byte{
+		[]byte("s=4"),
+		[]byte("v=6"),
+	} {
+		if !bytes.Contains(g.Upload, want) {
+			t.Fatalf("kitty upload missing full-size %q: %q", string(want), string(g.Upload))
+		}
+	}
+	for _, want := range [][]byte{
+		[]byte("\x1b[1;1H"),
+		[]byte("x=0,y=2,w=4,h=4"),
+		[]byte("c=4"),
+		[]byte("r=2"),
+	} {
+		if !bytes.Contains(g.Data, want) {
+			t.Fatalf("kitty placement missing clipped source %q: %q", string(want), string(g.Data))
+		}
+	}
+	if g.Rect != (screen.Rect{X: 0, Y: 0, W: 4, H: 2}) {
+		t.Fatalf("graphic rect = %+v, want visible clip", g.Rect)
+	}
+}
+
+func kittyPayload(t *testing.T, upload []byte) []byte {
+	t.Helper()
+	start := bytes.IndexByte(upload, ';')
+	if start < 0 {
+		t.Fatalf("upload missing payload separator: %q", string(upload))
+	}
+	end := bytes.Index(upload[start+1:], []byte("\x1b\\"))
+	if end < 0 {
+		t.Fatalf("upload missing terminator: %q", string(upload))
+	}
+	raw := upload[start+1 : start+1+end]
+	payload, err := base64.StdEncoding.DecodeString(string(raw))
+	if err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	return payload
+}
+
 func TestImageFrameMovesKittyGraphicWithoutReuploading(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 2, 2))
 	w := NewKittyImageFrom(img)
@@ -142,6 +235,28 @@ func TestImageFrameMovesKittyGraphicWithoutReuploading(t *testing.T) {
 	}
 	if !bytes.Contains(frame, []byte("\x1b[2;3H")) || !bytes.Contains(frame, []byte("a=p")) {
 		t.Fatalf("move frame missing placement: %q", string(frame))
+	}
+}
+
+func TestImageFrameScrollsKittyGraphicWithoutReuploading(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 6))
+	w := NewKittyImageFrom(img)
+	w.SetID(14)
+
+	prev := screen.NewBuffer(4, 3)
+	w.Draw(prev.Clip(screen.Rect{X: 0, Y: 0, W: 4, H: 3}))
+	next := screen.NewBuffer(4, 2)
+	w.Draw(next.ClipWithin(
+		screen.Rect{X: 0, Y: -1, W: 4, H: 3},
+		screen.Rect{X: 0, Y: 0, W: 4, H: 2},
+	))
+
+	frame := screen.Frame(prev, next, false)
+	if bytes.Contains(frame, []byte("a=t")) {
+		t.Fatalf("scroll frame reuploaded image: %q", string(frame))
+	}
+	if !bytes.Contains(frame, []byte("x=0,y=2,w=4,h=4")) {
+		t.Fatalf("scroll frame missing source crop: %q", string(frame))
 	}
 }
 

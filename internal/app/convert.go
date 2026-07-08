@@ -2,6 +2,7 @@ package app
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"awesomeProject/internal/store"
@@ -58,18 +59,25 @@ func dmName(recipients []discord.User) string {
 // rich content: attachments, embeds, stickers, reactions, and V2 components.
 func convertMessage(m discord.Message) store.Message {
 	return store.Message{
-		ID:          store.MessageID(m.ID),
-		ChannelID:   store.ChannelID(m.ChannelID),
-		AuthorID:    store.UserID(m.Author.ID),
-		Author:      m.Author.DisplayOrUsername(),
-		Content:     m.Content,
-		Timestamp:   m.Timestamp.Time(),
-		Nonce:       m.Nonce,
-		Attachments: convertAttachments(m.Attachments),
-		Embeds:      convertEmbeds(m.Embeds),
-		Stickers:    convertStickers(m.Stickers),
-		Reactions:   convertReactions(m.Reactions),
-		Components:  convertComponents(m.Components),
+		ID:            store.MessageID(m.ID),
+		ChannelID:     store.ChannelID(m.ChannelID),
+		AuthorID:      store.UserID(m.Author.ID),
+		ApplicationID: uint64(m.ApplicationID),
+		Author:        m.Author.DisplayOrUsername(),
+		Content:       m.Content,
+		Timestamp:     m.Timestamp.Time(),
+		Nonce:         m.Nonce,
+		Flags:         uint64(m.Flags),
+		Attachments:   convertAttachments(m.Attachments),
+		Embeds:        convertEmbeds(m.Embeds),
+		Stickers:      convertStickers(m.Stickers),
+		Reactions:     convertReactions(m.Reactions),
+		Components:    convertComponents(m.Components),
+		ComponentTree: convertComponentTree(
+			m.Components,
+			uint64(m.Flags)&uint64(discord.IsComponentsV2) != 0,
+		),
+		Pinned: m.Pinned,
 	}
 }
 
@@ -248,6 +256,207 @@ func convertComponent(c discord.Component) (store.Component, bool) {
 	}
 }
 
+func convertComponentTree(rows discord.TopLevelComponents, v2 bool) []store.ComponentNode {
+	if len(rows) == 0 {
+		return nil
+	}
+	out := make([]store.ComponentNode, 0, len(rows))
+	for _, row := range rows {
+		node, ok := convertComponentNode(row)
+		if !ok {
+			continue
+		}
+		if !v2 && node.Kind == store.ComponentActionRow {
+			out = append(out, node)
+			continue
+		}
+		out = append(out, node)
+	}
+	return out
+}
+
+func convertComponentNode(c discord.Component) (store.ComponentNode, bool) {
+	if c == nil {
+		return store.ComponentNode{}, false
+	}
+	node := store.ComponentNode{RawType: int(c.Type())}
+	switch v := c.(type) {
+	case *discord.ActionRowComponent:
+		node.Kind = store.ComponentActionRow
+		for _, child := range *v {
+			if converted, ok := convertComponentNode(child); ok {
+				node.Children = append(node.Children, converted)
+			}
+		}
+	case *discord.ButtonComponent:
+		style, url := buttonStyleURL(v)
+		node.Kind = store.ComponentButton
+		node.Label = v.Label
+		node.CustomID = string(v.CustomID)
+		node.Style = style
+		node.URL = url
+		node.Disabled = v.Disabled
+		if url != "" {
+			node.Kind = store.ComponentLinkButton
+		}
+	case *discord.StringSelectComponent:
+		node = convertSelectNode(node, string(v.CustomID), v.Placeholder, v.ValueLimits, v.Disabled)
+		for _, opt := range v.Options {
+			node.Options = append(node.Options, store.ComponentOption{
+				Label:       opt.Label,
+				Value:       opt.Value,
+				Description: opt.Description,
+				Default:     opt.Default,
+			})
+		}
+	case *discord.UserSelectComponent:
+		node = convertSelectNode(node, string(v.CustomID), v.Placeholder, v.ValueLimits, v.Disabled)
+	case *discord.RoleSelectComponent:
+		node = convertSelectNode(node, string(v.CustomID), v.Placeholder, v.ValueLimits, v.Disabled)
+	case *discord.MentionableSelectComponent:
+		node = convertSelectNode(node, string(v.CustomID), v.Placeholder, v.ValueLimits, v.Disabled)
+	case *discord.ChannelSelectComponent:
+		node = convertSelectNode(node, string(v.CustomID), v.Placeholder, v.ValueLimits, v.Disabled)
+	case *discord.TextInputComponent:
+		node.Kind = store.ComponentTextInput
+		node.CustomID = string(v.CustomID)
+		node.Label = v.Label
+		node.Placeholder = v.Placeholder
+		node.Value = v.Value
+		node.Required = v.Required
+		node.InputField = true
+		node.MinValues = v.LengthLimits[0]
+		node.MaxValues = v.LengthLimits[1]
+	case *discord.ContainerComponent:
+		node.Kind = store.ComponentContainer
+		node.AccentColor = discordColor(v.AccentColor)
+		node.Spoiler = v.Spoiler
+		for _, child := range v.Components {
+			if converted, ok := convertComponentNode(child); ok {
+				node.Children = append(node.Children, converted)
+			}
+		}
+	case *discord.SectionComponent:
+		node.Kind = store.ComponentSection
+		for _, child := range v.Components {
+			if converted, ok := convertComponentNode(child); ok {
+				node.Children = append(node.Children, converted)
+			}
+		}
+		if accessory, ok := convertComponentNode(v.Accessory); ok {
+			node.Accessory = &accessory
+		}
+	case *discord.TextDisplayComponent:
+		node.Kind = store.ComponentTextDisplay
+		node.Content = v.Content
+	case *discord.ThumbnailComponent:
+		node.Kind = store.ComponentThumbnail
+		node.Media = []store.ComponentMedia{convertUnfurledMedia(v.Media, v.Description, v.Spoiler)}
+	case *discord.MediaGalleryComponent:
+		node.Kind = store.ComponentMediaGallery
+		for _, item := range v.Items {
+			node.Media = append(node.Media, convertUnfurledMedia(item.Media, item.Description, item.Spoiler))
+		}
+	case *discord.FileComponent:
+		node.Kind = store.ComponentFile
+		media := convertUnfurledMedia(v.File, "", v.Spoiler)
+		media.Name = v.Name
+		media.Size = int64(v.Size)
+		node.Media = []store.ComponentMedia{media}
+	case *discord.SeparatorComponent:
+		node.Kind = store.ComponentSeparator
+		node.Divider = v.Divider
+		node.Spacing = int(v.Spacing)
+	case *discord.LabelComponent:
+		node.Kind = store.ComponentLabel
+		node.Label = v.Label
+		node.Description = v.Description
+		if child, ok := convertComponentNode(v.Component); ok {
+			node.Children = []store.ComponentNode{child}
+			if child.InputField {
+				node.InputField = true
+			}
+		}
+	case *discord.FileUploadComponent:
+		node.Kind = store.ComponentFileUpload
+		node.CustomID = string(v.CustomID)
+		node.InputField = true
+		node.Required = v.Required
+		node.MinValues = v.ValueLimits[0]
+		node.MaxValues = v.ValueLimits[1]
+		for _, value := range v.Values {
+			node.Values = append(node.Values, value.String())
+		}
+	case *discord.RadioGroupComponent:
+		node.Kind = store.ComponentRadioGroup
+		node.CustomID = string(v.CustomID)
+		node.InputField = true
+		node.Required = v.Required
+		node.Value = v.Value
+		for _, opt := range v.Options {
+			node.Options = append(node.Options, store.ComponentOption{
+				Label:       opt.Label,
+				Value:       opt.Value,
+				Description: opt.Description,
+				Default:     opt.Default,
+			})
+		}
+	case *discord.CheckboxGroupComponent:
+		node.Kind = store.ComponentCheckboxGroup
+		node.CustomID = string(v.CustomID)
+		node.InputField = true
+		node.Required = v.Required
+		node.Values = append(node.Values, v.Values...)
+		node.MinValues = v.ValueLimits[0]
+		node.MaxValues = v.ValueLimits[1]
+		for _, opt := range v.Options {
+			node.Options = append(node.Options, store.ComponentOption{
+				Label:       opt.Label,
+				Value:       opt.Value,
+				Description: opt.Description,
+				Default:     opt.Default,
+			})
+		}
+	case *discord.CheckboxComponent:
+		node.Kind = store.ComponentCheckbox
+		node.CustomID = string(v.CustomID)
+		node.InputField = true
+		node.Required = true
+		node.Value = fmt.Sprintf("%t", v.Value || v.Default)
+	default:
+		node.Kind = store.ComponentUnknown
+	}
+	return node, true
+}
+
+func convertSelectNode(node store.ComponentNode, customID, placeholder string, limits [2]int, disabled bool) store.ComponentNode {
+	node.Kind = store.ComponentSelect
+	node.CustomID = customID
+	node.Placeholder = placeholder
+	node.Disabled = disabled
+	node.InputField = true
+	node.MinValues = limits[0]
+	node.MaxValues = limits[1]
+	return node
+}
+
+func convertUnfurledMedia(in discord.UnfurledMediaitem, description string, spoiler bool) store.ComponentMedia {
+	return store.ComponentMedia{
+		URL:         in.URL,
+		ProxyURL:    in.ProxyURL,
+		Description: description,
+		ContentType: in.ContentType,
+		W:           in.Width,
+		H:           in.Height,
+		Spoiler:     spoiler,
+	}
+}
+
+func discordColor(c discord.Color) uint32 {
+	red, green, blue := c.RGB()
+	return uint32(red)<<16 | uint32(green)<<8 | uint32(blue)
+}
+
 // buttonStyleURL extracts a button's style number and (for link buttons) its URL.
 // arikawa hides both inside an unexported style type, so we round-trip through
 // JSON — the marshaled form exposes "style" and "url".
@@ -300,12 +509,17 @@ func convertRole(r discord.Role) store.Role {
 		Color:       color,
 		Hoist:       r.Hoist,
 		Mentionable: r.Mentionable,
+		Permissions: store.Permission(r.Permissions),
 	}
 }
 
 // ingestGuild writes a guild and its channels/members into the store.
 func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
-	s.UpsertGuild(store.Guild{ID: store.GuildID(g.ID), Name: g.Name})
+	s.UpsertGuild(store.Guild{
+		ID:      store.GuildID(g.ID),
+		Name:    g.Name,
+		OwnerID: store.UserID(g.OwnerID),
+	})
 	for _, r := range g.Roles {
 		s.UpsertRole(store.GuildID(g.ID), convertRole(r))
 	}

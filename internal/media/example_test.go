@@ -67,6 +67,6 @@ func ExampleDefaultConfig() {
 	// enabled: true
 	// max_height_cells: 12
 	// animate: true
-	// emoji_images: false
+	// emoji_images: true
 	// video_player: xdg-open
 }

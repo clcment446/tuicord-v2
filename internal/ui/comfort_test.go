@@ -90,6 +90,28 @@ func TestShellTogglesOverlays(t *testing.T) {
 	}
 }
 
+func TestShellPopupRendersOverMainView(t *testing.T) {
+	menu := widget.NewMenu([]widget.MenuItem{{Label: "Reply"}})
+	menu.SetAnchor(12, 1)
+	sh := &Shell{
+		cfg:   config.Default(),
+		mv:    &MainView{Root: widget.NewText("main view remains")},
+		popup: menu,
+	}
+	menu.OnDismiss(sh.closePopup)
+
+	buf := tui.New().Render(sh, tui.Size{W: 40, H: 6})
+	if !bufferContains(buf, "main view remains") {
+		t.Fatal("popup replaced the main view instead of drawing over it")
+	}
+	if !bufferContains(buf, "Reply") {
+		t.Fatal("popup menu was not rendered")
+	}
+	if !sh.Handle(input.KeyEvent{Key: input.KeyEsc}) || sh.popup != nil {
+		t.Fatal("Esc did not dismiss popup menu")
+	}
+}
+
 func TestToastExpandsAndDismisses(t *testing.T) {
 	sh := &Shell{
 		cfg:   config.Default(),

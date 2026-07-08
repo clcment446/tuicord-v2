@@ -114,3 +114,62 @@ func TestFrameFreesRemovedGraphics(t *testing.T) {
 		t.Fatalf("Frame() = %q, want %q", got, want)
 	}
 }
+
+func TestFrameUploadsSharedGraphicPayloadOnce(t *testing.T) {
+	next := NewBuffer(2, 1)
+	next.AddGraphic(Graphic{
+		Key:        "image:1:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{W: 1, H: 1},
+		Upload:     []byte("<upload>"),
+		Data:       []byte("<one>"),
+	})
+	next.AddGraphic(Graphic{
+		Key:        "image:1:2",
+		PayloadKey: "payload:1",
+		Rect:       Rect{X: 1, W: 1, H: 1},
+		Upload:     []byte("<upload>"),
+		Data:       []byte("<two>"),
+	})
+
+	got := string(Frame(nil, next, false))
+	want := "\x1b[1;1H\x1b[0m  \x1b[0m<upload><one><two>"
+	if got != want {
+		t.Fatalf("Frame() = %q, want %q", got, want)
+	}
+}
+
+func TestFrameDoesNotFreeSharedGraphicPayloadStillInUse(t *testing.T) {
+	prev := NewBuffer(2, 1)
+	prev.AddGraphic(Graphic{
+		Key:        "image:1:1",
+		PayloadKey: "payload:1",
+		Rect:       Rect{W: 1, H: 1},
+		Clear:      []byte("<clear-one>"),
+		Free:       []byte("<free>"),
+		Data:       []byte("<old-one>"),
+	})
+	prev.AddGraphic(Graphic{
+		Key:        "image:1:2",
+		PayloadKey: "payload:1",
+		Rect:       Rect{X: 1, W: 1, H: 1},
+		Clear:      []byte("<clear-two>"),
+		Free:       []byte("<free>"),
+		Data:       []byte("<old-two>"),
+	})
+	next := NewBuffer(2, 1)
+	next.AddGraphic(Graphic{
+		Key:        "image:1:2",
+		PayloadKey: "payload:1",
+		Rect:       Rect{X: 1, W: 1, H: 1},
+		Clear:      []byte("<clear-two>"),
+		Free:       []byte("<free>"),
+		Data:       []byte("<old-two>"),
+	})
+
+	got := string(Frame(prev, next, false))
+	want := "<clear-one>"
+	if got != want {
+		t.Fatalf("Frame() = %q, want %q", got, want)
+	}
+}

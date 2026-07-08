@@ -30,6 +30,7 @@ type ItemList struct {
 	badgeStyle    screen.Style
 	onSelect      func(int)
 	node          layout.Node
+	viewH         int
 }
 
 // NewItemList returns a list containing items.
@@ -171,6 +172,7 @@ func (w *ItemList) Draw(r screen.Region) {
 		return
 	}
 	clear(r, w.style)
+	w.viewH = r.Height()
 	w.ensureSelectedVisible(r.Height())
 	for y := 0; y < r.Height(); y++ {
 		index := w.offset + y
@@ -269,6 +271,27 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+// ScrollExtent implements ScrollModel: the first visible row, the height drawn
+// last frame, and the row count.
+func (w *ItemList) ScrollExtent() (offset, viewport, content int) {
+	if w == nil {
+		return 0, 0, 0
+	}
+	return w.offset, w.viewH, len(w.items)
+}
+
+// ScrollTo implements ScrollModel by moving the first visible row. Selection
+// follows into the visible window (silently) so the next Draw does not snap
+// the list back to the selected row.
+func (w *ItemList) ScrollTo(offset int) {
+	if w == nil || len(w.items) == 0 {
+		return
+	}
+	height := maxInt(w.viewH, 1)
+	w.offset = clampInt(offset, 0, maxInt(len(w.items)-height, 0))
+	w.setSelected(clampInt(w.selected, w.offset, w.offset+height-1), false)
 }
 
 func (w *ItemList) ensureSelectedVisible(height int) {

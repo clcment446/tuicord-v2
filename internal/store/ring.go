@@ -84,6 +84,25 @@ func (r *ring) updateByID(id MessageID, patch func(*Message)) bool {
 	return false
 }
 
+func (r *ring) removeByID(id MessageID) bool {
+	i, ok := r.indexByID(id)
+	if !ok {
+		return false
+	}
+	for n := 0; n < r.size-1; n++ {
+		from := (i + 1 + n) % len(r.buf)
+		to := (i + n) % len(r.buf)
+		r.buf[to] = r.buf[from]
+	}
+	last := (r.start + r.size - 1) % len(r.buf)
+	r.buf[last] = Message{}
+	r.size--
+	if r.size == 0 {
+		r.start = 0
+	}
+	return true
+}
+
 // addReaction merges react into the message with id. If a matching entry
 // (same EmojiName and EmojiID) already exists its Count is incremented and Me
 // is set when react.Me is true; otherwise react is appended as a new entry.

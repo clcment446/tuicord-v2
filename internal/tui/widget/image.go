@@ -45,6 +45,7 @@ type Image struct {
 	img         image.Image
 	mode        ImageMode
 	id          uint32
+	placementID uint32
 	pixelWidth  int
 	pixelHeight int
 	z           int
@@ -72,6 +73,10 @@ type KittyOptions struct {
 	// PixelWidth and PixelHeight are the transmitted image size in pixels. When
 	// omitted, the source image dimensions are used.
 	PixelWidth, PixelHeight int
+	// SourceX, SourceY, SourceWidth, and SourceHeight select the source
+	// rectangle, in transmitted-image pixels, used for placement. Zero
+	// SourceWidth or SourceHeight displays the whole transmitted image.
+	SourceX, SourceY, SourceWidth, SourceHeight int
 	// CellWidth and CellHeight are the terminal-cell area used for placement.
 	// When omitted, PixelWidth and PixelHeight are used for compatibility with
 	// ANSI.
@@ -79,6 +84,9 @@ type KittyOptions struct {
 	// X and Y are zero-based terminal-cell coordinates used when MoveCursor is
 	// true. Kitty places images at the current cursor.
 	X, Y int
+	// PlacementID identifies this on-screen placement. When zero, the image ID
+	// is used. Multiple placements can share one uploaded image ID.
+	PlacementID uint32
 	// MoveCursor emits a cursor movement before the placement.
 	MoveCursor bool
 	// Z sets the Kitty z-index. Zero is Kitty's default plane.
@@ -127,6 +135,16 @@ func (w *Image) SetID(id uint32) *Image {
 		return nil
 	}
 	w.id = id
+	return w
+}
+
+// SetPlacementID sets the stable terminal placement ID used by Kitty mode. When
+// unset, the image ID is also used as the placement ID.
+func (w *Image) SetPlacementID(id uint32) *Image {
+	if w == nil {
+		return nil
+	}
+	w.placementID = id
 	return w
 }
 
@@ -213,8 +231,11 @@ func (w *Image) Draw(r screen.Region) {
 		drawASCIIImage(r, img, w.style)
 		return
 	}
+	if w.mode == ImageKitty || w.mode == ImageSixel {
+		w.drawTerminalGraphic(r, img)
+		return
+	}
 	drawUnicodeImage(r, img)
-	w.drawTerminalGraphic(r, img)
 }
 
 // Handle ignores input events and reports them unconsumed.
@@ -273,35 +294,50 @@ func (w *Image) drawTerminalGraphic(r screen.Region, img image.Image) {
 	if visible.W <= 0 || visible.H <= 0 {
 		return
 	}
+	bounds := r.Bounds()
+	fullCellsW := maxInt(bounds.W, 1)
+	fullCellsH := maxInt(bounds.H, 1)
+	fullPixelW := w.terminalPixelWidth(img, fullCellsW)
+	fullPixelH := w.terminalPixelHeight(img, fullCellsH)
+	sourceX0 := (visible.X - bounds.X) * fullPixelW / fullCellsW
+	sourceY0 := (visible.Y - bounds.Y) * fullPixelH / fullCellsH
+	sourceX1 := (visible.X - bounds.X + visible.W) * fullPixelW / fullCellsW
+	sourceY1 := (visible.Y - bounds.Y + visible.H) * fullPixelH / fullCellsH
+	sourceW := maxInt(sourceX1-sourceX0, 1)
+	sourceH := maxInt(sourceY1-sourceY0, 1)
 	switch w.mode {
 	case ImageKitty:
-		width := w.terminalPixelWidth(visible.W)
-		height := w.terminalPixelHeight(visible.H)
-		payloadKey, upload, err := w.kittyUpload(img, width, height)
+		payloadKey, upload, err := w.kittyUpload(img, fullPixelW, fullPixelH)
 		if err != nil {
 			w.err = err
 			return
 		}
 		placement := kittyPlace(KittyOptions{
-			CellWidth:  visible.W,
-			CellHeight: visible.H,
-			X:          visible.X,
-			Y:          visible.Y,
-			MoveCursor: true,
-			Z:          w.z,
+			SourceX:      sourceX0,
+			SourceY:      sourceY0,
+			SourceWidth:  sourceW,
+			SourceHeight: sourceH,
+			CellWidth:    visible.W,
+			CellHeight:   visible.H,
+			X:            visible.X,
+			Y:            visible.Y,
+			PlacementID:  w.effectivePlacementID(),
+			MoveCursor:   true,
+			Z:            w.z,
 		}, w.id)
 		r.AddGraphic(screen.Graphic{
 			Key:        w.graphicKey("kitty"),
 			PayloadKey: payloadKey,
-			Clear:      kittyDeletePlacement(w.id),
+			Clear:      kittyDeletePlacement(w.id, w.effectivePlacementID()),
 			Free:       kittyDeleteImage(w.id),
 			Upload:     upload,
 			Data:       placement,
 		})
 	case ImageSixel:
-		width := w.terminalPixelWidth(visible.W)
-		height := w.terminalPixelHeight(visible.H)
-		ansi := append(cursorMove(visible.X, visible.Y), sixelImage(img, width, height)...)
+		cropped := cropImage(img, sourceX0, sourceY0, sourceW, sourceH, fullPixelW, fullPixelH)
+		width := maxInt(sourceW, 1)
+		height := maxInt(sourceH, 1)
+		ansi := append(cursorMove(visible.X, visible.Y), sixelImage(cropped, width, height)...)
 		r.AddGraphic(screen.Graphic{
 			Key:  w.graphicKey("sixel"),
 			Data: ansi,
@@ -309,25 +345,48 @@ func (w *Image) drawTerminalGraphic(r screen.Region, img image.Image) {
 	}
 }
 
-func (w *Image) terminalPixelWidth(cells int) int {
+func (w *Image) terminalPixelWidth(img image.Image, cells int) int {
 	if w.pixelWidth > 0 {
 		return w.pixelWidth
+	}
+	if img != nil {
+		if width := img.Bounds().Dx(); width > 0 {
+			return width
+		}
 	}
 	return maxInt(cells*18, 1)
 }
 
-func (w *Image) terminalPixelHeight(cells int) int {
+func (w *Image) terminalPixelHeight(img image.Image, cells int) int {
 	if w.pixelHeight > 0 {
 		return w.pixelHeight
+	}
+	if img != nil {
+		if height := img.Bounds().Dy(); height > 0 {
+			return height
+		}
 	}
 	return maxInt(cells*36, 1)
 }
 
 func (w *Image) graphicKey(protocol string) string {
 	if w.id != 0 {
+		if placementID := w.effectivePlacementID(); placementID != w.id {
+			return fmt.Sprintf("%s:%d:%d", protocol, w.id, placementID)
+		}
 		return fmt.Sprintf("%s:%d", protocol, w.id)
 	}
 	return fmt.Sprintf("%s:%p", protocol, w)
+}
+
+func (w *Image) effectivePlacementID() uint32 {
+	if w == nil {
+		return 0
+	}
+	if w.placementID != 0 {
+		return w.placementID
+	}
+	return w.id
 }
 
 func (w *Image) kittyUpload(img image.Image, width, height int) (string, []byte, error) {
@@ -442,9 +501,9 @@ func kittyUpload(img image.Image, width, height int, id uint32) ([]byte, error) 
 		height = b.Dy()
 	}
 
-	scaled := scaleRGBA(img, width, height)
+	scaled := scaleNRGBA(img, width, height)
 	if b.Dx() == width && b.Dy() == height {
-		scaled = tightRGBA(img)
+		scaled = tightNRGBA(img)
 	}
 	payload := base64.StdEncoding.EncodeToString(scaled.Pix)
 	var out strings.Builder
@@ -464,6 +523,10 @@ func kittyUpload(img image.Image, width, height int, id uint32) ([]byte, error) 
 }
 
 func kittyPlace(opts KittyOptions, id uint32) []byte {
+	placementID := opts.PlacementID
+	if placementID == 0 {
+		placementID = id
+	}
 	cellWidth := opts.CellWidth
 	cellHeight := opts.CellHeight
 	if cellWidth <= 0 {
@@ -479,15 +542,22 @@ func kittyPlace(opts KittyOptions, id uint32) []byte {
 	if opts.MoveCursor {
 		fmt.Fprintf(&out, "\x1b[%d;%dH", maxInt(opts.Y, 0)+1, maxInt(opts.X, 0)+1)
 	}
-	fmt.Fprintf(&out, "\x1b_Ga=p,q=2,i=%d,p=%d,c=%d,r=%d,z=%d\x1b\\", id, id, cellWidth, cellHeight, opts.Z)
+	fmt.Fprintf(&out, "\x1b_Ga=p,q=2,i=%d,p=%d", id, placementID)
+	if opts.SourceWidth > 0 && opts.SourceHeight > 0 {
+		fmt.Fprintf(&out, ",x=%d,y=%d,w=%d,h=%d", maxInt(opts.SourceX, 0), maxInt(opts.SourceY, 0), opts.SourceWidth, opts.SourceHeight)
+	}
+	fmt.Fprintf(&out, ",c=%d,r=%d,z=%d\x1b\\", cellWidth, cellHeight, opts.Z)
 	return []byte(out.String())
 }
 
-func kittyDeletePlacement(id uint32) []byte {
+func kittyDeletePlacement(id, placementID uint32) []byte {
 	if id == 0 {
 		return nil
 	}
-	return []byte(fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,p=%d\x1b\\", id, id))
+	if placementID == 0 {
+		placementID = id
+	}
+	return []byte(fmt.Sprintf("\x1b_Ga=d,d=i,i=%d,p=%d\x1b\\", id, placementID))
 }
 
 func kittyDeleteImage(id uint32) []byte {
@@ -593,6 +663,59 @@ func scaleRGBA(img image.Image, width, height int) *image.RGBA {
 	return out
 }
 
+func scaleNRGBA(img image.Image, width, height int) *image.NRGBA {
+	out := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			out.SetNRGBA(x, y, sampleNRGBA(img, x, y, width, height))
+		}
+	}
+	return out
+}
+
+func sampleNRGBA(img image.Image, x, y, w, h int) color.NRGBA {
+	b := img.Bounds()
+	if w <= 0 {
+		w = 1
+	}
+	if h <= 0 {
+		h = 1
+	}
+	px := b.Min.X + x*b.Dx()/w
+	py := b.Min.Y + y*b.Dy()/h
+	return nrgba(img.At(px, py))
+}
+
+func nrgba(c color.Color) color.NRGBA {
+	r, g, b, a := c.RGBA()
+	if a == 0 {
+		return color.NRGBA{}
+	}
+	return color.NRGBA{
+		R: uint8((r * 0xffff / a) >> 8),
+		G: uint8((g * 0xffff / a) >> 8),
+		B: uint8((b * 0xffff / a) >> 8),
+		A: uint8(a >> 8),
+	}
+}
+
+func cropImage(img image.Image, x, y, width, height, fullWidth, fullHeight int) image.Image {
+	if img == nil {
+		return nil
+	}
+	if width <= 0 || height <= 0 {
+		return img
+	}
+	scaled := scaleRGBA(img, maxInt(fullWidth, 1), maxInt(fullHeight, 1))
+	rect := image.Rect(x, y, x+width, y+height).Intersect(scaled.Bounds())
+	if rect.Empty() {
+		return image.NewRGBA(image.Rect(0, 0, 1, 1))
+	}
+	out := image.NewRGBA(image.Rect(0, 0, rect.Dx(), rect.Dy()))
+	draw.Draw(out, out.Bounds(), scaled, rect.Min, draw.Src)
+	return out
+}
+
 func tightRGBA(img image.Image) *image.RGBA {
 	if rgba, ok := img.(*image.RGBA); ok &&
 		rgba.Rect.Min.X == 0 &&
@@ -603,6 +726,20 @@ func tightRGBA(img image.Image) *image.RGBA {
 	}
 	b := img.Bounds()
 	dst := image.NewRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
+	draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
+	return dst
+}
+
+func tightNRGBA(img image.Image) *image.NRGBA {
+	if nrgba, ok := img.(*image.NRGBA); ok &&
+		nrgba.Rect.Min.X == 0 &&
+		nrgba.Rect.Min.Y == 0 &&
+		nrgba.Stride == nrgba.Rect.Dx()*4 &&
+		len(nrgba.Pix) == nrgba.Stride*nrgba.Rect.Dy() {
+		return nrgba
+	}
+	b := img.Bounds()
+	dst := image.NewNRGBA(image.Rect(0, 0, b.Dx(), b.Dy()))
 	draw.Draw(dst, dst.Bounds(), img, b.Min, draw.Src)
 	return dst
 }

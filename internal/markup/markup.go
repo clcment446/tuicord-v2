@@ -80,6 +80,24 @@ const (
 	Kind_Timestamp
 )
 
+// Format is the set of inline markdown formatting attributes applied to a
+// span. It is used when formatting is stacked, or when formatting applies to a
+// non-text span such as a mention.
+type Format uint8
+
+const (
+	// FormatBold marks text wrapped in **...**.
+	FormatBold Format = 1 << iota
+	// FormatItalic marks text wrapped in *...* or _..._.
+	FormatItalic
+	// FormatUnderline marks text wrapped in __...__.
+	FormatUnderline
+	// FormatStrike marks text wrapped in ~~...~~.
+	FormatStrike
+	// FormatSpoiler marks text wrapped in ||...||.
+	FormatSpoiler
+)
+
 // ActionKind identifies what clicking a span does.
 type ActionKind int
 
@@ -111,6 +129,11 @@ type Span struct {
 	Kind Kind
 	Text string
 	URL  string // set for Kind_Link
+
+	// Format carries stacked inline formatting attributes. Simple text-only
+	// formatting keeps using Kind_Bold/Kind_Italic/etc for compatibility, so
+	// Format is usually non-zero only for stacked styles or styled entities.
+	Format Format
 
 	// FG is a 0xRRGGBB foreground color override. 0 means inherit the theme
 	// default. Currently set for Kind_RoleMention when the role has a color.

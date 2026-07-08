@@ -21,6 +21,12 @@ func (syncPoster) Post(fn func()) { fn() }
 type fakeSender struct {
 	mu           sync.Mutex
 	sent         int
+	lastSend     api.SendMessageData
+	edited       int
+	editContent  string
+	deleted      int
+	pinned       int
+	unpinned     int
 	err          error
 	done         chan struct{}
 	history      []discord.Message
@@ -43,14 +49,56 @@ type fakeSender struct {
 	channelsDone chan struct{}
 }
 
-func (f *fakeSender) SendMessageComplex(discord.ChannelID, api.SendMessageData) (*discord.Message, error) {
+func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessageData) (*discord.Message, error) {
 	f.mu.Lock()
 	f.sent++
+	f.lastSend = data
 	f.mu.Unlock()
 	if f.done != nil {
 		close(f.done)
 	}
 	return &discord.Message{}, f.err
+}
+
+func (f *fakeSender) EditText(_ discord.ChannelID, _ discord.MessageID, content string) (*discord.Message, error) {
+	f.mu.Lock()
+	f.edited++
+	f.editContent = content
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return &discord.Message{}, f.err
+}
+
+func (f *fakeSender) DeleteMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error {
+	f.mu.Lock()
+	f.deleted++
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return f.err
+}
+
+func (f *fakeSender) PinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error {
+	f.mu.Lock()
+	f.pinned++
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return f.err
+}
+
+func (f *fakeSender) UnpinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error {
+	f.mu.Lock()
+	f.unpinned++
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return f.err
 }
 
 func (f *fakeSender) Messages(discord.ChannelID, uint) ([]discord.Message, error) {
@@ -147,7 +195,7 @@ func TestDeliverMarksFailedOnError(t *testing.T) {
 
 	// Call deliver directly (synchronous) to avoid racing with Send's goroutine;
 	// syncPoster then applies MarkFailed on this goroutine.
-	a.deliver(42, "hi", "n1")
+	a.deliver(42, api.SendMessageData{Content: "hi", Nonce: "n1"}, "n1")
 
 	msgs := a.store.Messages(42)
 	if len(msgs) != 1 || !msgs[0].Failed || msgs[0].Pending {
@@ -164,7 +212,7 @@ func TestDeliverReportsError(t *testing.T) {
 
 	var got error
 	a.OnError(func(err error) { got = err })
-	a.deliver(42, "hi", "n1")
+	a.deliver(42, api.SendMessageData{Content: "hi", Nonce: "n1"}, "n1")
 
 	if !errors.Is(got, sendErr) {
 		t.Fatalf("reported error = %v, want %v", got, sendErr)
@@ -181,6 +229,73 @@ func TestSendIgnoredWithoutActiveChannel(t *testing.T) {
 	defer fs.mu.Unlock()
 	if fs.sent != 0 {
 		t.Errorf("sent %d messages without an active channel, want 0", fs.sent)
+	}
+}
+
+func TestReplyNoMentionBuildsReferenceAndAllowedMentions(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+
+	a.Reply("ack", store.Message{ID: 9, ChannelID: 42, Author: "alice"}, false)
+	<-fs.done
+
+	fs.mu.Lock()
+	data := fs.lastSend
+	fs.mu.Unlock()
+	if data.Reference == nil || data.Reference.MessageID != 9 {
+		t.Fatalf("reply reference = %+v, want message 9", data.Reference)
+	}
+	if data.AllowedMentions == nil || data.AllowedMentions.RepliedUser == nil || *data.AllowedMentions.RepliedUser {
+		t.Fatalf("allowed mentions = %+v, want replied_user=false", data.AllowedMentions)
+	}
+}
+
+func TestEditMessageCallsREST(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+
+	a.EditMessage(42, 9, "edited")
+	<-fs.done
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.edited != 1 || fs.editContent != "edited" {
+		t.Fatalf("edit calls = %d content %q, want 1 edited", fs.edited, fs.editContent)
+	}
+}
+
+func TestDeleteMessageWaitsForGatewayRemoval(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "bye"})
+
+	a.DeleteMessage(42, 9)
+	<-fs.done
+	if got := len(a.store.Messages(42)); got != 1 {
+		t.Fatalf("messages after REST delete = %d, want still cached before gateway echo", got)
+	}
+	a.handleMessageDelete(&gateway.MessageDeleteEvent{ID: 9, ChannelID: 42})
+	if got := len(a.store.Messages(42)); got != 0 {
+		t.Fatalf("messages after gateway delete = %d, want 0", got)
+	}
+}
+
+func TestSetPinnedPatchesCacheAfterSuccess(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "pin me"})
+
+	a.SetPinned(42, 9, true)
+	<-fs.done
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 || !msgs[0].Pinned {
+		t.Fatalf("messages after pin = %+v, want pinned message", msgs)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.pinned != 1 {
+		t.Fatalf("pin calls = %d, want 1", fs.pinned)
 	}
 }
 

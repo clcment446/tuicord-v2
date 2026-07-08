@@ -149,6 +149,56 @@ func TestParseExtendedInlineConstructs(t *testing.T) {
 	assertSpans(t, spans, want)
 }
 
+func TestParseStackedInlineFormatting(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		format Format
+	}{
+		{
+			name:   "bold underline",
+			input:  "**__text__**",
+			format: FormatBold | FormatUnderline,
+		},
+		{
+			name:   "underline bold",
+			input:  "__**text**__",
+			format: FormatBold | FormatUnderline,
+		},
+		{
+			name:   "strike italic",
+			input:  "~~*text*~~",
+			format: FormatStrike | FormatItalic,
+		},
+		{
+			name:   "spoiler underline strike",
+			input:  "||__~~text~~__||",
+			format: FormatSpoiler | FormatUnderline | FormatStrike,
+		},
+		{
+			name:   "triple star",
+			input:  "***text***",
+			format: FormatBold | FormatItalic,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := Parse(tt.input, Resolver{})
+			want := []Span{{Kind: Kind_Text, Text: "text", Format: tt.format}}
+			assertSpans(t, spans, want)
+		})
+	}
+}
+
+func TestParseFormattingAppliesToNestedEntities(t *testing.T) {
+	spans := Parse("**hi <@42>**", testResolver())
+	want := []Span{
+		{Kind: Kind_Bold, Text: "hi "},
+		{Kind: Kind_Mention, Text: "@alice", Format: FormatBold},
+	}
+	assertSpans(t, spans, want)
+}
+
 func TestParseHeaderStripsMarker(t *testing.T) {
 	spans := Parse("## Title\nbody", Resolver{})
 	want := []Span{
@@ -540,7 +590,7 @@ func assertSingle(t *testing.T, spans []Span, kind Kind, text string) {
 
 func spansEqual(a, b Span) bool {
 	if a.Kind != b.Kind || a.Text != b.Text || a.URL != b.URL ||
-		a.FG != b.FG || a.EmojiID != b.EmojiID || a.EmojiAnimated != b.EmojiAnimated {
+		a.Format != b.Format || a.FG != b.FG || a.EmojiID != b.EmojiID || a.EmojiAnimated != b.EmojiAnimated {
 		return false
 	}
 	if a.Action == nil && b.Action == nil {

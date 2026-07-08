@@ -10,6 +10,8 @@ package app
 
 import (
 	"context"
+	"strconv"
+	"strings"
 	"sync"
 
 	"awesomeProject/internal/store"
@@ -19,6 +21,8 @@ import (
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/session"
+	"github.com/diamondburned/arikawa/v3/utils/httputil"
+	"github.com/diamondburned/arikawa/v3/utils/json/option"
 )
 
 // poster is the slice of tui.App the orchestrator depends on. It exists so the
@@ -30,6 +34,10 @@ type poster interface {
 // sender is the slice of the arikawa client used to send messages.
 type sender interface {
 	SendMessageComplex(discord.ChannelID, api.SendMessageData) (*discord.Message, error)
+	EditText(discord.ChannelID, discord.MessageID, string) (*discord.Message, error)
+	DeleteMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
+	PinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
+	UnpinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 }
 
 // historyLoader is the slice of the arikawa client used to load channel
@@ -55,16 +63,58 @@ type channelLoader interface {
 // the UI. It avoids overloading guild ID 0, which App uses as "not selected".
 const DirectMessagesGuildID store.GuildID = ^store.GuildID(0)
 
+// messageComponentInteractionType is Discord's interaction type for component
+// presses (INTERACTION_TYPE 3).
+const messageComponentInteractionType = 3
+
+// componentInteraction is the REST payload a user account posts to the
+// interactions endpoint when activating a message component. Bots respond to
+// interactions; user clients originate them, which is why arikawa has no API
+// for this direction. Snowflakes travel as strings per Discord's JSON contract.
+type componentInteraction struct {
+	Type          int                      `json:"type"`
+	Nonce         string                   `json:"nonce"`
+	GuildID       string                   `json:"guild_id,omitempty"`
+	ChannelID     string                   `json:"channel_id"`
+	MessageID     string                   `json:"message_id"`
+	ApplicationID string                   `json:"application_id"`
+	SessionID     string                   `json:"session_id"`
+	Data          componentInteractionData `json:"data"`
+}
+
+type componentInteractionData struct {
+	ComponentType int      `json:"component_type"`
+	CustomID      string   `json:"custom_id"`
+	Values        []string `json:"values,omitempty"`
+}
+
+// componentInteractionPoster is the seam through which component interactions
+// reach Discord, sliced narrow so tests can capture the payload.
+type componentInteractionPoster interface {
+	postComponentInteraction(p componentInteraction) error
+}
+
+// restInteractionPoster posts interactions through the session's REST client.
+type restInteractionPoster struct {
+	sess *session.Session
+}
+
+func (r restInteractionPoster) postComponentInteraction(p componentInteraction) error {
+	url := strings.TrimSuffix(api.EndpointInteractions, "/")
+	return r.sess.FastRequest("POST", url, httputil.WithJSONBody(p))
+}
+
 // App wires the session, store, and UI together and tracks navigation state.
 type App struct {
-	store   *store.Store
-	ui      poster
-	send    sender
-	history historyLoader
-	roles   roleLoader
-	dirs    directoryLoader
-	chans   channelLoader
-	handle  *session.Session
+	store    *store.Store
+	ui       poster
+	send     sender
+	history  historyLoader
+	roles    roleLoader
+	dirs     directoryLoader
+	chans    channelLoader
+	interact componentInteractionPoster
+	handle   *session.Session
 
 	resourceMu      sync.Mutex
 	historyLoaded   map[store.ChannelID]struct{}
@@ -83,19 +133,23 @@ type App struct {
 	activeGuild   store.GuildID
 	activeChannel store.ChannelID
 	selfID        store.UserID
+	// sessionID is the gateway session identifier from READY; Discord requires
+	// it on user-originated interaction payloads.
+	sessionID string
 }
 
 // New returns an orchestrator over the given session, store, and UI runtime.
 func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 	return &App{
-		store:   st,
-		ui:      ui,
-		send:    sess,
-		history: sess,
-		roles:   sess,
-		dirs:    sess,
-		chans:   sess,
-		handle:  sess,
+		store:    st,
+		ui:       ui,
+		send:     sess,
+		history:  sess,
+		roles:    sess,
+		dirs:     sess,
+		chans:    sess,
+		interact: restInteractionPoster{sess: sess},
+		handle:   sess,
 	}
 }
 
@@ -123,11 +177,21 @@ func (a *App) ensureResourceMaps() {
 // Store returns the underlying state store (read on the UI goroutine).
 func (a *App) Store() *store.Store { return a.store }
 
+// Post schedules fn on the UI event loop.
+func (a *App) Post(fn func()) {
+	if a != nil && a.ui != nil {
+		a.ui.Post(fn)
+	}
+}
+
 // ActiveGuild returns the currently selected guild.
 func (a *App) ActiveGuild() store.GuildID { return a.activeGuild }
 
 // ActiveChannel returns the currently selected channel.
 func (a *App) ActiveChannel() store.ChannelID { return a.activeChannel }
+
+// SelfID returns the logged-in user's ID once READY has been processed.
+func (a *App) SelfID() store.UserID { return a.selfID }
 
 // SetActive selects the guild/channel the chat view renders, clearing the newly
 // active channel's unread badge. Call on the UI goroutine.
@@ -168,6 +232,14 @@ func (a *App) RegisterHandlers() {
 
 	a.handle.AddHandler(func(e *gateway.MessageUpdateEvent) {
 		a.handleMessageUpdate(e)
+	})
+
+	a.handle.AddHandler(func(e *gateway.MessageDeleteEvent) {
+		a.handleMessageDelete(e)
+	})
+
+	a.handle.AddHandler(func(e *gateway.MessageDeleteBulkEvent) {
+		a.handleMessageDeleteBulk(e)
 	})
 
 	a.handle.AddHandler(func(e *gateway.MessageReactionAddEvent) {
@@ -231,8 +303,10 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	guilds := e.Guilds
 	privateChannels := e.PrivateChannels
 	selfID := store.UserID(e.User.ID)
+	sessionID := e.SessionID
 	a.ui.Post(func() {
 		a.selfID = selfID
+		a.sessionID = sessionID
 		for i := range guilds {
 			ingestGuild(a.store, &guilds[i])
 			a.markRolesLoaded(store.GuildID(guilds[i].ID))
@@ -303,7 +377,32 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 			m.Embeds = patch.Embeds
 			m.Stickers = patch.Stickers
 			m.Components = patch.Components
+			m.Pinned = patch.Pinned
 		})
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleMessageDelete(e *gateway.MessageDeleteEvent) {
+	channel := store.ChannelID(e.ChannelID)
+	id := store.MessageID(e.ID)
+	a.ui.Post(func() {
+		a.store.RemoveMessage(channel, id)
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleMessageDeleteBulk(e *gateway.MessageDeleteBulkEvent) {
+	channel := store.ChannelID(e.ChannelID)
+	ids := append([]discord.MessageID(nil), e.IDs...)
+	a.ui.Post(func() {
+		for _, id := range ids {
+			a.store.RemoveMessage(channel, store.MessageID(id))
+		}
 		if a.onChange != nil {
 			a.onChange()
 		}
@@ -410,14 +509,107 @@ func (a *App) Send(content string) {
 		Pending:   true,
 	})
 
-	go a.deliver(channel, content, nonce)
+	go a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce}, nonce)
 }
 
-func (a *App) deliver(channel store.ChannelID, content, nonce string) {
-	_, err := a.send.SendMessageComplex(discord.ChannelID(channel), api.SendMessageData{
+// Reply sends content as a Discord inline reply to message.
+func (a *App) Reply(content string, message store.Message, mention bool) {
+	if content == "" || message.ChannelID == 0 || message.ID == 0 {
+		return
+	}
+	nonce := newNonce()
+	a.store.AppendMessage(store.Message{
+		ChannelID: message.ChannelID,
+		Author:    "you",
+		Content:   content,
+		Nonce:     nonce,
+		Pending:   true,
+	})
+	data := api.SendMessageData{
 		Content: content,
 		Nonce:   nonce,
-	})
+		Reference: &discord.MessageReference{
+			MessageID: discord.MessageID(message.ID),
+		},
+	}
+	if !mention {
+		data.AllowedMentions = &api.AllowedMentions{
+			Parse:       []api.AllowedMentionType{api.AllowRoleMention, api.AllowUserMention, api.AllowEveryoneMention},
+			RepliedUser: option.False,
+		}
+	}
+	go a.deliver(message.ChannelID, data, nonce)
+}
+
+// ComponentSubmit describes an activated message component to submit to
+// Discord: which message it lives on, which control (CustomID), and any
+// selected values for select menus.
+type ComponentSubmit struct {
+	Message store.Message
+	// ComponentType is Discord's numeric component type (2 button, 3 string
+	// select, 5-8 entity selects). Zero falls back to button.
+	ComponentType int
+	CustomID      string
+	Values        []string
+}
+
+// SubmitComponent posts a component interaction to Discord on a background
+// goroutine. The component is marked pending immediately; on completion it
+// flips to success or error, and failures are also reported via OnError. The
+// bot's actual reaction (message edit, reply) arrives through the gateway.
+func (a *App) SubmitComponent(sub ComponentSubmit) {
+	if a == nil || a.interact == nil || sub.CustomID == "" || sub.Message.ID == 0 {
+		return
+	}
+	msg := sub.Message
+	appID := msg.ApplicationID
+	if appID == 0 {
+		appID = uint64(msg.AuthorID)
+	}
+	componentType := sub.ComponentType
+	if componentType == 0 {
+		componentType = 2
+	}
+	payload := componentInteraction{
+		Type:          messageComponentInteractionType,
+		Nonce:         newNonce(),
+		ChannelID:     strconv.FormatUint(uint64(msg.ChannelID), 10),
+		MessageID:     strconv.FormatUint(uint64(msg.ID), 10),
+		ApplicationID: strconv.FormatUint(appID, 10),
+		SessionID:     a.sessionID,
+		Data: componentInteractionData{
+			ComponentType: componentType,
+			CustomID:      sub.CustomID,
+			Values:        sub.Values,
+		},
+	}
+	if a.activeGuild != 0 && a.activeGuild != DirectMessagesGuildID {
+		payload.GuildID = strconv.FormatUint(uint64(a.activeGuild), 10)
+	}
+	a.store.SetComponentState(msg.ChannelID, msg.ID, sub.CustomID, store.ComponentStatePending)
+	if a.onChange != nil {
+		a.onChange()
+	}
+	go func() {
+		err := a.interact.postComponentInteraction(payload)
+		a.ui.Post(func() {
+			state := store.ComponentStateSuccess
+			if err != nil {
+				state = store.ComponentStateError
+			}
+			a.store.SetComponentState(msg.ChannelID, msg.ID, sub.CustomID, state)
+			if err != nil && a.onError != nil {
+				a.onError(err)
+			}
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	}()
+}
+
+func (a *App) deliver(channel store.ChannelID, data api.SendMessageData, nonce string) {
+	_, err := a.send.SendMessageComplex(discord.ChannelID(channel), data)
 	if err != nil {
 		a.ui.Post(func() {
 			a.store.MarkFailed(channel, nonce)
@@ -426,6 +618,69 @@ func (a *App) deliver(channel store.ChannelID, content, nonce string) {
 			}
 		})
 	}
+}
+
+// EditMessage patches a message's content. The visible message updates after
+// Discord echoes MESSAGE_UPDATE; failures are reported via OnError.
+func (a *App) EditMessage(channel store.ChannelID, id store.MessageID, content string) {
+	if channel == 0 || id == 0 {
+		return
+	}
+	go func() {
+		_, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content)
+		if err != nil {
+			a.reportError(err)
+		}
+	}()
+}
+
+// DeleteMessage deletes a message. Local removal waits for MESSAGE_DELETE.
+func (a *App) DeleteMessage(channel store.ChannelID, id store.MessageID) {
+	if channel == 0 || id == 0 {
+		return
+	}
+	go func() {
+		if err := a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), ""); err != nil {
+			a.reportError(err)
+		}
+	}()
+}
+
+// SetPinned pins or unpins a message. Discord's pin event omits the message ID,
+// so the cached flag is patched after the REST call succeeds.
+func (a *App) SetPinned(channel store.ChannelID, id store.MessageID, pinned bool) {
+	if channel == 0 || id == 0 {
+		return
+	}
+	go func() {
+		var err error
+		if pinned {
+			err = a.send.PinMessage(discord.ChannelID(channel), discord.MessageID(id), "")
+		} else {
+			err = a.send.UnpinMessage(discord.ChannelID(channel), discord.MessageID(id), "")
+		}
+		if err != nil {
+			a.reportError(err)
+			return
+		}
+		a.ui.Post(func() {
+			a.store.SetMessagePinned(channel, id, pinned)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	}()
+}
+
+func (a *App) reportError(err error) {
+	if err == nil {
+		return
+	}
+	a.ui.Post(func() {
+		if a.onError != nil {
+			a.onError(err)
+		}
+	})
 }
 
 // LoadHistory fetches recent messages for channel and replaces the local

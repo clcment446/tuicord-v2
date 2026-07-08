@@ -75,6 +75,17 @@ func TestMarkupRequestedSyntax(t *testing.T) {
 	})
 }
 
+func TestMarkupStacksFormatting(t *testing.T) {
+	m := NewMarkup("**__text__** ~~*gone*~~")
+	spans := m.Spans()
+	assertSpan(t, spans, "text", func(s MarkupSpan) bool {
+		return s.Bold && s.Underline
+	})
+	assertSpan(t, spans, "gone", func(s MarkupSpan) bool {
+		return s.Strike && s.Italic
+	})
+}
+
 func assertSpan(t *testing.T, spans []MarkupSpan, text string, ok func(MarkupSpan) bool) {
 	t.Helper()
 	for _, span := range spans {

@@ -13,6 +13,50 @@ func (s *Store) UpdateMessage(channel ChannelID, id MessageID, patch func(*Messa
 	return r.updateByID(id, patch)
 }
 
+// RemoveMessage deletes message id from channel's ring. It returns true when a
+// matching message was present.
+func (s *Store) RemoveMessage(channel ChannelID, id MessageID) bool {
+	r := s.messages[channel]
+	if r == nil {
+		return false
+	}
+	return r.removeByID(id)
+}
+
+// SetMessagePinned patches a message's cached pin state. Discord's
+// CHANNEL_PINS_UPDATE event does not include the message ID, so successful REST
+// pin/unpin calls use this helper to keep the visible row accurate.
+func (s *Store) SetMessagePinned(channel ChannelID, id MessageID, pinned bool) bool {
+	return s.UpdateMessage(channel, id, func(m *Message) {
+		m.Pinned = pinned
+	})
+}
+
+// SetComponentState patches the local UI state of every component whose
+// CustomID matches on message id in channel, recursing through the Components
+// V2 tree. It backs the pending/success/error feedback drawn on interactive
+// controls while a component interaction is in flight.
+func (s *Store) SetComponentState(channel ChannelID, id MessageID, customID string, state ComponentState) bool {
+	if customID == "" {
+		return false
+	}
+	return s.UpdateMessage(channel, id, func(m *Message) {
+		setComponentNodeState(m.ComponentTree, customID, state)
+	})
+}
+
+func setComponentNodeState(nodes []ComponentNode, customID string, state ComponentState) {
+	for i := range nodes {
+		if nodes[i].CustomID == customID {
+			nodes[i].State = state
+		}
+		if acc := nodes[i].Accessory; acc != nil && acc.CustomID == customID {
+			acc.State = state
+		}
+		setComponentNodeState(nodes[i].Children, customID, state)
+	}
+}
+
 // AddReaction merges r into the Reactions slice of message id in channel.
 // If a reaction entry with the same EmojiName and EmojiID already exists its
 // Count is incremented and Me is set when r.Me is true; otherwise r is

@@ -1,9 +1,13 @@
 package ui
 
 import (
+	"bytes"
+	"image"
+	"image/color"
 	"strings"
 	"testing"
 
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 )
@@ -79,6 +83,170 @@ func TestChatViewRendersAttachmentChip(t *testing.T) {
 	}
 }
 
+func TestChatViewRendersLoadedAttachmentImage(t *testing.T) {
+	st := store.New(0)
+	url := "https://cdn.discordapp.com/attachments/1/2/cat.png"
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Attachments: []store.Attachment{{URL: url, Filename: "cat.png", ContentType: "image/png", Size: 2048}},
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(4, 4)}}
+	buf := screen.NewBuffer(16, 4)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	for y := 1; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			if got := buf.Cell(x, y).Content; got != " " {
+				t.Fatalf("loaded attachment fallback cell %d,%d = %q, want blank under kitty image", x, y, got)
+			}
+		}
+	}
+	if graphics := buf.Graphics(); len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1 kitty placement", len(graphics))
+	}
+}
+
+func TestChatViewSizesAttachmentMediaFromMetadata(t *testing.T) {
+	st := store.New(0)
+	url := "https://cdn.discordapp.com/attachments/1/2/cat.png"
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Attachments: []store.Attachment{{URL: url, Filename: "cat.png", ContentType: "image/png", W: 400, H: 300}},
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(400, 300)}}
+	buf := screen.NewBuffer(80, 14)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1", len(graphics))
+	}
+	for _, want := range [][]byte{
+		[]byte("s=400"),
+		[]byte("v=300"),
+	} {
+		if !bytes.Contains(graphics[0].Upload, want) {
+			t.Fatalf("upload missing %q: %q", string(want), string(graphics[0].Upload))
+		}
+	}
+	for _, want := range [][]byte{
+		[]byte("c=32"),
+		[]byte("r=12"),
+	} {
+		if !bytes.Contains(graphics[0].Data, want) {
+			t.Fatalf("placement missing %q: %q", string(want), string(graphics[0].Data))
+		}
+	}
+}
+
+func TestChatViewRespectsMediaProxyQueryDimensions(t *testing.T) {
+	st := store.New(0)
+	url := "https://media.discordapp.net/attachments/1/2/cat.png?width=400&height=200"
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Attachments: []store.Attachment{{ProxyURL: url, Filename: "cat.png", ContentType: "image/png", W: 800, H: 800}},
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(800, 800)}}
+	buf := screen.NewBuffer(80, 14)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1", len(graphics))
+	}
+	for _, want := range [][]byte{
+		[]byte("s=800"),
+		[]byte("v=800"),
+	} {
+		if !bytes.Contains(graphics[0].Upload, want) {
+			t.Fatalf("upload missing original-size %q: %q", string(want), string(graphics[0].Upload))
+		}
+	}
+	for _, want := range [][]byte{
+		[]byte("c=48"),
+		[]byte("r=12"),
+	} {
+		if !bytes.Contains(graphics[0].Data, want) {
+			t.Fatalf("placement missing query-sized %q: %q", string(want), string(graphics[0].Data))
+		}
+	}
+}
+
+func TestChatViewRendersStickerInSquareMediaBox(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Stickers: []store.Sticker{{ID: 9, Name: "wave", Format: store.StickerPNG}},
+	})
+	url := "https://media.discordapp.net/stickers/9.png?size=160"
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(320, 160)}}
+	buf := screen.NewBuffer(40, 10)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1", len(graphics))
+	}
+	for _, want := range [][]byte{
+		[]byte("c=16"),
+		[]byte("r=8"),
+	} {
+		if !bytes.Contains(graphics[0].Data, want) {
+			t.Fatalf("sticker placement missing square box %q: %q", string(want), string(graphics[0].Data))
+		}
+	}
+}
+
+func TestChatViewRendersInlineServerEmoji(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob", Content: "hi <:party:123> ok",
+	})
+	url := "https://cdn.discordapp.com/emojis/123.webp?size=48&name=party&lossless=true"
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(48, 48)}}
+	buf := screen.NewBuffer(24, 3)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 1); !strings.Contains(got, "hi    ok") {
+		t.Fatalf("message row = %q, want inline emoji slot between text", got)
+	}
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1 inline emoji placement", len(graphics))
+	}
+	for _, want := range [][]byte{
+		[]byte("s=48"),
+		[]byte("v=48"),
+	} {
+		if !bytes.Contains(graphics[0].Upload, want) {
+			t.Fatalf("emoji upload missing original-size %q: %q", string(want), string(graphics[0].Upload))
+		}
+	}
+	for _, want := range [][]byte{
+		[]byte("c=2"),
+		[]byte("r=1"),
+	} {
+		if !bytes.Contains(graphics[0].Data, want) {
+			t.Fatalf("emoji placement missing %q: %q", string(want), string(graphics[0].Data))
+		}
+	}
+}
+
 func TestChatViewSuppressesSingleMediaURL(t *testing.T) {
 	// Arrange: a lone gif link that Discord unfurled into a gifv embed.
 	st := store.New(0)
@@ -105,6 +273,19 @@ func TestChatViewSuppressesSingleMediaURL(t *testing.T) {
 	if !strings.Contains(text, "[GIF]") {
 		t.Errorf("expected [GIF] chip, got %q", text)
 	}
+	if strings.ContainsAny(text, "╭╰│") {
+		t.Errorf("pure media embed should not be framed, got %q", text)
+	}
+}
+
+func solidTestImage(w, h int) image.Image {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.RGBA{R: 200, G: 40, B: 80, A: 255})
+		}
+	}
+	return img
 }
 
 func TestHumanSize(t *testing.T) {

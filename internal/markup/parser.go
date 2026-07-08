@@ -9,10 +9,11 @@ import (
 
 // parser is a single-pass scanner over message content.
 type parser struct {
-	src   string
-	res   Resolver
-	buf   strings.Builder
-	spans []Span
+	src    string
+	res    Resolver
+	format Format
+	buf    strings.Builder
+	spans  []Span
 }
 
 func (p *parser) run() {
@@ -47,18 +48,22 @@ func (p *parser) matchAt(i int) int {
 		return p.scanFenced(i)
 	case p.src[i] == '`':
 		return p.scanInlineCode(i)
+	case p.has(i, "***"):
+		return p.scanDelimited(i, "***", FormatBold|FormatItalic)
+	case p.has(i, "___"):
+		return p.scanDelimited(i, "___", FormatUnderline|FormatItalic)
 	case p.has(i, "**"):
-		return p.scanDelimited(i, "**", Kind_Bold)
+		return p.scanDelimited(i, "**", FormatBold)
 	case p.has(i, "__"):
-		return p.scanDelimited(i, "__", Kind_Underline)
+		return p.scanDelimited(i, "__", FormatUnderline)
 	case p.has(i, "~~"):
-		return p.scanDelimited(i, "~~", Kind_Strike)
+		return p.scanDelimited(i, "~~", FormatStrike)
 	case p.has(i, "||"):
-		return p.scanDelimited(i, "||", Kind_Spoiler)
+		return p.scanDelimited(i, "||", FormatSpoiler)
 	case p.src[i] == '*':
-		return p.scanDelimited(i, "*", Kind_Italic)
+		return p.scanDelimited(i, "*", FormatItalic)
 	case p.src[i] == '_':
-		return p.scanDelimited(i, "_", Kind_Italic)
+		return p.scanDelimited(i, "_", FormatItalic)
 	case p.src[i] == '[':
 		return p.scanLink(i)
 	case p.src[i] == '<':
@@ -134,14 +139,46 @@ func lineEnd(s string, start int) int {
 
 func (p *parser) flush() {
 	if p.buf.Len() > 0 {
-		p.spans = append(p.spans, Span{Kind: Kind_Text, Text: p.buf.String()})
+		p.spans = append(p.spans, formattedText(p.buf.String(), p.format))
 		p.buf.Reset()
 	}
 }
 
 func (p *parser) emit(s Span) {
 	p.flush()
+	s = p.applyFormat(s)
 	p.spans = append(p.spans, s)
+}
+
+func (p *parser) applyFormat(s Span) Span {
+	if p.format == 0 {
+		return s
+	}
+	switch s.Kind {
+	case Kind_Code, Kind_CodeBlock:
+		return s
+	}
+	s.Format |= p.format
+	return s
+}
+
+func formattedText(text string, format Format) Span {
+	switch format {
+	case 0:
+		return Span{Kind: Kind_Text, Text: text}
+	case FormatBold:
+		return Span{Kind: Kind_Bold, Text: text}
+	case FormatItalic:
+		return Span{Kind: Kind_Italic, Text: text}
+	case FormatUnderline:
+		return Span{Kind: Kind_Underline, Text: text}
+	case FormatStrike:
+		return Span{Kind: Kind_Strike, Text: text}
+	case FormatSpoiler:
+		return Span{Kind: Kind_Spoiler, Text: text}
+	default:
+		return Span{Kind: Kind_Text, Text: text, Format: format}
+	}
 }
 
 // scanFenced consumes ```...``` (the opening/closing fences), emitting the inner
@@ -168,16 +205,24 @@ func (p *parser) scanInlineCode(i int) int {
 	return i + 1 + end + 1
 }
 
-// scanDelimited consumes delim...delim, emitting the inner text with kind.
-func (p *parser) scanDelimited(i int, delim string, kind Kind) int {
+// scanDelimited consumes delim...delim, recursively parsing the inner content
+// with the delimiter's formatting added to the current formatting set.
+func (p *parser) scanDelimited(i int, delim string, format Format) int {
 	start := i + len(delim)
 	end := strings.Index(p.src[start:], delim)
 	if end <= 0 { // require non-empty content
 		return i
 	}
-	inner := p.src[start : start+end]
-	p.emit(Span{Kind: kind, Text: inner})
-	return start + end + len(delim)
+	end += start
+	p.flush()
+	inner := &parser{
+		src:    p.src[start:end],
+		res:    p.res,
+		format: p.format | format,
+	}
+	inner.run()
+	p.spans = append(p.spans, inner.spans...)
+	return end + len(delim)
 }
 
 // scanLink consumes [label](url).

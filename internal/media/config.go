@@ -30,14 +30,14 @@ type Config struct {
 }
 
 // DefaultConfig returns a Config with sensible defaults for a first-run
-// experience. Media is enabled, animations play, emoji are text-only (safe
-// for all terminals), and the system's default URI handler opens videos.
+// experience. Media is enabled, animations play, custom emoji render inline,
+// and the system's default URI handler opens videos.
 func DefaultConfig() Config {
 	return Config{
 		Enabled:        true,
 		MaxHeightCells: 12,
 		Animate:        true,
-		EmojiImages:    false,
+		EmojiImages:    true,
 		VideoPlayer:    "xdg-open",
 	}
 }

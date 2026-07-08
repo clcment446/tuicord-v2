@@ -10,8 +10,9 @@
 //
 // [Message] carries the full set of Discord rich content: [Attachment] slices,
 // [Embed] slices (which arrive asynchronously via MESSAGE_UPDATE once Discord
-// unfurls links), [Sticker] slices, [Reaction] slices, and [Component] slices
-// for interactive buttons and selects. Use [Store.UpdateMessage],
+// unfurls links), [Sticker] slices, [Reaction] slices, legacy [Component]
+// slices, and a hierarchical [ComponentNode] tree for Components V2. Use
+// [Store.UpdateMessage],
 // [Store.AddReaction], and [Store.RemoveReaction] to patch messages in place
 // after the initial append.
 //
@@ -65,6 +66,9 @@ const (
 type Guild struct {
 	ID   GuildID
 	Name string
+	// OwnerID is the guild owner's user ID. The owner implicitly holds every
+	// permission (see Store.MemberPermissions). Zero when unknown.
+	OwnerID UserID
 }
 
 // Channel is a channel within a guild.
@@ -80,25 +84,33 @@ type Channel struct {
 // awaiting the gateway echo; Failed marks one whose REST send returned an error.
 //
 // The rich-content fields (Attachments, Embeds, Stickers, Reactions,
-// Components) may be empty initially and patched later via UpdateMessage,
+// Components, ComponentTree) may be empty initially and patched later via UpdateMessage,
 // AddReaction, and RemoveReaction once the gateway delivers the full data.
 type Message struct {
 	ID        MessageID
 	ChannelID ChannelID
 	// AuthorID is the snowflake of the sending user, used for role-color and
 	// profile lookups.
-	AuthorID    UserID
-	Author      string
-	Content     string
-	Timestamp   time.Time
-	Nonce       string
-	Pending     bool
-	Failed      bool
-	Attachments []Attachment
-	Embeds      []Embed
-	Stickers    []Sticker
-	Reactions   []Reaction
-	Components  []Component
+	AuthorID UserID
+	// ApplicationID is set on messages sent by an application (interaction
+	// responses, webhooks). Component interactions are addressed to it; when
+	// zero, the bot author's snowflake doubles as the application ID.
+	ApplicationID uint64
+	Author        string
+	Content       string
+	Timestamp     time.Time
+	Nonce         string
+	Flags         uint64
+	Pending       bool
+	Failed        bool
+	Attachments   []Attachment
+	Embeds        []Embed
+	Stickers      []Sticker
+	Reactions     []Reaction
+	Components    []Component
+	// ComponentTree preserves Discord's hierarchical Components V2 layout.
+	ComponentTree []ComponentNode
+	Pinned        bool
 }
 
 // Member is a guild member, used to resolve mentions.
@@ -126,6 +138,8 @@ type Role struct {
 	// color; Primary+Secondary → two-stop linear; all three → holographic
 	// three-stop interpolation.
 	Colors [3]uint32
+	// Permissions is the role's guild-level permission bit set.
+	Permissions Permission
 }
 
 // DefaultHistoryLimit is the per-channel message ring size when none is given.
@@ -183,8 +197,13 @@ func (s *Store) Unread(channel ChannelID) int {
 
 // UpsertGuild inserts or updates a guild, preserving first-seen order.
 func (s *Store) UpsertGuild(g Guild) {
-	if existing, ok := s.guilds[g.ID]; ok && g.Name == "" {
-		g.Name = existing.Name
+	if existing, ok := s.guilds[g.ID]; ok {
+		if g.Name == "" {
+			g.Name = existing.Name
+		}
+		if g.OwnerID == 0 {
+			g.OwnerID = existing.OwnerID
+		}
 	}
 	if _, ok := s.guilds[g.ID]; !ok {
 		s.guildOrder = append(s.guildOrder, g.ID)

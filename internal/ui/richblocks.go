@@ -13,16 +13,88 @@ import (
 // is the terminal-independent fallback: a real image pass (Kitty graphics) draws
 // into the reserved region later, but the chip keeps scrollback readable when
 // images are disabled or unavailable.
-func (w *ChatView) renderMedia(m store.Message, base screen.Style) []chatLine {
+func (w *ChatView) renderMedia(m store.Message, width int, base screen.Style) []chatLine {
 	var lines []chatLine
 	muted := mergeStyle(base, w.styles.Muted)
-	for _, a := range m.Attachments {
+	for i, a := range m.Attachments {
+		if url, ok := attachmentMediaURL(a); ok {
+			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()))...)
+			continue
+		}
 		lines = append(lines, chatLine{segments: []chatSegment{{text: attachmentChip(a), style: muted}}})
 	}
-	for _, s := range m.Stickers {
+	for i, s := range m.Stickers {
+		if url, ok := stickerMediaURL(s); ok {
+			lines = append(lines, w.mediaLines(url, stickerChip(s), messageMediaPlacementKey(m, "sticker", i, url), base, stickerMediaSpec(width))...)
+			continue
+		}
 		lines = append(lines, chatLine{segments: []chatSegment{{text: stickerChip(s), style: muted}}})
 	}
 	return lines
+}
+
+func attachmentMediaURL(a store.Attachment) (string, bool) {
+	url := a.ProxyURL
+	if url == "" {
+		url = a.URL
+	}
+	if url == "" {
+		return "", false
+	}
+	if strings.HasPrefix(a.ContentType, "image/") {
+		return url, true
+	}
+	switch media.ClassifyURL(url) {
+	case media.ClassImage, media.ClassGIF, media.ClassSticker, media.ClassEmoji:
+		return url, true
+	default:
+		return "", false
+	}
+}
+
+func stickerMediaURL(s store.Sticker) (string, bool) {
+	if s.ID == 0 || s.Format == store.StickerLottie {
+		return "", false
+	}
+	ext := "png"
+	if s.Format == store.StickerGIF {
+		ext = "gif"
+	}
+	return fmt.Sprintf("https://media.discordapp.net/stickers/%d.%s?size=160", s.ID, ext), true
+}
+
+func attachmentMediaSpec(a store.Attachment, mediaURL string, width, maxRows int) mediaSpec {
+	sourceW, sourceH := a.W, a.H
+	if queryW, queryH, ok := mediaQuerySize(mediaURL); ok {
+		sourceW, sourceH = queryW, queryH
+	}
+	return mediaSpec{
+		maxCols: max(width, 1),
+		maxRows: max(maxRows, 1),
+		sourceW: sourceW,
+		sourceH: sourceH,
+	}
+}
+
+func stickerMediaSpec(width int) mediaSpec {
+	rows := 8
+	cols := min(max(width, 1), rows*2)
+	rows = max(min(rows, max(cols/2, 1)), 1)
+	return mediaSpec{
+		maxCols: cols,
+		maxRows: rows,
+		sourceW: 160,
+		sourceH: 160,
+		square:  true,
+	}
+}
+
+func messageMediaPlacementKey(m store.Message, kind string, index int, mediaURL string) string {
+	id := fmt.Sprintf("pending:%s", m.Nonce)
+	if m.ID != 0 {
+		id = fmt.Sprintf("%d", m.ID)
+	}
+	return fmt.Sprintf("%d:%s:%s:%d:%s", m.ChannelID, id, kind, index, mediaURL)
 }
 
 // attachmentChip returns the one-line label for an attachment. Videos get a play

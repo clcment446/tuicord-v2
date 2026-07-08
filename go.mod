@@ -23,3 +23,5 @@ require (
 	github.com/gorilla/schema v1.4.1 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
+
+replace github.com/diamondburned/arikawa/v3 => ./third_party/arikawa

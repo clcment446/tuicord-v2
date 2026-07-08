@@ -18,6 +18,8 @@ type Viewport struct {
 	offsetX int
 	style   screen.Style
 	node    layout.Node
+	viewW   int
+	viewH   int
 }
 
 // NewViewport returns an empty scrollable viewport.
@@ -149,6 +151,8 @@ func (w *Viewport) Draw(r screen.Region) {
 	if w == nil {
 		return
 	}
+	w.viewW = r.Width()
+	w.viewH = r.Height()
 	clear(r, w.style)
 	if w.child != nil {
 		return
@@ -212,6 +216,28 @@ func (w *Viewport) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+// ScrollExtent implements ScrollModel: the vertical offset, the height drawn
+// last frame, and the content height in rows. Before the first Draw the
+// viewport size is zero, which renders an attached Scrollbar inert.
+func (w *Viewport) ScrollExtent() (offset, viewport, content int) {
+	if w == nil {
+		return 0, 0, 0
+	}
+	content = len(w.lines)
+	if w.child != nil {
+		content = w.child.Measure(tui.Size{W: w.viewW}).H
+	}
+	return w.offsetY, w.viewH, content
+}
+
+// ScrollTo implements ScrollModel by moving the vertical offset.
+func (w *Viewport) ScrollTo(offset int) {
+	if w == nil {
+		return
+	}
+	w.SetScroll(w.offsetX, offset)
 }
 
 func (w *Viewport) rebuild() {
