@@ -24,19 +24,27 @@ func newTransport() *discordTransport {
 func (t *discordTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	r := req.Clone(req.Context())
 
-	r.Header.Set("Accept", "*/*")
-	r.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	r.Header.Set("Origin", "https://discord.com")
-	r.Header.Set("Priority", "u=1, i")
-	r.Header.Set("Referer", "https://discord.com/channels/@me")
-	r.Header.Set("Sec-Fetch-Dest", "empty")
-	r.Header.Set("Sec-Fetch-Mode", "cors")
-	r.Header.Set("Sec-Fetch-Site", "same-origin")
-	r.Header.Set("X-Debug-Options", "bugReporterEnabled")
-	r.Header.Set("X-Discord-Locale", string(clientLocale))
+	// setDefault only fills in a header the caller hasn't already set, so
+	// e.g. the remote-auth ticket exchange can supply its own Referer.
+	setDefault := func(key, value string) {
+		if r.Header.Get(key) == "" {
+			r.Header.Set(key, value)
+		}
+	}
+
+	setDefault("Accept", "*/*")
+	setDefault("Accept-Language", "en-US,en;q=0.9")
+	setDefault("Origin", "https://discord.com")
+	setDefault("Priority", "u=1, i")
+	setDefault("Referer", "https://discord.com/channels/@me")
+	setDefault("Sec-Fetch-Dest", "empty")
+	setDefault("Sec-Fetch-Mode", "cors")
+	setDefault("Sec-Fetch-Site", "same-origin")
+	setDefault("X-Debug-Options", "bugReporterEnabled")
+	setDefault("X-Discord-Locale", string(clientLocale))
 
 	if t.superProps != "" {
-		r.Header.Set("X-Super-Properties", t.superProps)
+		setDefault("X-Super-Properties", t.superProps)
 	}
 
 	return t.base.RoundTrip(r)

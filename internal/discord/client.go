@@ -32,11 +32,7 @@ var errNoBuildNumber = errors.New("discord: build number not found in app page")
 
 // NewSession creates an arikawa Session configured like the old tuicord client.
 func NewSession(token string) (*session.Session, error) {
-	httpCl := httputil.NewClient()
-	httpCl.Client = httpdriver.WrapClient(http.Client{Transport: newTransport()})
-
-	apiCl := api.NewCustomClient(token, httpCl)
-	apiCl.UserAgent = clientBrowserUA
+	apiCl := newAPIClient(token)
 
 	cmd := gateway.DefaultIdentifyCommand(token)
 	cmd.Properties = identifyProperties()
@@ -51,6 +47,25 @@ func NewSession(token string) (*session.Session, error) {
 	id := gateway.NewIdentifier(cmd)
 	sess := session.NewCustom(id, apiCl, handler.New())
 	return sess, nil
+}
+
+// NewUnauthenticatedClient creates an arikawa API client with the same
+// browser-mimicking headers (X-Super-Properties, Sec-Fetch-*, build number,
+// etc.) as an authenticated session, but without a token. Discord's fraud
+// detection expects these on pre-login requests too, such as the remote-auth
+// ticket exchange used by QR login; without them it tends to respond with a
+// captcha challenge.
+func NewUnauthenticatedClient() *api.Client {
+	return newAPIClient("")
+}
+
+func newAPIClient(token string) *api.Client {
+	httpCl := httputil.NewClient()
+	httpCl.Client = httpdriver.WrapClient(http.Client{Transport: newTransport()})
+
+	apiCl := api.NewCustomClient(token, httpCl)
+	apiCl.UserAgent = clientBrowserUA
+	return apiCl
 }
 
 func identifyProperties() gateway.IdentifyProperties {
