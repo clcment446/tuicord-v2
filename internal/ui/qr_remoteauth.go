@@ -196,18 +196,31 @@ func (ra *remoteAuth) onNonceProof(data []byte) error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return err
 	}
-	decoded, err := base64.StdEncoding.DecodeString(payload.EncryptedNonce)
-	if err != nil {
-		return err
-	}
-	nonce, err := rsa.DecryptOAEP(sha256.New(), nil, ra.privKey, decoded, nil)
+	proof, err := nonceProof(ra.privKey, payload.EncryptedNonce)
 	if err != nil {
 		return err
 	}
 	return ra.writeJSON(struct {
 		Op    string `json:"op"`
-		Nonce string `json:"nonce"`
-	}{"nonce_proof", base64.RawURLEncoding.EncodeToString(nonce)})
+		Proof string `json:"proof"`
+	}{"nonce_proof", proof})
+}
+
+// nonceProof decrypts the gateway's encrypted nonce with the private key and
+// returns the proof the gateway expects: the base64url-encoded SHA-256 of the
+// decrypted nonce. The gateway rejects the raw nonce, so hashing is required to
+// advance past nonce_proof to the QR fingerprint.
+func nonceProof(priv *rsa.PrivateKey, encryptedNonce string) (string, error) {
+	decoded, err := base64.StdEncoding.DecodeString(encryptedNonce)
+	if err != nil {
+		return "", err
+	}
+	nonce, err := rsa.DecryptOAEP(sha256.New(), nil, priv, decoded, nil)
+	if err != nil {
+		return "", err
+	}
+	proof := sha256.Sum256(nonce)
+	return base64.RawURLEncoding.EncodeToString(proof[:]), nil
 }
 
 func (ra *remoteAuth) onPendingRemoteInit(data []byte) error {
