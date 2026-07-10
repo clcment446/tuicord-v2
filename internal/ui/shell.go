@@ -188,6 +188,9 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 	if msg.Pinned {
 		pinLabel = "Unpin"
 	}
+	ch, _ := s.app.Store().Channel(msg.ChannelID)
+	canThread := ch.Kind == store.ChannelText || ch.Kind == store.ChannelAnnouncement
+	isAnnouncement := ch.Kind == store.ChannelAnnouncement
 	items := []widget.MenuItem{
 		{Label: "Reply", OnSelect: func() {
 			s.closePopup()
@@ -201,16 +204,29 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 			s.closePopup()
 			s.mv.BeginEdit(msg)
 		}},
-		{Separator: true},
-		{Label: pinLabel, Disabled: !canManage, OnSelect: func() {
+		{Label: "Create thread…", Disabled: !canThread, OnSelect: func() {
+			s.closePopup()
+			s.openThreadPrompt(msg)
+		}},
+	}
+	if isAnnouncement {
+		items = append(items, widget.MenuItem{Label: "Publish", Disabled: !own, OnSelect: func() {
+			s.closePopup()
+			s.app.Publish(msg.ChannelID, msg.ID)
+			s.ShowNotice("Publishing", "Message crossposted to followers")
+		}})
+	}
+	items = append(items,
+		widget.MenuItem{Separator: true},
+		widget.MenuItem{Label: pinLabel, Disabled: !canManage, OnSelect: func() {
 			s.closePopup()
 			s.app.SetPinned(msg.ChannelID, msg.ID, !msg.Pinned)
 		}},
-		{Label: deleteLabel, Danger: true, Disabled: !canDelete, OnSelect: func() {
+		widget.MenuItem{Label: deleteLabel, Danger: true, Disabled: !canDelete, OnSelect: func() {
 			s.openDeleteMessageConfirm(msg, x, y, deleteLabel)
 		}},
-		{Separator: true},
-		{Label: "Copy message ID", OnSelect: func() {
+		widget.MenuItem{Separator: true},
+		widget.MenuItem{Label: "Copy message ID", OnSelect: func() {
 			s.closePopup()
 			id := strconv.FormatUint(uint64(msg.ID), 10)
 			if err := term.CopyToClipboard(os.Stdout, id); err != nil {
@@ -219,7 +235,7 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 			}
 			s.ShowNotice("Copied", "Message ID copied")
 		}},
-	}
+	)
 	menu := widget.NewMenu(items)
 	s.styleMenu(menu)
 	menu.SetAnchor(x, y)
@@ -245,6 +261,10 @@ func (s *Shell) openDeleteMessageConfirm(msg store.Message, x, y int, label stri
 // openChannelMenu shows the sidebar context menu for a channel or category:
 // pin/unpin and copy id for channels, collapse/expand for categories.
 func (s *Shell) openChannelMenu(row store.ChannelRow, x, y int) {
+	if row.Thread {
+		s.openThreadMenu(row, x, y)
+		return
+	}
 	var items []widget.MenuItem
 	if row.Category {
 		label := "Collapse"
@@ -306,6 +326,66 @@ func (s *Shell) openGuildMenu(row store.GuildRow, x, y int) {
 		}
 	}
 	s.showPopupMenu(items, x, y)
+}
+
+// openThreadMenu shows the sidebar context menu for a thread sub-item:
+// join/leave, archive/unarchive (gated by MANAGE_THREADS or ownership), and copy
+// id.
+func (s *Shell) openThreadMenu(row store.ChannelRow, x, y int) {
+	c, _ := s.app.Store().Channel(row.ChannelID)
+	joined := c.Thread != nil && c.Thread.Joined
+	archived := c.Thread != nil && c.Thread.Archived
+	joinLabel := "Join thread"
+	if joined {
+		joinLabel = "Leave thread"
+	}
+	archiveLabel := "Archive thread"
+	if archived {
+		archiveLabel = "Unarchive thread"
+	}
+	canManage := s.canManageThread(c)
+	items := []widget.MenuItem{
+		{Label: joinLabel, OnSelect: func() {
+			s.closePopup()
+			if joined {
+				s.app.LeaveThread(row.ChannelID)
+			} else {
+				s.app.JoinThread(row.ChannelID)
+			}
+		}},
+		{Label: archiveLabel, Disabled: !canManage, OnSelect: func() {
+			s.closePopup()
+			s.app.SetThreadArchived(row.ChannelID, !archived)
+		}},
+		{Separator: true},
+		{Label: "Copy channel ID", OnSelect: func() {
+			s.closePopup()
+			s.copyID("Channel ID copied", uint64(row.ChannelID))
+		}},
+	}
+	s.showPopupMenu(items, x, y)
+}
+
+// openThreadPrompt asks for a name, then creates a message-anchored thread.
+func (s *Shell) openThreadPrompt(msg store.Message) {
+	s.overlay = NewPrompt("New thread", "Thread name…", s.styles,
+		func(name string) {
+			s.app.CreateThreadFromMessage(msg.ChannelID, msg.ID, name)
+		},
+		s.closeOverlay,
+	)
+}
+
+// canManageThread reports whether the account may archive/unarchive a thread:
+// it owns the thread, or holds MANAGE_THREADS in the guild.
+func (s *Shell) canManageThread(c store.Channel) bool {
+	if c.Thread != nil && c.Thread.OwnerID != 0 && c.Thread.OwnerID == s.app.SelfID() {
+		return true
+	}
+	if c.GuildID == 0 || c.GuildID == app.DirectMessagesGuildID {
+		return true
+	}
+	return s.app.Store().MemberCan(c.GuildID, s.app.SelfID(), store.PermManageThreads)
 }
 
 // copyID places a snowflake on the clipboard and reports the outcome.

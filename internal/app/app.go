@@ -38,6 +38,26 @@ type sender interface {
 	DeleteMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	PinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	UnpinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
+	CrosspostMessage(discord.ChannelID, discord.MessageID) (*discord.Message, error)
+}
+
+// threadClient is the slice of the arikawa client used to list and mutate
+// threads: active-thread sync on guild open, archived-thread pagination,
+// thread creation from a message, and join/leave.
+type threadClient interface {
+	ActiveThreads(discord.GuildID) (*api.ActiveThreads, error)
+	PublicArchivedThreads(discord.ChannelID, discord.Timestamp, uint) (*api.ArchivedThreads, error)
+	StartThreadWithMessage(discord.ChannelID, discord.MessageID, api.StartThreadData) (*discord.Channel, error)
+	StartThreadWithoutMessage(discord.ChannelID, api.StartThreadData) (*discord.Channel, error)
+	JoinThread(discord.ChannelID) error
+	LeaveThread(discord.ChannelID) error
+}
+
+// forumPoster creates a forum post (a thread with an embedded first message and
+// applied tags). arikawa has no typed helper for the user-account forum-create
+// payload, so it is posted as raw JSON; the seam keeps it testable.
+type forumPoster interface {
+	postForumThread(channel store.ChannelID, p forumThreadPayload) (store.ChannelID, error)
 }
 
 // historyLoader is the slice of the arikawa client used to load channel
@@ -113,6 +133,8 @@ type App struct {
 	roles    roleLoader
 	dirs     directoryLoader
 	chans    channelLoader
+	threads  threadClient
+	forum    forumPoster
 	interact componentInteractionPoster
 	handle   *session.Session
 
@@ -125,6 +147,10 @@ type App struct {
 	guildsPending   bool
 	channelsLoaded  map[store.GuildID]struct{}
 	channelsPending map[store.GuildID]struct{}
+	threadsLoaded   map[store.GuildID]struct{}
+	threadsPending  map[store.GuildID]struct{}
+	archivedLoaded  map[store.ChannelID]struct{}
+	archivedPending map[store.ChannelID]struct{}
 
 	onReady  func()
 	onChange func()
@@ -148,6 +174,8 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		roles:    sess,
 		dirs:     sess,
 		chans:    sess,
+		threads:  sess,
+		forum:    restForumPoster{sess: sess},
 		interact: restInteractionPoster{sess: sess},
 		handle:   sess,
 	}
@@ -171,6 +199,18 @@ func (a *App) ensureResourceMaps() {
 	}
 	if a.channelsPending == nil {
 		a.channelsPending = map[store.GuildID]struct{}{}
+	}
+	if a.threadsLoaded == nil {
+		a.threadsLoaded = map[store.GuildID]struct{}{}
+	}
+	if a.threadsPending == nil {
+		a.threadsPending = map[store.GuildID]struct{}{}
+	}
+	if a.archivedLoaded == nil {
+		a.archivedLoaded = map[store.ChannelID]struct{}{}
+	}
+	if a.archivedPending == nil {
+		a.archivedPending = map[store.ChannelID]struct{}{}
 	}
 }
 
@@ -317,6 +357,117 @@ func (a *App) RegisterHandlers() {
 				a.onChange()
 			}
 		})
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadCreateEvent) {
+		a.handleThreadUpsert(e.Channel)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadUpdateEvent) {
+		a.handleThreadUpsert(e.Channel)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadDeleteEvent) {
+		id := store.ChannelID(e.ID)
+		a.ui.Post(func() {
+			a.store.RemoveThread(id)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadListSyncEvent) {
+		a.handleThreadListSync(e)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadMemberUpdateEvent) {
+		id := store.ChannelID(e.ThreadMember.ID)
+		a.ui.Post(func() {
+			// A ThreadMemberUpdate for the current user means we joined; leaving
+			// arrives via ThreadMembersUpdate/RemovedMemberIDs handled below.
+			a.store.SetThreadJoined(id, true)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
+
+	a.handle.AddHandler(func(e *gateway.ThreadMembersUpdateEvent) {
+		a.handleThreadMembersUpdate(e)
+	})
+}
+
+// handleThreadUpsert writes a thread channel from a THREAD_CREATE/UPDATE event
+// into the store, preserving the client's own membership when the event omits
+// a ThreadMember (updates rarely echo it).
+func (a *App) handleThreadUpsert(ch discord.Channel) {
+	converted := convertChannel(ch)
+	hadMember := ch.ThreadMember != nil
+	a.ui.Post(func() {
+		if !hadMember && converted.Thread != nil {
+			if existing, ok := a.store.Channel(converted.ID); ok && existing.Thread != nil {
+				converted.Thread.Joined = existing.Thread.Joined
+			}
+		}
+		a.store.UpsertChannel(converted)
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+// handleThreadListSync ingests the bulk active-thread list Discord sends when
+// the client gains access to a guild's channels.
+func (a *App) handleThreadListSync(e *gateway.ThreadListSyncEvent) {
+	guildID := store.GuildID(e.GuildID)
+	threads := make([]store.Channel, 0, len(e.Threads))
+	for _, t := range e.Threads {
+		t.GuildID = e.GuildID
+		threads = append(threads, convertChannel(t))
+	}
+	joined := make(map[store.ChannelID]bool, len(e.Members))
+	for _, m := range e.Members {
+		joined[store.ChannelID(m.ID)] = true
+	}
+	a.ui.Post(func() {
+		for _, t := range threads {
+			if t.Thread != nil && joined[t.ID] {
+				t.Thread.Joined = true
+			}
+			a.store.UpsertChannel(t)
+		}
+		a.markThreadsLoaded(guildID)
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+// handleThreadMembersUpdate updates the client's own membership when it is added
+// to or removed from a thread.
+func (a *App) handleThreadMembersUpdate(e *gateway.ThreadMembersUpdateEvent) {
+	id := store.ChannelID(e.ID)
+	added := false
+	for _, m := range e.AddedMembers {
+		if store.UserID(m.UserID) == a.selfID && a.selfID != 0 {
+			added = true
+		}
+	}
+	removed := false
+	for _, uid := range e.RemovedMemberIDs {
+		if store.UserID(uid) == a.selfID && a.selfID != 0 {
+			removed = true
+		}
+	}
+	if !added && !removed {
+		return
+	}
+	a.ui.Post(func() {
+		a.store.SetThreadJoined(id, added)
+		if a.onChange != nil {
+			a.onChange()
+		}
 	})
 }
 

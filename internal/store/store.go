@@ -60,6 +60,16 @@ const (
 	ChannelCategory
 	// ChannelDM is a direct-message channel.
 	ChannelDM
+	// ChannelAnnouncement is a news channel: a text channel whose messages can
+	// be published (crossposted) to following servers.
+	ChannelAnnouncement
+	// ChannelForum is a channel that contains only threads (posts) rather than
+	// messages. Selecting one shows a post list instead of a chat view.
+	ChannelForum
+	// ChannelThread is a sub-channel parented to a text, announcement, or forum
+	// channel. The public/private/announcement distinction is carried in
+	// [ThreadMeta]; they all render the same. Forum posts are threads too.
+	ChannelThread
 )
 
 // Guild is a Discord server.
@@ -69,6 +79,10 @@ type Guild struct {
 	// OwnerID is the guild owner's user ID. The owner implicitly holds every
 	// permission (see Store.MemberPermissions). Zero when unknown.
 	OwnerID UserID
+	// RulesChannelID is the guild's designated rules channel, if any. It is a
+	// plain text channel (not a distinct type) that the sidebar decorates with a
+	// rules badge and renders read-only. Zero when unset.
+	RulesChannelID ChannelID
 }
 
 // Channel is a channel within a guild.
@@ -80,8 +94,76 @@ type Channel struct {
 	// Position is the channel's sort key within the guild (or within its
 	// category). ParentID is the category channel this one is nested under, or
 	// zero for top-level channels; it drives category grouping in the sidebar.
+	// For threads, ParentID is the text/announcement/forum channel they hang off.
 	Position int
 	ParentID ChannelID
+	// Overwrites are the channel's permission overrides for roles and members,
+	// applied on top of guild-level permissions by [Store.ChannelPermissions].
+	Overwrites []PermissionOverwrite
+	// Thread is non-nil when Kind is [ChannelThread], carrying thread-specific
+	// metadata (archive/lock state, counts, membership).
+	Thread *ThreadMeta
+	// Forum is non-nil when Kind is [ChannelForum], carrying the available tag
+	// set and default sort order. A forum post is a [ChannelThread] whose
+	// ThreadMeta.AppliedTags references these tags.
+	Forum *ForumMeta
+}
+
+// PermissionOverwrite is a single channel permission override, mirroring
+// Discord's overwrite object: a role or member and the permission bits it
+// allows and denies. [Store.ChannelPermissions] folds these over the member's
+// guild-level permissions.
+type PermissionOverwrite struct {
+	// ID is the role or member snowflake the overwrite targets.
+	ID uint64
+	// Role is true when the overwrite targets a role, false when a member.
+	Role  bool
+	Allow Permission
+	Deny  Permission
+}
+
+// ThreadSort selects how a forum's posts are ordered in the post list.
+type ThreadSort int
+
+const (
+	// SortLatestActivity orders posts by most recent activity (the default).
+	SortLatestActivity ThreadSort = iota
+	// SortCreationDate orders posts newest-created first.
+	SortCreationDate
+)
+
+// ThreadMeta carries the thread-specific fields a [ChannelThread] needs beyond
+// the common [Channel] shape.
+type ThreadMeta struct {
+	Archived     bool
+	Locked       bool
+	MessageCount int
+	MemberCount  int
+	OwnerID      UserID
+	// LastActive is the thread's most recent activity time, used to sort active
+	// threads (descending) in the sidebar and forum post list.
+	LastActive time.Time
+	// Joined reports whether the logged-in account is a member of the thread,
+	// tracked through THREAD_MEMBER_UPDATE.
+	Joined bool
+	// AppliedTags are the forum tag IDs applied to this post (empty for
+	// non-forum threads).
+	AppliedTags []uint64
+}
+
+// ForumMeta carries the forum-channel configuration a [ChannelForum] needs:
+// the tags posts may carry and the default post ordering.
+type ForumMeta struct {
+	Tags        []Tag
+	DefaultSort ThreadSort
+}
+
+// Tag is a forum tag that can be applied to posts. Emoji is the unicode glyph
+// or empty when the tag has no (or a custom) emoji.
+type Tag struct {
+	ID    uint64
+	Name  string
+	Emoji string
 }
 
 // GuildFolder groups guilds in the sidebar rail, mirroring Discord's
@@ -335,6 +417,12 @@ func (s *Store) Guilds() []Guild {
 func (s *Store) GuildName(id GuildID) (string, bool) {
 	g, ok := s.guilds[id]
 	return g.Name, ok
+}
+
+// Guild returns the guild with id, if known.
+func (s *Store) Guild(id GuildID) (Guild, bool) {
+	g, ok := s.guilds[id]
+	return g, ok
 }
 
 // UpsertChannel inserts or updates a channel. Channels are returned from

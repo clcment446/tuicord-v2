@@ -67,12 +67,22 @@ type Colors struct {
 	Error      string `toml:"error"`
 }
 
+// Display controls presentation details that are not colors.
+type Display struct {
+	// ASCII forces ASCII-only glyphs for channel badges and sidebar markers,
+	// for terminals or fonts without good Unicode symbol coverage. The client
+	// also switches to ASCII automatically when NO_COLOR is set in the
+	// environment.
+	ASCII bool `toml:"ascii"`
+}
+
 // Config is the full user configuration.
 type Config struct {
-	Layout Layout `toml:"layout"`
-	Keys   Keys   `toml:"keys"`
-	Colors Colors `toml:"colors"`
-	Nitro  Nitro  `toml:"nitro"`
+	Layout  Layout  `toml:"layout"`
+	Keys    Keys    `toml:"keys"`
+	Colors  Colors  `toml:"colors"`
+	Nitro   Nitro   `toml:"nitro"`
+	Display Display `toml:"display"`
 }
 
 // Default returns the built-in configuration used when no file exists and as

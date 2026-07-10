@@ -15,6 +15,7 @@ type TextInput struct {
 	cursor           int
 	scroll           int
 	focused          bool
+	readOnly         bool
 	cursorVisible    bool
 	style            screen.Style
 	placeholderStyle screen.Style
@@ -83,9 +84,28 @@ func (w *TextInput) SetFocused(focused bool) {
 	}
 }
 
-// CanFocus reports that the input can receive keyboard focus.
+// CanFocus reports that the input can receive keyboard focus. A read-only input
+// declines focus so Tab navigation skips it.
 func (w *TextInput) CanFocus() bool {
-	return w != nil
+	return w != nil && !w.readOnly
+}
+
+// SetReadOnly toggles read-only mode: the input ignores editing and submission
+// events and no longer accepts focus. It is used for the composer in channels
+// where the account lacks SEND_MESSAGES (rules, most announcement channels).
+func (w *TextInput) SetReadOnly(readOnly bool) {
+	if w == nil {
+		return
+	}
+	w.readOnly = readOnly
+	if readOnly {
+		w.focused = false
+	}
+}
+
+// ReadOnly reports whether the input is in read-only mode.
+func (w *TextInput) ReadOnly() bool {
+	return w != nil && w.readOnly
 }
 
 // PreferredFocus reports that text inputs should receive initial focus.
@@ -99,6 +119,14 @@ func (w *TextInput) SetStyle(style screen.Style) {
 		return
 	}
 	w.style = style
+}
+
+// SetPlaceholder replaces the placeholder text shown when the input is empty.
+func (w *TextInput) SetPlaceholder(placeholder string) {
+	if w == nil {
+		return
+	}
+	w.placeholder = placeholder
 }
 
 // SetPlaceholderStyle sets the style used when the input is empty.
@@ -187,9 +215,10 @@ func (w *TextInput) Draw(r screen.Region) {
 	r.Set(cursorX, 0, styled(content, w.cursorStyle))
 }
 
-// Handle edits the input for key and paste events.
+// Handle edits the input for key and paste events. A read-only input consumes
+// nothing, so its container can react to the same keys.
 func (w *TextInput) Handle(ev tui.Event) bool {
-	if w == nil {
+	if w == nil || w.readOnly {
 		return false
 	}
 	switch ev := ev.(type) {
