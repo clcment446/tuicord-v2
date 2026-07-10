@@ -55,6 +55,9 @@ func run() error {
 
 	mv := ui.NewMainView(orch, cfg, styles)
 	shell := ui.NewShell(orch, mv, cfg, styles, stop)
+	mv.OnPersistError(func(err error) {
+		shell.ShowToast("View state", err)
+	})
 	orch.OnReady(mv.Refresh)
 	orch.OnChange(mv.RefreshChannels)
 	orch.OnError(func(err error) {

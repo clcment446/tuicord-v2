@@ -17,6 +17,14 @@ import (
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
+	"awesomeProject/internal/uistate"
+)
+
+// Sidebar row glyphs: collapse arrows and the local-pin marker.
+const (
+	glyphExpanded  = "▾"
+	glyphCollapsed = "▸"
+	glyphPinned    = "★"
 )
 
 // MainView owns the widget tree and the index→ID maps needed to translate list
@@ -36,8 +44,11 @@ type MainView struct {
 	composerTarget store.Message
 	replyMention   bool
 
-	guildIDs   []store.GuildID
-	channelIDs []store.ChannelID
+	state     *uistate.State
+	reportErr func(error)
+
+	guildRows   []store.GuildRow
+	channelRows []store.ChannelRow
 
 	// Root is the composed widget passed to App.Run.
 	Root tui.Widget
@@ -53,7 +64,11 @@ const (
 
 // NewMainView assembles the four-panel layout and wires selection callbacks.
 func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
-	mv := &MainView{app: a, cfg: cfg, styles: styles}
+	state, _ := uistate.Load()
+	if state == nil {
+		state = &uistate.State{}
+	}
+	mv := &MainView{app: a, cfg: cfg, styles: styles, state: state}
 
 	mv.guildList = widget.NewItemList(nil)
 	mv.guildList.SetStyle(styles.Text)
@@ -148,44 +163,94 @@ func newChatMediaFetcher() *media.Fetcher {
 // Refresh repopulates the guild and channel lists from the store. Call on the
 // UI goroutine (e.g. from App.OnReady) after state changes.
 func (mv *MainView) Refresh() {
-	guilds := mv.app.Store().Guilds()
-	mv.guildIDs = mv.guildIDs[:0]
-	items := make([]widget.Item, 0, len(guilds))
-	activeIndex := -1
-	for _, g := range guilds {
-		if g.ID == mv.app.ActiveGuild() {
-			activeIndex = len(mv.guildIDs)
-		}
-		mv.guildIDs = append(mv.guildIDs, g.ID)
-		items = append(items, widget.Item{Label: g.Name})
-	}
-	mv.guildList.SetItems(items)
-
+	mv.rebuildGuilds()
 	switch {
-	case activeIndex >= 0:
-		mv.guildList.SetSelectedSilent(activeIndex)
+	case mv.guildRowIndex(mv.app.ActiveGuild()) >= 0:
 		mv.refreshChannels()
 		mv.refreshMembers(mv.app.ActiveGuild())
-	case mv.app.ActiveGuild() == 0 && len(mv.guildIDs) > 0:
-		mv.onGuildSelected(0)
+	case mv.app.ActiveGuild() == 0 && mv.firstGuildRow() >= 0:
+		i := mv.firstGuildRow()
+		mv.guildList.SetSelectedSilent(i)
+		mv.onGuildSelected(i)
 	default:
 		mv.refreshChannels()
 	}
 }
 
+// rebuildGuilds rebuilds the guild rail rows (folders + guilds + pins) and keeps
+// the selection on the active guild.
+func (mv *MainView) rebuildGuilds() {
+	st := mv.app.Store()
+	mv.guildRows = store.OrderGuilds(st.GuildFolders(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
+	items := make([]widget.Item, len(mv.guildRows))
+	for i, row := range mv.guildRows {
+		items[i] = mv.guildItem(row)
+	}
+	mv.guildList.SetItems(items)
+	if i := mv.guildRowIndex(mv.app.ActiveGuild()); i >= 0 {
+		mv.guildList.SetSelectedSilent(i)
+	}
+}
+
+func (mv *MainView) guildItem(row store.GuildRow) widget.Item {
+	if row.Folder {
+		arrow := glyphExpanded
+		if row.Collapsed {
+			arrow = glyphCollapsed
+		}
+		return widget.Item{Label: arrow + " " + row.Name, Style: mv.headerStyle()}
+	}
+	label := row.Name
+	switch {
+	case row.Pinned:
+		label = glyphPinned + " " + row.Name
+	case row.Indent:
+		label = "  " + row.Name
+	}
+	return widget.Item{Label: label}
+}
+
+func (mv *MainView) guildRowIndex(id store.GuildID) int {
+	if id == 0 {
+		return -1
+	}
+	for i, row := range mv.guildRows {
+		if !row.Folder && row.GuildID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (mv *MainView) firstGuildRow() int {
+	for i, row := range mv.guildRows {
+		if !row.Folder {
+			return i
+		}
+	}
+	return -1
+}
+
 func (mv *MainView) onGuildSelected(index int) {
-	if index < 0 || index >= len(mv.guildIDs) {
+	if index < 0 || index >= len(mv.guildRows) {
 		return
 	}
-	guild := mv.guildIDs[index]
+	row := mv.guildRows[index]
+	if row.Folder {
+		mv.state.ToggleCollapsedFolder(row.FolderID)
+		mv.persist()
+		mv.rebuildGuilds()
+		return
+	}
+	guild := row.GuildID
 	mv.app.SetActive(guild, 0)
 	mv.app.LoadRoles(guild)
 	mv.app.LoadChannels(guild)
 	mv.refreshChannels()
-	// Auto-select the first text channel.
-	if len(mv.channelIDs) > 0 {
-		mv.channelList.SetSelectedSilent(0)
-		mv.onChannelSelected(0)
+	// Auto-select the first navigable channel.
+	if i := mv.firstNavigableChannel(); i >= 0 {
+		mv.channelList.SetSelectedSilent(i)
+		mv.onChannelSelected(i)
 	}
 	mv.refreshMembers(guild)
 }
@@ -195,33 +260,192 @@ func (mv *MainView) onGuildSelected(index int) {
 func (mv *MainView) RefreshChannels() { mv.refreshChannels() }
 
 func (mv *MainView) refreshChannels() {
+	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()
-	channels := mv.app.Store().Channels(guild)
-	mv.channelIDs = mv.channelIDs[:0]
-	items := make([]widget.Item, 0, len(channels))
-	activeIndex := -1
-	for _, c := range channels {
-		if c.Kind != store.ChannelText && c.Kind != store.ChannelDM {
-			continue
-		}
-		label := "# " + c.Name
-		if c.Kind == store.ChannelDM {
-			label = c.Name
-		}
-		if c.ID == mv.app.ActiveChannel() {
-			activeIndex = len(mv.channelIDs)
-		}
-		mv.channelIDs = append(mv.channelIDs, c.ID)
-		items = append(items, widget.Item{Label: label, Badge: unreadBadge(mv.app.Store().Unread(c.ID))})
+	channels := st.Channels(guild)
+	mv.channelRows = store.GroupChannels(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet())
+	items := make([]widget.Item, len(mv.channelRows))
+	for i, row := range mv.channelRows {
+		items[i] = mv.channelItem(row)
 	}
 	mv.channelList.SetItems(items)
 	switch {
-	case activeIndex >= 0:
-		mv.channelList.SetSelectedSilent(activeIndex)
-	case mv.app.ActiveChannel() == 0 && len(mv.channelIDs) > 0:
-		mv.channelList.SetSelectedSilent(0)
-		mv.onChannelSelected(0)
+	case mv.channelRowIndex(mv.app.ActiveChannel()) >= 0:
+		mv.channelList.SetSelectedSilent(mv.channelRowIndex(mv.app.ActiveChannel()))
+	case mv.app.ActiveChannel() == 0 && mv.firstNavigableChannel() >= 0:
+		i := mv.firstNavigableChannel()
+		mv.channelList.SetSelectedSilent(i)
+		mv.onChannelSelected(i)
 	}
+}
+
+func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
+	if row.Category {
+		arrow := glyphExpanded
+		if row.Collapsed {
+			arrow = glyphCollapsed
+		}
+		return widget.Item{Label: arrow + " " + row.Name, Style: mv.headerStyle()}
+	}
+	label := channelPrefix(row.Kind) + row.Name
+	switch {
+	case row.Pinned:
+		label = glyphPinned + " " + label
+	case row.Indent:
+		label = "  " + label
+	}
+	badge := ""
+	if row.Navigable() {
+		badge = unreadBadge(mv.app.Store().Unread(row.ChannelID))
+	}
+	return widget.Item{Label: label, Badge: badge}
+}
+
+func channelPrefix(kind store.ChannelKind) string {
+	switch kind {
+	case store.ChannelVoice:
+		return "~ "
+	case store.ChannelDM:
+		return ""
+	default:
+		return "# "
+	}
+}
+
+func (mv *MainView) channelRowIndex(id store.ChannelID) int {
+	if id == 0 {
+		return -1
+	}
+	for i, row := range mv.channelRows {
+		if row.Navigable() && row.ChannelID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+func (mv *MainView) firstNavigableChannel() int {
+	for i, row := range mv.channelRows {
+		if row.Navigable() {
+			return i
+		}
+	}
+	return -1
+}
+
+func (mv *MainView) onChannelSelected(index int) {
+	if index < 0 || index >= len(mv.channelRows) {
+		return
+	}
+	row := mv.channelRows[index]
+	if row.Category {
+		mv.state.ToggleCollapsedCategory(uint64(row.ChannelID))
+		mv.persist()
+		mv.refreshChannels()
+		return
+	}
+	if !row.Navigable() {
+		return
+	}
+	mv.app.SetActive(mv.app.ActiveGuild(), row.ChannelID)
+	mv.app.LoadHistory(row.ChannelID, 50)
+}
+
+func (mv *MainView) headerStyle() screen.Style {
+	s := mv.styles.Muted
+	s.Attrs |= screen.Bold
+	return s
+}
+
+// pinnedGuildIDs / pinnedChannelIDs / collapsedCategorySet convert the persisted
+// numeric state into the store's ID types for the ordering functions.
+func (mv *MainView) pinnedGuildIDs() []store.GuildID {
+	out := make([]store.GuildID, 0, len(mv.state.PinnedGuilds))
+	for _, id := range mv.state.PinnedGuilds {
+		out = append(out, store.GuildID(id))
+	}
+	return out
+}
+
+func (mv *MainView) pinnedChannelIDs() []store.ChannelID {
+	out := make([]store.ChannelID, 0, len(mv.state.PinnedChannels))
+	for _, id := range mv.state.PinnedChannels {
+		out = append(out, store.ChannelID(id))
+	}
+	return out
+}
+
+func (mv *MainView) collapsedCategorySet() map[store.ChannelID]bool {
+	out := make(map[store.ChannelID]bool, len(mv.state.CollapsedCategories))
+	for _, id := range mv.state.CollapsedCategories {
+		out[store.ChannelID(id)] = true
+	}
+	return out
+}
+
+// persist writes the view-state file, surfacing any error through the reporter
+// so a failed write is visible rather than silently lost.
+func (mv *MainView) persist() {
+	if err := mv.state.Save(); err != nil && mv.reportErr != nil {
+		mv.reportErr(err)
+	}
+}
+
+// OnPersistError registers a callback used to report view-state save failures.
+func (mv *MainView) OnPersistError(fn func(error)) { mv.reportErr = fn }
+
+// GuildContext returns the guild row a pending right-click landed on, if any.
+func (mv *MainView) GuildContext() (store.GuildRow, bool) {
+	idx, ok := mv.guildList.TakeContext()
+	if !ok || idx < 0 || idx >= len(mv.guildRows) {
+		return store.GuildRow{}, false
+	}
+	return mv.guildRows[idx], true
+}
+
+// ChannelContext returns the channel row a pending right-click landed on, if any.
+func (mv *MainView) ChannelContext() (store.ChannelRow, bool) {
+	idx, ok := mv.channelList.TakeContext()
+	if !ok || idx < 0 || idx >= len(mv.channelRows) {
+		return store.ChannelRow{}, false
+	}
+	return mv.channelRows[idx], true
+}
+
+// IsGuildPinned reports whether a guild is locally pinned.
+func (mv *MainView) IsGuildPinned(id store.GuildID) bool { return mv.state.IsPinnedGuild(uint64(id)) }
+
+// IsChannelPinned reports whether a channel is locally pinned.
+func (mv *MainView) IsChannelPinned(id store.ChannelID) bool {
+	return mv.state.IsPinnedChannel(uint64(id))
+}
+
+// TogglePinGuild flips a guild's local pin and rebuilds the rail.
+func (mv *MainView) TogglePinGuild(id store.GuildID) {
+	mv.state.TogglePinnedGuild(uint64(id))
+	mv.persist()
+	mv.rebuildGuilds()
+}
+
+// TogglePinChannel flips a channel's local pin and rebuilds the sidebar.
+func (mv *MainView) TogglePinChannel(id store.ChannelID) {
+	mv.state.TogglePinnedChannel(uint64(id))
+	mv.persist()
+	mv.refreshChannels()
+}
+
+// ToggleCollapseFolder flips a folder's collapsed state and rebuilds the rail.
+func (mv *MainView) ToggleCollapseFolder(id int64) {
+	mv.state.ToggleCollapsedFolder(id)
+	mv.persist()
+	mv.rebuildGuilds()
+}
+
+// ToggleCollapseCategory flips a category's collapsed state and rebuilds the sidebar.
+func (mv *MainView) ToggleCollapseCategory(id store.ChannelID) {
+	mv.state.ToggleCollapsedCategory(uint64(id))
+	mv.persist()
+	mv.refreshChannels()
 }
 
 // unreadBadge formats an unread count, capping the display at 99+.
@@ -243,15 +467,6 @@ func (mv *MainView) refreshMembers(guild store.GuildID) {
 		items = append(items, widget.Item{Label: m.Name})
 	}
 	mv.memberList.SetItems(items)
-}
-
-func (mv *MainView) onChannelSelected(index int) {
-	if index < 0 || index >= len(mv.channelIDs) {
-		return
-	}
-	channel := mv.channelIDs[index]
-	mv.app.SetActive(mv.app.ActiveGuild(), channel)
-	mv.app.LoadHistory(channel, 50)
 }
 
 // resolver builds a markup resolver bound to the active guild, so mentions and

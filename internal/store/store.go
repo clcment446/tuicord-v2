@@ -73,11 +73,29 @@ type Guild struct {
 
 // Channel is a channel within a guild.
 type Channel struct {
-	ID       ChannelID
-	GuildID  GuildID
-	Name     string
-	Kind     ChannelKind
+	ID      ChannelID
+	GuildID GuildID
+	Name    string
+	Kind    ChannelKind
+	// Position is the channel's sort key within the guild (or within its
+	// category). ParentID is the category channel this one is nested under, or
+	// zero for top-level channels; it drives category grouping in the sidebar.
 	Position int
+	ParentID ChannelID
+}
+
+// GuildFolder groups guilds in the sidebar rail, mirroring Discord's
+// user_settings.guild_folders. Discord represents an un-foldered guild as a
+// single-element folder with an empty Name; [OrderGuilds] renders those as bare
+// top-level guilds rather than folders.
+type GuildFolder struct {
+	// ID is the folder identifier. It is zero for the synthetic single-guild
+	// folders Discord uses to place un-foldered guilds.
+	ID   int64
+	Name string
+	// Color is the folder's 0xRRGGBB tint, or zero when unset.
+	Color    uint32
+	GuildIDs []GuildID
 }
 
 // Message is a single chat message. Pending marks an optimistic local message
@@ -161,6 +179,8 @@ type Store struct {
 	roles   map[GuildID]map[RoleID]Role
 
 	unread map[ChannelID]int
+
+	guildFolders []GuildFolder
 }
 
 // New returns an empty store. A historyLimit <= 0 uses DefaultHistoryLimit.
@@ -209,6 +229,24 @@ func (s *Store) UpsertGuild(g Guild) {
 		s.guildOrder = append(s.guildOrder, g.ID)
 	}
 	s.guilds[g.ID] = g
+}
+
+// SetGuildFolders records the guild-folder layout from READY (or a later
+// USER_SETTINGS update). Passing nil clears it, in which case the sidebar falls
+// back to first-seen guild order.
+func (s *Store) SetGuildFolders(folders []GuildFolder) {
+	s.guildFolders = append(s.guildFolders[:0], folders...)
+}
+
+// GuildFolders returns the current guild-folder layout, or nil when none is
+// known.
+func (s *Store) GuildFolders() []GuildFolder {
+	if len(s.guildFolders) == 0 {
+		return nil
+	}
+	out := make([]GuildFolder, len(s.guildFolders))
+	copy(out, s.guildFolders)
+	return out
 }
 
 // Guilds returns guilds in first-seen order.

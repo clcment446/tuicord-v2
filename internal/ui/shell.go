@@ -101,6 +101,14 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			s.openMessageMenu(msg, mouse.X, mouse.Y)
 			return true
 		}
+		if row, ok := s.mv.ChannelContext(); ok {
+			s.openChannelMenu(row, mouse.X, mouse.Y)
+			return true
+		}
+		if row, ok := s.mv.GuildContext(); ok {
+			s.openGuildMenu(row, mouse.X, mouse.Y)
+			return true
+		}
 	}
 
 	if isKey {
@@ -214,6 +222,90 @@ func (s *Shell) openDeleteMessageConfirm(msg store.Message, x, y int, label stri
 		}},
 		{Label: "Cancel", OnSelect: s.closePopup},
 	}
+	menu := widget.NewMenu(items)
+	s.styleMenu(menu)
+	menu.SetAnchor(x, y)
+	menu.OnDismiss(s.closePopup)
+	s.popup = menu
+}
+
+// openChannelMenu shows the sidebar context menu for a channel or category:
+// pin/unpin and copy id for channels, collapse/expand for categories.
+func (s *Shell) openChannelMenu(row store.ChannelRow, x, y int) {
+	var items []widget.MenuItem
+	if row.Category {
+		label := "Collapse"
+		if row.Collapsed {
+			label = "Expand"
+		}
+		items = []widget.MenuItem{{Label: label, OnSelect: func() {
+			s.closePopup()
+			s.mv.ToggleCollapseCategory(row.ChannelID)
+		}}}
+	} else {
+		pinLabel := "Pin channel"
+		if s.mv.IsChannelPinned(row.ChannelID) {
+			pinLabel = "Unpin channel"
+		}
+		items = []widget.MenuItem{
+			{Label: pinLabel, OnSelect: func() {
+				s.closePopup()
+				s.mv.TogglePinChannel(row.ChannelID)
+			}},
+			{Separator: true},
+			{Label: "Copy channel ID", OnSelect: func() {
+				s.closePopup()
+				s.copyID("Channel ID copied", uint64(row.ChannelID))
+			}},
+		}
+	}
+	s.showPopupMenu(items, x, y)
+}
+
+// openGuildMenu shows the sidebar context menu for a guild or folder: pin/unpin
+// and copy id for guilds, collapse/expand for folders.
+func (s *Shell) openGuildMenu(row store.GuildRow, x, y int) {
+	var items []widget.MenuItem
+	if row.Folder {
+		label := "Collapse"
+		if row.Collapsed {
+			label = "Expand"
+		}
+		items = []widget.MenuItem{{Label: label, OnSelect: func() {
+			s.closePopup()
+			s.mv.ToggleCollapseFolder(row.FolderID)
+		}}}
+	} else {
+		pinLabel := "Pin server"
+		if s.mv.IsGuildPinned(row.GuildID) {
+			pinLabel = "Unpin server"
+		}
+		items = []widget.MenuItem{
+			{Label: pinLabel, OnSelect: func() {
+				s.closePopup()
+				s.mv.TogglePinGuild(row.GuildID)
+			}},
+			{Separator: true},
+			{Label: "Copy server ID", OnSelect: func() {
+				s.closePopup()
+				s.copyID("Server ID copied", uint64(row.GuildID))
+			}},
+		}
+	}
+	s.showPopupMenu(items, x, y)
+}
+
+// copyID places a snowflake on the clipboard and reports the outcome.
+func (s *Shell) copyID(notice string, id uint64) {
+	if err := term.CopyToClipboard(os.Stdout, strconv.FormatUint(id, 10)); err != nil {
+		s.ShowToast("Clipboard error", err)
+		return
+	}
+	s.ShowNotice("Copied", notice)
+}
+
+// showPopupMenu styles, anchors, and installs a context menu as the active popup.
+func (s *Shell) showPopupMenu(items []widget.MenuItem, x, y int) {
 	menu := widget.NewMenu(items)
 	s.styleMenu(menu)
 	menu.SetAnchor(x, y)

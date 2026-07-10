@@ -37,6 +37,7 @@ func convertChannel(c discord.Channel) store.Channel {
 		Name:     name,
 		Kind:     convertChannelKind(c.Type),
 		Position: c.Position,
+		ParentID: store.ChannelID(c.ParentID),
 	}
 }
 
@@ -511,6 +512,30 @@ func convertRole(r discord.Role) store.Role {
 		Mentionable: r.Mentionable,
 		Permissions: store.Permission(r.Permissions),
 	}
+}
+
+// convertGuildFolders maps arikawa's user-settings guild folders into the
+// store's representation, preserving order. Discord encodes an un-foldered
+// guild as a single-element folder with an empty name and zero id, which
+// store.OrderGuilds renders as a bare top-level guild.
+func convertGuildFolders(in []gateway.GuildFolder) []store.GuildFolder {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.GuildFolder, 0, len(in))
+	for _, f := range in {
+		ids := make([]store.GuildID, 0, len(f.GuildIDs))
+		for _, id := range f.GuildIDs {
+			ids = append(ids, store.GuildID(id))
+		}
+		out = append(out, store.GuildFolder{
+			ID:       int64(f.ID),
+			Name:     f.Name,
+			Color:    discordColor(f.Color),
+			GuildIDs: ids,
+		})
+	}
+	return out
 }
 
 // ingestGuild writes a guild and its channels/members into the store.

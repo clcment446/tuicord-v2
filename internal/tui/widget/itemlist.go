@@ -31,6 +31,9 @@ type ItemList struct {
 	onSelect      func(int)
 	node          layout.Node
 	viewH         int
+
+	contextIndex int
+	contextSet   bool
 }
 
 // NewItemList returns a list containing items.
@@ -246,6 +249,18 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 	case input.MouseEvent:
 		switch ev.Kind {
 		case input.MousePress:
+			if ev.Btn == input.ButtonRight {
+				index := w.offset + ev.Y
+				if index < 0 || index >= len(w.items) {
+					return false
+				}
+				// Record the row for the owner to open a context menu, but do
+				// not consume the event: the owning shell intercepts the
+				// right-click higher up (same contract as ChatView).
+				w.contextIndex = index
+				w.contextSet = true
+				return false
+			}
 			if ev.Btn != input.ButtonLeft {
 				return false
 			}
@@ -271,6 +286,18 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+// TakeContext returns and clears the row index most recently right-clicked. The
+// owning widget calls it after a right-click to open a context menu; ok is false
+// when no unhandled right-click is pending.
+func (w *ItemList) TakeContext() (int, bool) {
+	if w == nil || !w.contextSet {
+		return 0, false
+	}
+	index := w.contextIndex
+	w.contextSet = false
+	return index, true
 }
 
 // ScrollExtent implements ScrollModel: the first visible row, the height drawn
