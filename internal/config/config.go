@@ -38,6 +38,16 @@ type Keys struct {
 	Help          string `toml:"help"`
 	NextPanel     string `toml:"next_panel"`
 	FocusComposer string `toml:"focus_composer"`
+	// Picker opens the emoji/sticker picker over the composer.
+	Picker string `toml:"picker"`
+}
+
+// Nitro controls how the picker sends emoji and stickers the account cannot use
+// natively.
+type Nitro struct {
+	// Fake enables the "fake nitro" fallback: instead of a native emoji/sticker
+	// send, the picker inserts the CDN URL, which tuicord renders back inline.
+	Fake bool `toml:"fake"`
 }
 
 // Colors holds hex colors (e.g. "#5865F2") applied to the widget tree.
@@ -62,6 +72,7 @@ type Config struct {
 	Layout Layout `toml:"layout"`
 	Keys   Keys   `toml:"keys"`
 	Colors Colors `toml:"colors"`
+	Nitro  Nitro  `toml:"nitro"`
 }
 
 // Default returns the built-in configuration used when no file exists and as
@@ -80,7 +91,9 @@ func Default() Config {
 			Help:          "ctrl+/",
 			NextPanel:     "tab",
 			FocusComposer: "esc",
+			Picker:        "ctrl+e",
 		},
+		Nitro: Nitro{Fake: true},
 		// The "miyabi" palette — Terafox teal dark theme.
 		Colors: Colors{
 			Background: "#152528",
