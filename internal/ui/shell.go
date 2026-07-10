@@ -118,6 +118,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 		case keyMatches(key, s.cfg.Keys.QuickSwitcher):
 			s.openQuickSwitcher()
 			return true
+		case keyMatches(key, s.cfg.Keys.Picker):
+			s.openPicker()
+			return true
 		case keyMatches(key, s.cfg.Keys.Help):
 			s.overlay = NewHelpOverlay(s.cfg)
 			return true
@@ -159,6 +162,16 @@ func (s *Shell) openQuickSwitcher() {
 			s.app.SetActive(guild, channel)
 			s.mv.RefreshChannels()
 		},
+		s.closeOverlay,
+	)
+}
+
+// openPicker opens the emoji/sticker picker overlay over the composer. Chosen
+// entries are inserted at the composer cursor.
+func (s *Shell) openPicker() {
+	st := s.app.Store()
+	s.overlay = NewPicker(st, s.styles, s.app.ActiveGuild(), st.HasNitro(), s.cfg.Nitro.Fake,
+		func(text string) { s.mv.InsertIntoComposer(text) },
 		s.closeOverlay,
 	)
 }
