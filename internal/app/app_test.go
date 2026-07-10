@@ -27,6 +27,7 @@ type fakeSender struct {
 	deleted      int
 	pinned       int
 	unpinned     int
+	crossposted  int
 	err          error
 	done         chan struct{}
 	history      []discord.Message
@@ -99,6 +100,16 @@ func (f *fakeSender) UnpinMessage(discord.ChannelID, discord.MessageID, api.Audi
 		close(f.done)
 	}
 	return f.err
+}
+
+func (f *fakeSender) CrosspostMessage(discord.ChannelID, discord.MessageID) (*discord.Message, error) {
+	f.mu.Lock()
+	f.crossposted++
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return &discord.Message{}, f.err
 }
 
 func (f *fakeSender) Messages(discord.ChannelID, uint) ([]discord.Message, error) {

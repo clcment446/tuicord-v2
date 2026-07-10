@@ -119,11 +119,28 @@ type ChannelRow struct {
 	Indent    bool
 	Pinned    bool
 	ChannelID ChannelID
+	// Depth is the indentation level: 0 top-level, 1 under a category (or a
+	// thread under a top-level channel), 2 a thread under a categorized channel.
+	// Indent stays true whenever Depth > 0 for backwards compatibility.
+	Depth int
+	// Thread marks a thread sub-item (a channel nested under its parent
+	// channel). Thread rows are navigable and open as the active channel.
+	Thread bool
 }
 
-// Navigable reports whether selecting this row switches to a channel.
+// Navigable reports whether selecting this row switches the main view to a
+// channel. Category headers and voice channels are not navigable; forum
+// channels are (selecting one opens the post-list view rather than a chat).
 func (r ChannelRow) Navigable() bool {
-	return !r.Category && (r.Kind == ChannelText || r.Kind == ChannelDM)
+	if r.Category {
+		return false
+	}
+	switch r.Kind {
+	case ChannelText, ChannelDM, ChannelAnnouncement, ChannelThread, ChannelForum:
+		return true
+	default:
+		return false
+	}
 }
 
 // GroupChannels flattens a guild's channels into render rows: a pinned section,
@@ -141,31 +158,58 @@ func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[Channel
 		pinnedSet[id] = true
 	}
 
+	byID := make(map[ChannelID]Channel, len(channels))
 	categories := make(map[ChannelID]bool)
 	for _, c := range channels {
+		byID[c.ID] = c
 		if c.Kind == ChannelCategory {
 			categories[c.ID] = true
 		}
 	}
 
-	rows := make([]ChannelRow, 0, len(channels))
-	// Pinned section, in Position order, only content channels.
+	// Active threads grouped under their parent, but only when the parent is a
+	// text or announcement channel — forum posts live in the forum's post view,
+	// not the sidebar.
+	threadsByParent := make(map[ChannelID][]Channel)
 	for _, c := range channels {
-		if c.Kind == ChannelCategory || !pinnedSet[c.ID] {
+		if c.Kind != ChannelThread || c.Thread == nil || c.Thread.Archived {
 			continue
 		}
-		rows = append(rows, channelContentRow(c, false, true))
+		parent, ok := byID[c.ParentID]
+		if !ok || (parent.Kind != ChannelText && parent.Kind != ChannelAnnouncement) {
+			continue
+		}
+		threadsByParent[c.ParentID] = append(threadsByParent[c.ParentID], c)
+	}
+	for _, ts := range threadsByParent {
+		sortThreads(ts)
+	}
+
+	rows := make([]ChannelRow, 0, len(channels))
+	emit := func(c Channel, depth int, pinnedRow bool) {
+		rows = append(rows, channelContentRow(c, depth, pinnedRow))
+		for _, t := range threadsByParent[c.ID] {
+			rows = append(rows, threadRow(t, depth+1))
+		}
+	}
+
+	// Pinned section, in Position order, only content channels.
+	for _, c := range channels {
+		if c.Kind == ChannelCategory || c.Kind == ChannelThread || !pinnedSet[c.ID] {
+			continue
+		}
+		emit(c, 0, true)
 	}
 
 	// Uncategorized content channels (no parent, or an unknown parent).
 	for _, c := range channels {
-		if c.Kind == ChannelCategory || pinnedSet[c.ID] {
+		if c.Kind == ChannelCategory || c.Kind == ChannelThread || pinnedSet[c.ID] {
 			continue
 		}
 		if c.ParentID != 0 && categories[c.ParentID] {
 			continue
 		}
-		rows = append(rows, channelContentRow(c, false, false))
+		emit(c, 0, false)
 	}
 
 	// Categories with their children.
@@ -174,13 +218,16 @@ func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[Channel
 			continue
 		}
 		isCollapsed := collapsed[cat.ID]
-		children := make([]ChannelRow, 0)
+		var children []ChannelRow
 		if !isCollapsed {
 			for _, c := range channels {
-				if c.Kind == ChannelCategory || pinnedSet[c.ID] || c.ParentID != cat.ID {
+				if c.Kind == ChannelCategory || c.Kind == ChannelThread || pinnedSet[c.ID] || c.ParentID != cat.ID {
 					continue
 				}
-				children = append(children, channelContentRow(c, true, false))
+				children = append(children, channelContentRow(c, 1, false))
+				for _, t := range threadsByParent[c.ID] {
+					children = append(children, threadRow(t, 2))
+				}
 			}
 		}
 		if !isCollapsed && len(children) == 0 {
@@ -193,6 +240,10 @@ func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[Channel
 	return rows
 }
 
-func channelContentRow(c Channel, indent, pinned bool) ChannelRow {
-	return ChannelRow{Name: c.Name, Kind: c.Kind, Indent: indent, Pinned: pinned, ChannelID: c.ID}
+func channelContentRow(c Channel, depth int, pinned bool) ChannelRow {
+	return ChannelRow{Name: c.Name, Kind: c.Kind, Depth: depth, Indent: depth > 0, Pinned: pinned, ChannelID: c.ID}
+}
+
+func threadRow(c Channel, depth int) ChannelRow {
+	return ChannelRow{Name: c.Name, Kind: ChannelThread, Depth: depth, Indent: depth > 0, Thread: true, ChannelID: c.ID}
 }

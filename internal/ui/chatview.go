@@ -445,8 +445,26 @@ func (w *ChatView) render(width int) []chatLine {
 			line.message = m
 			lines = append(lines, line)
 		}
+		if line, ok := w.renderThreadStarter(m, channel); ok {
+			lines = append(lines, line)
+		}
 	}
 	return lines
+}
+
+// renderThreadStarter emits a "⤷ thread-name (N messages)" line under a message
+// that started a thread. Discord gives a message-anchored thread the same
+// snowflake as its anchor message, so the thread is found by the message ID.
+func (w *ChatView) renderThreadStarter(m store.Message, channel store.ChannelID) (chatLine, bool) {
+	c, ok := w.store.Channel(store.ChannelID(m.ID))
+	if !ok || c.Kind != store.ChannelThread || c.ParentID != channel {
+		return chatLine{}, false
+	}
+	text := "  ⤷ " + c.Name
+	if c.Thread != nil && c.Thread.MessageCount > 0 {
+		text += " (" + strconv.Itoa(c.Thread.MessageCount) + " messages)"
+	}
+	return chatLine{text: text, style: w.styles.Muted, message: m}, true
 }
 
 func stampMessage(lines []chatLine, m store.Message) []chatLine {

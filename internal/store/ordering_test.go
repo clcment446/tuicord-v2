@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func guildRowNames(rows []GuildRow) []string {
 	out := make([]string, len(rows))
@@ -228,6 +231,9 @@ func TestChannelRowNavigable(t *testing.T) {
 	}{
 		{ChannelRow{Kind: ChannelText}, true},
 		{ChannelRow{Kind: ChannelDM}, true},
+		{ChannelRow{Kind: ChannelAnnouncement}, true},
+		{ChannelRow{Kind: ChannelThread, Thread: true}, true},
+		{ChannelRow{Kind: ChannelForum}, true},
 		{ChannelRow{Kind: ChannelVoice}, false},
 		{ChannelRow{Category: true, Kind: ChannelText}, false},
 	}
@@ -235,5 +241,76 @@ func TestChannelRowNavigable(t *testing.T) {
 		if got := c.row.Navigable(); got != c.want {
 			t.Fatalf("Navigable(%+v) = %v, want %v", c.row, got, c.want)
 		}
+	}
+}
+
+func at(id ChannelID, parent ChannelID, active int64) Channel {
+	return Channel{ID: id, Name: itoa(id), Kind: ChannelThread, ParentID: parent,
+		Thread: &ThreadMeta{LastActive: time.Unix(active, 0)}}
+}
+
+func itoa(id ChannelID) string {
+	switch id {
+	case 100:
+		return "100"
+	case 101:
+		return "101"
+	case 102:
+		return "102"
+	case 103:
+		return "103"
+	case 300:
+		return "300"
+	}
+	return "?"
+}
+
+func TestGroupChannelsThreadsNestUnderParent(t *testing.T) {
+	channels := []Channel{
+		{ID: 10, Name: "TEXT", Kind: ChannelCategory, Position: 0},
+		{ID: 11, Name: "general", Kind: ChannelText, Position: 1, ParentID: 10},
+		{ID: 1, Name: "welcome", Kind: ChannelText, Position: 2},
+		at(100, 11, 200), // newer thread under general
+		at(101, 11, 100), // older thread under general
+		at(102, 1, 50),   // thread under top-level welcome
+		func() Channel { // archived thread: excluded
+			c := at(103, 11, 999)
+			c.Thread.Archived = true
+			return c
+		}(),
+	}
+	rows := GroupChannels(channels, nil, nil)
+	got := make([]string, len(rows))
+	for i, r := range rows {
+		prefix := ""
+		for d := 0; d < r.Depth; d++ {
+			prefix += "  "
+		}
+		got[i] = prefix + r.Name
+	}
+	want := []string{
+		"welcome",
+		"  102",
+		"TEXT",
+		"  general",
+		"    100",
+		"    101",
+	}
+	if !eqStrings(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+}
+
+func TestGroupChannelsForumPostsNotInSidebar(t *testing.T) {
+	channels := []Channel{
+		{ID: 30, Name: "help", Kind: ChannelForum, Position: 0},
+		at(300, 30, 100), // forum post: a thread under a forum, excluded
+	}
+	rows := GroupChannels(channels, nil, nil)
+	got := channelRowNames(rows)
+	// The forum shows as a channel, but its posts (threads) do not nest here.
+	want := []string{"help"}
+	if !eqStrings(got, want) {
+		t.Fatalf("rows = %v, want %v", got, want)
 	}
 }

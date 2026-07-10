@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"awesomeProject/internal/store"
 
@@ -11,34 +12,120 @@ import (
 	"github.com/diamondburned/arikawa/v3/gateway"
 )
 
+// guildMedia is Discord's GUILD_MEDIA channel type (16). arikawa's named
+// constants stop at GuildForum (15); a media channel behaves like a forum, so
+// it maps to the same store kind.
+const guildMedia discord.ChannelType = 16
+
 // convertChannelKind maps an arikawa channel type to a store.ChannelKind.
+// Unknown types degrade to ChannelText so a channel is never dropped.
 func convertChannelKind(t discord.ChannelType) store.ChannelKind {
 	switch t {
-	case discord.GuildVoice:
+	case discord.GuildVoice, discord.GuildStageVoice:
 		return store.ChannelVoice
 	case discord.GuildCategory:
 		return store.ChannelCategory
 	case discord.DirectMessage, discord.GroupDM:
 		return store.ChannelDM
+	case discord.GuildAnnouncement:
+		return store.ChannelAnnouncement
+	case discord.GuildForum, guildMedia:
+		return store.ChannelForum
+	case discord.GuildAnnouncementThread, discord.GuildPublicThread, discord.GuildPrivateThread:
+		return store.ChannelThread
 	default:
 		return store.ChannelText
 	}
 }
 
-// convertChannel maps an arikawa channel into a store.Channel.
+// convertChannel maps an arikawa channel into a store.Channel, including
+// thread/forum metadata and permission overwrites.
 func convertChannel(c discord.Channel) store.Channel {
 	name := c.Name
 	if name == "" && (c.Type == discord.DirectMessage || c.Type == discord.GroupDM) {
 		name = dmName(c.DMRecipients)
 	}
-	return store.Channel{
-		ID:       store.ChannelID(c.ID),
-		GuildID:  store.GuildID(c.GuildID),
-		Name:     name,
-		Kind:     convertChannelKind(c.Type),
-		Position: c.Position,
-		ParentID: store.ChannelID(c.ParentID),
+	out := store.Channel{
+		ID:         store.ChannelID(c.ID),
+		GuildID:    store.GuildID(c.GuildID),
+		Name:       name,
+		Kind:       convertChannelKind(c.Type),
+		Position:   c.Position,
+		ParentID:   store.ChannelID(c.ParentID),
+		Overwrites: convertOverwrites(c.Overwrites),
 	}
+	if out.Kind == store.ChannelThread {
+		out.Thread = convertThreadMeta(c)
+	}
+	if out.Kind == store.ChannelForum {
+		out.Forum = convertForumMeta(c)
+	}
+	return out
+}
+
+// convertOverwrites maps a channel's permission overwrites into the store.
+func convertOverwrites(in []discord.Overwrite) []store.PermissionOverwrite {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.PermissionOverwrite, 0, len(in))
+	for _, o := range in {
+		out = append(out, store.PermissionOverwrite{
+			ID:    uint64(o.ID),
+			Role:  o.Type == discord.OverwriteRole,
+			Allow: store.Permission(o.Allow),
+			Deny:  store.Permission(o.Deny),
+		})
+	}
+	return out
+}
+
+// convertThreadMeta extracts a thread's metadata. LastActive uses the thread's
+// last-message time (or its creation time when it has no messages), which is
+// what Discord sorts active threads by.
+func convertThreadMeta(c discord.Channel) *store.ThreadMeta {
+	m := &store.ThreadMeta{
+		MessageCount: c.MessageCount,
+		MemberCount:  c.MemberCount,
+		OwnerID:      store.UserID(c.OwnerID),
+		LastActive:   threadLastActive(c),
+		Joined:       c.ThreadMember != nil,
+	}
+	if c.ThreadMetadata != nil {
+		m.Archived = c.ThreadMetadata.Archived
+		m.Locked = c.ThreadMetadata.Locked
+	}
+	for _, id := range c.AppliedTags {
+		m.AppliedTags = append(m.AppliedTags, uint64(id))
+	}
+	return m
+}
+
+func threadLastActive(c discord.Channel) time.Time {
+	if c.LastMessageID.IsValid() {
+		return c.LastMessageID.Time()
+	}
+	return c.ID.Time()
+}
+
+// convertForumMeta extracts a forum channel's tag set and default sort order.
+func convertForumMeta(c discord.Channel) *store.ForumMeta {
+	f := &store.ForumMeta{DefaultSort: store.SortLatestActivity}
+	if c.DefaultSoftOrder != nil && *c.DefaultSoftOrder == discord.SoftOrderTypeCreationDate {
+		f.DefaultSort = store.SortCreationDate
+	}
+	for _, t := range c.AvailableTags {
+		emoji := ""
+		if t.EmojiName != nil {
+			emoji = *t.EmojiName
+		}
+		f.Tags = append(f.Tags, store.Tag{
+			ID:    uint64(t.ID),
+			Name:  t.Name,
+			Emoji: emoji,
+		})
+	}
+	return f
 }
 
 func dmName(recipients []discord.User) string {
@@ -577,12 +664,15 @@ func convertGuildStickers(in []discord.Sticker) []store.GuildSticker {
 	return out
 }
 
-// ingestGuild writes a guild and its channels/members into the store.
+// ingestGuild writes a guild and its channels/members into the store, including
+// active threads delivered on the GUILD_CREATE payload and the guild's rules
+// channel reference.
 func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 	s.UpsertGuild(store.Guild{
-		ID:      store.GuildID(g.ID),
-		Name:    g.Name,
-		OwnerID: store.UserID(g.OwnerID),
+		ID:             store.GuildID(g.ID),
+		Name:           g.Name,
+		OwnerID:        store.UserID(g.OwnerID),
+		RulesChannelID: store.ChannelID(g.RulesChannelID),
 	})
 	for _, r := range g.Roles {
 		s.UpsertRole(store.GuildID(g.ID), convertRole(r))
@@ -590,6 +680,10 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 	for _, c := range g.Channels {
 		c.GuildID = g.ID
 		s.UpsertChannel(convertChannel(c))
+	}
+	for _, t := range g.Threads {
+		t.GuildID = g.ID
+		s.UpsertChannel(convertChannel(t))
 	}
 	for _, m := range g.Members {
 		s.UpsertMember(store.GuildID(g.ID), convertMember(m))

@@ -7,7 +7,9 @@
 package ui
 
 import (
+	"os"
 	"strconv"
+	"strings"
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
@@ -34,18 +36,27 @@ type MainView struct {
 	cfg    config.Config
 	styles Styles
 
-	guildList      *widget.ItemList
-	channelList    *widget.ItemList
-	memberList     *widget.ItemList
-	chat           *ChatView
-	composerStatus *widget.Text
-	composer       *widget.TextInput
-	composerMode   composerMode
-	composerTarget store.Message
-	replyMention   bool
+	guildList        *widget.ItemList
+	channelList      *widget.ItemList
+	memberList       *widget.ItemList
+	chat             *ChatView
+	chatBorder       *widget.Border
+	composerBorder   *widget.Border
+	composerStatus   *widget.Text
+	composer         *widget.TextInput
+	composerMode     composerMode
+	composerTarget   store.Message
+	replyMention     bool
+	composerReadOnly bool
+
+	forumView   *ForumView
+	forumActive bool
+	forumID     store.ChannelID
 
 	state     *uistate.State
 	reportErr func(error)
+	// ascii forces ASCII-only sidebar glyphs (config or NO_COLOR environment).
+	ascii bool
 
 	guildRows   []store.GuildRow
 	channelRows []store.ChannelRow
@@ -68,7 +79,8 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	if state == nil {
 		state = &uistate.State{}
 	}
-	mv := &MainView{app: a, cfg: cfg, styles: styles, state: state}
+	mv := &MainView{app: a, cfg: cfg, styles: styles, state: state,
+		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != ""}
 
 	mv.guildList = widget.NewItemList(nil)
 	mv.guildList.SetStyle(styles.Text)
@@ -112,9 +124,11 @@ func (mv *MainView) compose() tui.Widget {
 	composerArea.Children()[1].Layout().Basis = 1
 	composerArea.Children()[1].Layout().Grow = 0
 
+	mv.chatBorder = mv.titled("Messages", mv.chat)
+	mv.composerBorder = mv.titled("Composer", composerArea)
 	chatColumn := widget.Column(
-		mv.titled("Messages", mv.chat),
-		mv.titled("Composer", composerArea),
+		mv.chatBorder,
+		mv.composerBorder,
 	)
 	// Chat grows, composer is a fixed 3-row box (border + one line).
 	chatColumn.Children()[0].Layout().Grow = 1
@@ -243,9 +257,11 @@ func (mv *MainView) onGuildSelected(index int) {
 		return
 	}
 	guild := row.GuildID
+	mv.showChat() // leave any forum view from the previous guild
 	mv.app.SetActive(guild, 0)
 	mv.app.LoadRoles(guild)
 	mv.app.LoadChannels(guild)
+	mv.app.LoadActiveThreads(guild)
 	mv.refreshChannels()
 	// Auto-select the first navigable channel.
 	if i := mv.firstNavigableChannel(); i >= 0 {
@@ -257,7 +273,10 @@ func (mv *MainView) onGuildSelected(index int) {
 
 // RefreshChannels rebuilds the channel list (and its unread badges) from the
 // store. Safe to call on the UI goroutine, e.g. from App.OnChange.
-func (mv *MainView) RefreshChannels() { mv.refreshChannels() }
+func (mv *MainView) RefreshChannels() {
+	mv.refreshChannels()
+	mv.refreshForum()
+}
 
 func (mv *MainView) refreshChannels() {
 	st := mv.app.Store()
@@ -277,6 +296,7 @@ func (mv *MainView) refreshChannels() {
 		mv.channelList.SetSelectedSilent(i)
 		mv.onChannelSelected(i)
 	}
+	mv.updateChannelChrome()
 }
 
 func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
@@ -287,12 +307,12 @@ func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
 		}
 		return widget.Item{Label: arrow + " " + row.Name, Style: mv.headerStyle()}
 	}
-	label := channelPrefix(row.Kind) + row.Name
+	label := channelPrefixBadge(row.Kind, mv.isRulesChannel(row.ChannelID), mv.ascii) + row.Name
 	switch {
 	case row.Pinned:
 		label = glyphPinned + " " + label
-	case row.Indent:
-		label = "  " + label
+	default:
+		label = strings.Repeat("  ", row.Depth) + label
 	}
 	badge := ""
 	if row.Navigable() {
@@ -301,15 +321,15 @@ func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
 	return widget.Item{Label: label, Badge: badge}
 }
 
-func channelPrefix(kind store.ChannelKind) string {
-	switch kind {
-	case store.ChannelVoice:
-		return "~ "
-	case store.ChannelDM:
-		return ""
-	default:
-		return "# "
+// isRulesChannel reports whether id is the active guild's designated rules
+// channel, which the sidebar marks with a rules badge and the composer renders
+// read-only.
+func (mv *MainView) isRulesChannel(id store.ChannelID) bool {
+	if id == 0 {
+		return false
 	}
+	g, ok := mv.app.Store().Guild(mv.app.ActiveGuild())
+	return ok && g.RulesChannelID != 0 && g.RulesChannelID == id
 }
 
 func (mv *MainView) channelRowIndex(id store.ChannelID) int {
@@ -348,7 +368,154 @@ func (mv *MainView) onChannelSelected(index int) {
 		return
 	}
 	mv.app.SetActive(mv.app.ActiveGuild(), row.ChannelID)
+	if row.Kind == store.ChannelForum {
+		mv.openForum(row.ChannelID)
+		return
+	}
+	mv.showChat()
 	mv.app.LoadHistory(row.ChannelID, 50)
+	// Message-less threads and threads opened cold need their history too.
+	mv.app.LoadActiveThreads(mv.app.ActiveGuild())
+	mv.updateChannelChrome()
+}
+
+// updateChannelChrome refreshes the chat-panel breadcrumb title and the
+// composer's read-only state for the currently active channel.
+func (mv *MainView) updateChannelChrome() {
+	if mv.forumActive {
+		// The forum view manages its own chrome; don't overwrite it.
+		return
+	}
+	id := mv.app.ActiveChannel()
+	if mv.chatBorder != nil {
+		mv.chatBorder.SetTitle(mv.channelBreadcrumb(id))
+	}
+	ro := mv.channelReadOnly(id)
+	mv.composerReadOnly = ro
+	if mv.composer != nil {
+		mv.composer.SetReadOnly(ro)
+	}
+	if mv.composerBorder != nil {
+		title := "Composer"
+		if ro {
+			title = "Composer · read-only"
+		}
+		mv.composerBorder.SetTitle(title)
+	}
+	mv.updateComposerStatus()
+}
+
+// channelBreadcrumb builds the chat-panel title for the active channel. Threads
+// render "parent ⤷ thread"; everything else renders "<badge> name".
+func (mv *MainView) channelBreadcrumb(id store.ChannelID) string {
+	c, ok := mv.app.Store().Channel(id)
+	if !ok {
+		return "Messages"
+	}
+	if c.Kind == store.ChannelThread && c.ParentID != 0 {
+		if parent, ok := mv.app.Store().Channel(c.ParentID); ok {
+			pb := channelBadge(parent.Kind, mv.isRulesChannel(parent.ID), mv.ascii)
+			arrow := "⤷"
+			if mv.ascii {
+				arrow = ">"
+			}
+			return pb + " " + parent.Name + " " + arrow + " " + c.Name
+		}
+	}
+	return channelBadge(c.Kind, mv.isRulesChannel(id), mv.ascii) + " " + c.Name
+}
+
+// channelReadOnly reports whether the composer should be disabled for a channel:
+// no SEND_MESSAGES permission (rules channels, most announcement channels), or
+// an archived thread. DMs and forums are never read-only here (forums use the
+// post composer instead).
+func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
+	if id == 0 {
+		return false
+	}
+	c, ok := mv.app.Store().Channel(id)
+	if !ok {
+		return false
+	}
+	if c.GuildID == app.DirectMessagesGuildID || c.GuildID == 0 {
+		return false
+	}
+	if c.Kind == store.ChannelForum {
+		return false
+	}
+	if !mv.app.Store().ChannelCan(c.GuildID, mv.app.SelfID(), id, store.PermSendMessages) {
+		return true
+	}
+	if c.Kind == store.ChannelThread && c.Thread != nil && c.Thread.Archived {
+		return true
+	}
+	return false
+}
+
+// showChat restores the chat view as the chat-column body when leaving a forum
+// post-list view.
+func (mv *MainView) showChat() {
+	mv.forumActive = false
+	if mv.chatBorder != nil && mv.chatBorder.Child() != mv.chat {
+		mv.chatBorder.SetChild(mv.chat)
+	}
+	if mv.composer != nil {
+		mv.composer.SetPlaceholder("Message")
+	}
+}
+
+// openForum swaps the chat column to a forum post-list view: the composer turns
+// into a "new post" title box and the list shows the forum's posts.
+func (mv *MainView) openForum(id store.ChannelID) {
+	forum, ok := mv.app.Store().Channel(id)
+	if !ok || forum.Kind != store.ChannelForum {
+		return
+	}
+	mv.forumActive = true
+	mv.forumID = id
+	mv.app.LoadActiveThreads(mv.app.ActiveGuild())
+	if mv.forumView == nil {
+		mv.forumView = NewForumView(mv.styles, mv.ascii, mv.onOpenPost, mv.app.LoadArchivedThreads)
+		mv.forumView.onFilterCycle = mv.refreshForum
+	}
+	if mv.chatBorder != nil {
+		mv.chatBorder.SetChild(mv.forumView)
+		mv.chatBorder.SetTitle(channelBadge(forum.Kind, false, mv.ascii) + " " + forum.Name)
+	}
+	// The composer creates posts here rather than sending chat messages.
+	mv.composerReadOnly = false
+	if mv.composer != nil {
+		mv.composer.SetReadOnly(false)
+		mv.composer.SetPlaceholder("New post title…")
+	}
+	if mv.composerBorder != nil {
+		mv.composerBorder.SetTitle("New post")
+	}
+	mv.updateComposerStatus()
+	mv.refreshForum()
+}
+
+// refreshForum repopulates the forum post list from the store. Safe to call from
+// OnChange so new posts and archived pages appear as they load.
+func (mv *MainView) refreshForum() {
+	if !mv.forumActive || mv.forumView == nil {
+		return
+	}
+	forum, ok := mv.app.Store().Channel(mv.forumID)
+	if !ok {
+		return
+	}
+	st := mv.app.Store()
+	mv.forumView.SetForum(forum, st.Threads(mv.forumID), st.ArchivedThreads(mv.forumID), st.Unread)
+}
+
+// onOpenPost opens a forum post as the active chat channel, leaving the forum
+// list behind.
+func (mv *MainView) onOpenPost(id store.ChannelID) {
+	mv.app.SetActive(mv.app.ActiveGuild(), id)
+	mv.showChat()
+	mv.app.LoadHistory(id, 50)
+	mv.updateChannelChrome()
 }
 
 func (mv *MainView) headerStyle() screen.Style {
@@ -495,7 +662,16 @@ func (mv *MainView) resolver() markup.Resolver {
 }
 
 func (mv *MainView) onSend(content string) {
-	if content == "" {
+	if content == "" || mv.composerReadOnly {
+		return
+	}
+	if mv.forumActive {
+		var tags []uint64
+		if id := mv.forumView.FilterTagID(); id != 0 {
+			tags = []uint64{id}
+		}
+		mv.app.CreateForumPost(mv.forumID, content, "", tags)
+		mv.composer.SetValue("")
 		return
 	}
 	switch mv.composerMode {
@@ -558,6 +734,10 @@ func (mv *MainView) CancelComposerMode() bool {
 
 func (mv *MainView) updateComposerStatus() {
 	if mv == nil || mv.composerStatus == nil {
+		return
+	}
+	if mv.composerReadOnly {
+		mv.composerStatus.SetContent("read-only — you can't send messages here")
 		return
 	}
 	switch mv.composerMode {

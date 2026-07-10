@@ -29,6 +29,13 @@ const (
 	PermManageRoles     Permission = 1 << 28
 	// PermManageExpressions covers guild emojis and stickers.
 	PermManageExpressions Permission = 1 << 30
+	// PermManageThreads permits archiving, unarchiving, and locking threads a
+	// member does not own.
+	PermManageThreads Permission = 1 << 34
+	// PermCreatePublicThreads permits creating threads on a channel.
+	PermCreatePublicThreads Permission = 1 << 35
+	// PermSendMessagesInThreads permits posting inside threads and forum posts.
+	PermSendMessagesInThreads Permission = 1 << 38
 )
 
 // Has reports whether p grants perm. A set [PermAdministrator] bit grants every
@@ -88,4 +95,93 @@ func (s *Store) MemberPermissions(guild GuildID, user UserID) Permission {
 // uses to enable or disable menu entries.
 func (s *Store) MemberCan(guild GuildID, user UserID, perm Permission) bool {
 	return s.MemberPermissions(guild, user).Has(perm)
+}
+
+// ApplyOverwrites folds a channel's permission overwrites over a base
+// permission set following Discord's precedence: the @everyone (guild-ID) role
+// overwrite first, then the OR of all matching role overwrites, then the
+// member-specific overwrite last. Within each step deny bits clear before allow
+// bits set. The administrator bit short-circuits everything (admins ignore
+// overwrites), matching [Permission.Has].
+//
+// It is a pure helper — the guild ID doubles as the @everyone role ID, and the
+// member's roles are passed explicitly — so the overwrite precedence is
+// table-testable without a populated store.
+func ApplyOverwrites(base Permission, everyoneRole uint64, memberRoles []uint64, member uint64, overwrites []PermissionOverwrite) Permission {
+	if base&PermAdministrator != 0 {
+		return base
+	}
+	perms := base
+
+	// @everyone role overwrite.
+	for _, o := range overwrites {
+		if o.Role && o.ID == everyoneRole {
+			perms &^= o.Deny
+			perms |= o.Allow
+		}
+	}
+
+	// Accumulate the member's role overwrites: all denies, then all allows.
+	roleSet := make(map[uint64]bool, len(memberRoles))
+	for _, r := range memberRoles {
+		roleSet[r] = true
+	}
+	var allow, deny Permission
+	for _, o := range overwrites {
+		if o.Role && o.ID != everyoneRole && roleSet[o.ID] {
+			allow |= o.Allow
+			deny |= o.Deny
+		}
+	}
+	perms &^= deny
+	perms |= allow
+
+	// Member-specific overwrite wins last.
+	for _, o := range overwrites {
+		if !o.Role && o.ID == member {
+			perms &^= o.Deny
+			perms |= o.Allow
+		}
+	}
+	return perms
+}
+
+// ChannelPermissions returns a member's effective permissions in a specific
+// channel: the guild-level baseline from [Store.MemberPermissions] with the
+// channel's overwrites applied by [ApplyOverwrites]. Guild owners and
+// administrators are unaffected by overwrites.
+//
+// For threads, overwrites are inherited from the parent channel (Discord does
+// not store per-thread overwrites), so the parent's overwrites are used when
+// the thread carries none of its own.
+func (s *Store) ChannelPermissions(guild GuildID, user UserID, channel ChannelID) Permission {
+	base := s.MemberPermissions(guild, user)
+	if base&PermAdministrator != 0 {
+		return base
+	}
+	c, ok := s.channels[channel]
+	if !ok {
+		return base
+	}
+	overwrites := c.Overwrites
+	if len(overwrites) == 0 && c.Kind == ChannelThread && c.ParentID != 0 {
+		if parent, ok := s.channels[c.ParentID]; ok {
+			overwrites = parent.Overwrites
+		}
+	}
+	var memberRoles []uint64
+	if m, ok := s.members[guild][user]; ok {
+		memberRoles = make([]uint64, len(m.RoleIDs))
+		for i, r := range m.RoleIDs {
+			memberRoles[i] = uint64(r)
+		}
+	}
+	return ApplyOverwrites(base, uint64(guild), memberRoles, uint64(user), overwrites)
+}
+
+// ChannelCan reports whether a member holds perm in a specific channel, taking
+// overwrites into account. It is the convenience wrapper the UI uses to gate the
+// composer (SEND_MESSAGES) and channel-scoped actions.
+func (s *Store) ChannelCan(guild GuildID, user UserID, channel ChannelID, perm Permission) bool {
+	return s.ChannelPermissions(guild, user, channel).Has(perm)
 }

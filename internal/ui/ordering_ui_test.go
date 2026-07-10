@@ -10,15 +10,15 @@ import (
 	"awesomeProject/internal/uistate"
 )
 
-func TestChannelPrefix(t *testing.T) {
+func TestChannelPrefixBadge(t *testing.T) {
 	cases := map[store.ChannelKind]string{
 		store.ChannelText:  "# ",
 		store.ChannelVoice: "~ ",
 		store.ChannelDM:    "",
 	}
 	for kind, want := range cases {
-		if got := channelPrefix(kind); got != want {
-			t.Errorf("channelPrefix(%v) = %q, want %q", kind, got, want)
+		if got := channelPrefixBadge(kind, false, false); got != want {
+			t.Errorf("channelPrefixBadge(%v) = %q, want %q", kind, got, want)
 		}
 	}
 }
