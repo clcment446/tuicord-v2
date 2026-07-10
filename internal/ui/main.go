@@ -511,6 +511,15 @@ func (mv *MainView) onSend(content string) {
 	mv.composer.SetValue("")
 }
 
+// InsertIntoComposer drops s at the composer cursor. The picker uses it to
+// insert a chosen emoji, custom-emoji mention, or fake-nitro URL.
+func (mv *MainView) InsertIntoComposer(s string) {
+	if mv == nil || mv.composer == nil {
+		return
+	}
+	mv.composer.Insert(s)
+}
+
 // BeginReply puts the composer into inline-reply mode.
 func (mv *MainView) BeginReply(msg store.Message, mention bool) {
 	if mv == nil {

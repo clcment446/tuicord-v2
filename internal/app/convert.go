@@ -538,6 +538,45 @@ func convertGuildFolders(in []gateway.GuildFolder) []store.GuildFolder {
 	return out
 }
 
+// convertGuildEmojis maps a guild's custom emoji into the store catalog,
+// skipping unicode entries (which have no snowflake ID) and unavailable emoji.
+func convertGuildEmojis(in []discord.Emoji) []store.GuildEmoji {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.GuildEmoji, 0, len(in))
+	for _, e := range in {
+		if e.ID == 0 {
+			continue
+		}
+		out = append(out, store.GuildEmoji{
+			ID:       uint64(e.ID),
+			Name:     e.Name,
+			Animated: e.Animated,
+		})
+	}
+	return out
+}
+
+// convertGuildStickers maps a guild's stickers into the store catalog.
+func convertGuildStickers(in []discord.Sticker) []store.GuildSticker {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.GuildSticker, 0, len(in))
+	for _, s := range in {
+		if s.ID == 0 {
+			continue
+		}
+		out = append(out, store.GuildSticker{
+			ID:     uint64(s.ID),
+			Name:   s.Name,
+			Format: convertStickerFormat(s.FormatType),
+		})
+	}
+	return out
+}
+
 // ingestGuild writes a guild and its channels/members into the store.
 func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 	s.UpsertGuild(store.Guild{
@@ -555,6 +594,8 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 	for _, m := range g.Members {
 		s.UpsertMember(store.GuildID(g.ID), convertMember(m))
 	}
+	s.SetGuildEmojis(store.GuildID(g.ID), convertGuildEmojis(g.Emojis))
+	s.SetGuildStickers(store.GuildID(g.ID), convertGuildStickers(g.Stickers))
 }
 
 func ingestPrivateChannel(s *store.Store, c discord.Channel) {

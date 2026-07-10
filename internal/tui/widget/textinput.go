@@ -261,6 +261,18 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 	return false
 }
 
+// Insert writes s at the cursor, advances past it, and fires the change
+// callback. It is the programmatic equivalent of typing s, used by the picker to
+// drop an emoji or URL into the composer.
+func (w *TextInput) Insert(s string) {
+	if w == nil || s == "" {
+		return
+	}
+	w.insert(s)
+	w.showCursor()
+	w.changed()
+}
+
 func (w *TextInput) insert(s string) {
 	w.value = w.value[:w.cursor] + s + w.value[w.cursor:]
 	w.cursor += len(s)
