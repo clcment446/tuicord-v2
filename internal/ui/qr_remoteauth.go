@@ -15,7 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/diamondburned/arikawa/v3/api"
+	"awesomeProject/internal/discord"
+
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/gorilla/websocket"
 	qrcode "github.com/skip2/go-qrcode"
@@ -270,13 +271,16 @@ func (ra *remoteAuth) onPendingLogin(data []byte) (string, error) {
 // decrypts it with the private key.
 func (ra *remoteAuth) exchangeTicket(ticket string) (string, error) {
 	headers := http.Header{}
-	headers.Set("User-Agent", browserUA)
 	headers.Set("Referer", "https://discord.com/login")
 	if ra.fpr != "" {
 		headers.Set("X-Fingerprint", ra.fpr)
 	}
 
-	client := api.NewClient("")
+	// Use the same browser-mimicking client (X-Super-Properties, Sec-Fetch-*,
+	// build number, ...) as an authenticated session. Discord's fraud
+	// detection expects these on the ticket exchange too; without them it
+	// tends to respond with a captcha challenge instead of the token.
+	client := discord.NewUnauthenticatedClient()
 	client.OnRequest = append(client.OnRequest, httputil.WithHeaders(headers))
 
 	encrypted, err := client.ExchangeRemoteAuthTicket(ticket)

@@ -226,6 +226,27 @@ func (a *App) RegisterHandlers() {
 		a.handleGuildCreate(e)
 	})
 
+	a.handle.AddHandler(func(e *gateway.GuildEmojisUpdateEvent) {
+		guildID := store.GuildID(e.GuildID)
+		emojis := convertGuildEmojis(e.Emojis)
+		a.ui.Post(func() {
+			a.store.SetGuildEmojis(guildID, emojis)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
+
+	a.handle.AddHandler(func(e *gateway.UserSettingsUpdateEvent) {
+		folders := convertGuildFolders(e.GuildFolders)
+		a.ui.Post(func() {
+			a.store.SetGuildFolders(folders)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
+
 	a.handle.AddHandler(func(e *gateway.MessageCreateEvent) {
 		a.handleMessageCreate(e)
 	})
@@ -304,9 +325,16 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	privateChannels := e.PrivateChannels
 	selfID := store.UserID(e.User.ID)
 	sessionID := e.SessionID
+	hasNitro := e.User.Nitro != discord.NoUserNitro
+	var folders []store.GuildFolder
+	if e.UserSettings != nil {
+		folders = convertGuildFolders(e.UserSettings.GuildFolders)
+	}
 	a.ui.Post(func() {
 		a.selfID = selfID
 		a.sessionID = sessionID
+		a.store.SetNitro(hasNitro)
+		a.store.SetGuildFolders(folders)
 		for i := range guilds {
 			ingestGuild(a.store, &guilds[i])
 			a.markRolesLoaded(store.GuildID(guilds[i].ID))

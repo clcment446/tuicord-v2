@@ -73,11 +73,29 @@ type Guild struct {
 
 // Channel is a channel within a guild.
 type Channel struct {
-	ID       ChannelID
-	GuildID  GuildID
-	Name     string
-	Kind     ChannelKind
+	ID      ChannelID
+	GuildID GuildID
+	Name    string
+	Kind    ChannelKind
+	// Position is the channel's sort key within the guild (or within its
+	// category). ParentID is the category channel this one is nested under, or
+	// zero for top-level channels; it drives category grouping in the sidebar.
 	Position int
+	ParentID ChannelID
+}
+
+// GuildFolder groups guilds in the sidebar rail, mirroring Discord's
+// user_settings.guild_folders. Discord represents an un-foldered guild as a
+// single-element folder with an empty Name; [OrderGuilds] renders those as bare
+// top-level guilds rather than folders.
+type GuildFolder struct {
+	// ID is the folder identifier. It is zero for the synthetic single-guild
+	// folders Discord uses to place un-foldered guilds.
+	ID   int64
+	Name string
+	// Color is the folder's 0xRRGGBB tint, or zero when unset.
+	Color    uint32
+	GuildIDs []GuildID
 }
 
 // Message is a single chat message. Pending marks an optimistic local message
@@ -142,6 +160,23 @@ type Role struct {
 	Permissions Permission
 }
 
+// GuildEmoji is a custom emoji in a guild's catalog, used to populate the emoji
+// picker. Unicode emoji are not stored here; they come from the picker's static
+// table.
+type GuildEmoji struct {
+	ID       uint64
+	Name     string
+	Animated bool
+}
+
+// GuildSticker is a custom sticker in a guild's catalog, used to populate the
+// sticker picker.
+type GuildSticker struct {
+	ID     uint64
+	Name   string
+	Format StickerFormat
+}
+
 // DefaultHistoryLimit is the per-channel message ring size when none is given.
 const DefaultHistoryLimit = 200
 
@@ -161,6 +196,14 @@ type Store struct {
 	roles   map[GuildID]map[RoleID]Role
 
 	unread map[ChannelID]int
+
+	guildFolders  []GuildFolder
+	guildEmojis   map[GuildID][]GuildEmoji
+	guildStickers map[GuildID][]GuildSticker
+	// hasNitro reflects the logged-in account's Nitro status, which decides
+	// whether custom emoji can be sent inline natively or must fall back to the
+	// fake-nitro CDN URL.
+	hasNitro bool
 }
 
 // New returns an empty store. A historyLimit <= 0 uses DefaultHistoryLimit.
@@ -169,14 +212,16 @@ func New(historyLimit int) *Store {
 		historyLimit = DefaultHistoryLimit
 	}
 	return &Store{
-		historyLimit: historyLimit,
-		guilds:       map[GuildID]Guild{},
-		channelOrder: map[GuildID][]ChannelID{},
-		channels:     map[ChannelID]Channel{},
-		messages:     map[ChannelID]*ring{},
-		members:      map[GuildID]map[UserID]Member{},
-		roles:        map[GuildID]map[RoleID]Role{},
-		unread:       map[ChannelID]int{},
+		historyLimit:  historyLimit,
+		guilds:        map[GuildID]Guild{},
+		channelOrder:  map[GuildID][]ChannelID{},
+		channels:      map[ChannelID]Channel{},
+		messages:      map[ChannelID]*ring{},
+		members:       map[GuildID]map[UserID]Member{},
+		roles:         map[GuildID]map[RoleID]Role{},
+		unread:        map[ChannelID]int{},
+		guildEmojis:   map[GuildID][]GuildEmoji{},
+		guildStickers: map[GuildID][]GuildSticker{},
 	}
 }
 
@@ -210,6 +255,72 @@ func (s *Store) UpsertGuild(g Guild) {
 	}
 	s.guilds[g.ID] = g
 }
+
+// SetGuildFolders records the guild-folder layout from READY (or a later
+// USER_SETTINGS update). Passing nil clears it, in which case the sidebar falls
+// back to first-seen guild order.
+func (s *Store) SetGuildFolders(folders []GuildFolder) {
+	s.guildFolders = append(s.guildFolders[:0], folders...)
+}
+
+// GuildFolders returns the current guild-folder layout, or nil when none is
+// known.
+func (s *Store) GuildFolders() []GuildFolder {
+	if len(s.guildFolders) == 0 {
+		return nil
+	}
+	out := make([]GuildFolder, len(s.guildFolders))
+	copy(out, s.guildFolders)
+	return out
+}
+
+// SetGuildEmojis replaces a guild's custom emoji catalog. Passing an empty
+// slice clears it.
+func (s *Store) SetGuildEmojis(guild GuildID, emojis []GuildEmoji) {
+	if len(emojis) == 0 {
+		delete(s.guildEmojis, guild)
+		return
+	}
+	s.guildEmojis[guild] = append([]GuildEmoji(nil), emojis...)
+}
+
+// GuildEmojis returns a guild's custom emoji catalog in stored order.
+func (s *Store) GuildEmojis(guild GuildID) []GuildEmoji {
+	src := s.guildEmojis[guild]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]GuildEmoji, len(src))
+	copy(out, src)
+	return out
+}
+
+// SetGuildStickers replaces a guild's sticker catalog. Passing an empty slice
+// clears it.
+func (s *Store) SetGuildStickers(guild GuildID, stickers []GuildSticker) {
+	if len(stickers) == 0 {
+		delete(s.guildStickers, guild)
+		return
+	}
+	s.guildStickers[guild] = append([]GuildSticker(nil), stickers...)
+}
+
+// GuildStickers returns a guild's sticker catalog in stored order.
+func (s *Store) GuildStickers(guild GuildID) []GuildSticker {
+	src := s.guildStickers[guild]
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]GuildSticker, len(src))
+	copy(out, src)
+	return out
+}
+
+// SetNitro records whether the logged-in account has Discord Nitro.
+func (s *Store) SetNitro(v bool) { s.hasNitro = v }
+
+// HasNitro reports whether the logged-in account has Discord Nitro.
+func (s *Store) HasNitro() bool { return s.hasNitro }
 
 // Guilds returns guilds in first-seen order.
 func (s *Store) Guilds() []Guild {
