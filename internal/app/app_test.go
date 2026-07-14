@@ -4,6 +4,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"awesomeProject/internal/store"
 
@@ -19,35 +20,38 @@ func (syncPoster) Post(fn func()) { fn() }
 
 // fakeSender records sends and returns a preset error.
 type fakeSender struct {
-	mu           sync.Mutex
-	sent         int
-	lastSend     api.SendMessageData
-	edited       int
-	editContent  string
-	deleted      int
-	pinned       int
-	unpinned     int
-	crossposted  int
-	err          error
-	done         chan struct{}
-	history      []discord.Message
-	historyErr   error
-	historyN     int
-	historyDone  chan struct{}
-	roles        []discord.Role
-	rolesErr     error
-	rolesN       int
-	rolesDone    chan struct{}
-	guilds       []discord.Guild
-	guildsErr    error
-	guildsN      int
-	guildsDone   chan struct{}
-	dms          []discord.Channel
-	dmsErr       error
-	channels     []discord.Channel
-	channelsErr  error
-	channelsN    int
-	channelsDone chan struct{}
+	mu            sync.Mutex
+	sent          int
+	lastSend      api.SendMessageData
+	edited        int
+	editContent   string
+	deleted       int
+	pinned        int
+	unpinned      int
+	crossposted   int
+	err           error
+	done          chan struct{}
+	history       []discord.Message
+	historyBefore []discord.Message
+	historyErr    error
+	historyN      int
+	historyDone   chan struct{}
+	roles         []discord.Role
+	rolesErr      error
+	rolesN        int
+	rolesDone     chan struct{}
+	guilds        []discord.Guild
+	guildsErr     error
+	guildsN       int
+	guildsDone    chan struct{}
+	dms           []discord.Channel
+	dmsErr        error
+	channels      []discord.Channel
+	channelsErr   error
+	channelsN     int
+	channelsDone  chan struct{}
+	channelDetail *discord.Channel
+	detailDone    chan struct{}
 }
 
 func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessageData) (*discord.Message, error) {
@@ -123,6 +127,13 @@ func (f *fakeSender) Messages(discord.ChannelID, uint) ([]discord.Message, error
 	return append([]discord.Message(nil), f.history...), f.historyErr
 }
 
+func (f *fakeSender) MessagesBefore(discord.ChannelID, discord.MessageID, uint) ([]discord.Message, error) {
+	f.mu.Lock()
+	f.historyN++
+	f.mu.Unlock()
+	return append([]discord.Message(nil), f.historyBefore...), f.historyErr
+}
+
 func (f *fakeSender) Roles(discord.GuildID) ([]discord.Role, error) {
 	f.mu.Lock()
 	f.rolesN++
@@ -160,6 +171,14 @@ func (f *fakeSender) Channels(discord.GuildID) ([]discord.Channel, error) {
 	return append([]discord.Channel(nil), f.channels...), f.channelsErr
 }
 
+func (f *fakeSender) Channel(discord.ChannelID) (*discord.Channel, error) {
+	if f.detailDone != nil {
+		close(f.detailDone)
+		f.detailDone = nil
+	}
+	return f.channelDetail, nil
+}
+
 func newTestApp(send sender) *App {
 	a := &App{
 		store: store.New(0),
@@ -177,6 +196,9 @@ func newTestApp(send sender) *App {
 	}
 	if chans, ok := send.(channelLoader); ok {
 		a.chans = chans
+	}
+	if details, ok := send.(channelDetailsLoader); ok {
+		a.channelDetail = details
 	}
 	return a
 }
@@ -581,6 +603,25 @@ func TestLoadHistoryUsesSessionCache(t *testing.T) {
 	}
 }
 
+func TestLoadOlderHistoryPrependsMessagesBeforeOldest(t *testing.T) {
+	fs := &fakeSender{historyBefore: []discord.Message{
+		{ID: 8, ChannelID: 42, Author: discord.User{Username: "old"}, Content: "older"},
+		{ID: 7, ChannelID: 42, Author: discord.User{Username: "oldest"}, Content: "oldest"},
+	}}
+	a := newTestApp(fs)
+	a.store.SetMessages(42, []store.Message{
+		{ID: 9, ChannelID: 42, Author: "newer", Content: "newer"},
+		{ID: 10, ChannelID: 42, Author: "newest", Content: "newest"},
+	})
+
+	a.loadOlderHistory(42, 9, 50)
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 4 || msgs[0].ID != 7 || msgs[1].ID != 8 || msgs[2].ID != 9 || msgs[3].ID != 10 {
+		t.Fatalf("history = %+v, want IDs 7,8,9,10", msgs)
+	}
+}
+
 func TestLoadRolesStoresRolesAndUsesSessionCache(t *testing.T) {
 	fs := &fakeSender{
 		roles: []discord.Role{
@@ -680,6 +721,25 @@ func TestLoadChannelsLoadsGuildChannelsAndUsesSessionCache(t *testing.T) {
 	channels := a.store.Channels(1)
 	if len(channels) != 1 || channels[0].ID != 10 || channels[0].Name != "general" {
 		t.Fatalf("channels = %+v, want #general", channels)
+	}
+}
+
+func TestLoadForumMetadataLoadsAvailableTagsFromChannelDetail(t *testing.T) {
+	done := make(chan struct{})
+	fs := &fakeSender{channelDetail: &discord.Channel{
+		ID: 42, Type: discord.GuildForum, AvailableTags: []discord.Tag{{ID: 9, Name: "bug"}},
+	}, detailDone: done}
+	a := newTestApp(fs)
+	a.Store().UpsertChannel(store.Channel{ID: 42, GuildID: 7, Kind: store.ChannelForum})
+	a.LoadForumMetadata(42)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for forum metadata")
+	}
+	forum, ok := a.Store().Channel(42)
+	if !ok || forum.Forum == nil || len(forum.Forum.Tags) != 1 || forum.Forum.Tags[0].Name != "bug" {
+		t.Fatalf("forum metadata = %+v, want one bug tag", forum)
 	}
 }
 

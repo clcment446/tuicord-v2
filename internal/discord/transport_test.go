@@ -11,6 +11,8 @@ import (
 )
 
 func TestTransportAddsCoherentBrowserClientInfo(t *testing.T) {
+	withCachedBuildNumber(t, 123456)
+
 	capture := &headerCaptureTransport{}
 	transport := newTransport()
 	transport.base = capture

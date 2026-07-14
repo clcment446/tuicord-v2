@@ -1,6 +1,8 @@
 package widget
 
 import (
+	"unicode"
+
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
@@ -253,13 +255,35 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			}
 			return false
 		case input.KeyLeft:
+			if ev.Mods&input.Ctrl != 0 {
+				w.cursor = previousWordBoundary(w.value, w.cursor)
+				w.showCursor()
+				return true
+			}
 			w.cursor = tuitext.PrevBoundary(w.value, w.cursor)
 			w.showCursor()
 			return true
 		case input.KeyRight:
+			if ev.Mods&input.Ctrl != 0 {
+				w.cursor = nextWordBoundary(w.value, w.cursor)
+				w.showCursor()
+				return true
+			}
 			w.cursor = tuitext.NextBoundary(w.value, w.cursor)
 			w.showCursor()
 			return true
+		case input.KeyUp:
+			if ev.Mods&input.Ctrl != 0 {
+				w.cursor = 0
+				w.showCursor()
+				return true
+			}
+		case input.KeyDown:
+			if ev.Mods&input.Ctrl != 0 {
+				w.cursor = len(w.value)
+				w.showCursor()
+				return true
+			}
 		case input.KeyHome:
 			w.cursor = 0
 			w.showCursor()
@@ -270,6 +294,9 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			return true
 		case input.KeyBackspace:
 			prev := tuitext.PrevBoundary(w.value, w.cursor)
+			if ev.Mods&input.Ctrl != 0 {
+				prev = previousWordBoundary(w.value, w.cursor)
+			}
 			if prev != w.cursor {
 				w.value = w.value[:prev] + w.value[w.cursor:]
 				w.cursor = prev
@@ -288,6 +315,53 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+func previousWordBoundary(value string, cursor int) int {
+	i := cursor
+	for i > 0 {
+		prev := tuitext.PrevBoundary(value, i)
+		if !isWhitespace(value[prev:i]) {
+			break
+		}
+		i = prev
+	}
+	for i > 0 {
+		prev := tuitext.PrevBoundary(value, i)
+		if isWhitespace(value[prev:i]) {
+			break
+		}
+		i = prev
+	}
+	return i
+}
+
+func nextWordBoundary(value string, cursor int) int {
+	i := cursor
+	for i < len(value) {
+		next := tuitext.NextBoundary(value, i)
+		if isWhitespace(value[i:next]) {
+			break
+		}
+		i = next
+	}
+	for i < len(value) {
+		next := tuitext.NextBoundary(value, i)
+		if !isWhitespace(value[i:next]) {
+			break
+		}
+		i = next
+	}
+	return i
+}
+
+func isWhitespace(cluster string) bool {
+	for _, r := range cluster {
+		if !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return cluster != ""
 }
 
 // Insert writes s at the cursor, advances past it, and fires the change

@@ -7,6 +7,7 @@ import (
 	"image"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // Doer is the minimal HTTP transport interface used by Fetcher. *http.Client
@@ -48,7 +49,7 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 	}
 
 	// 2 & 3. Get raw bytes (disk → network).
-	raw, err := f.getRaw(ctx, url)
+	raw, cacheable, err := f.getRaw(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +59,7 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 		return nil, fmt.Errorf("media: decode %s: %w", url, err)
 	}
 
-	if f.Cache != nil {
+	if f.Cache != nil && cacheable {
 		f.Cache.PutLRU(url, img)
 	}
 	return img, nil
@@ -71,7 +72,7 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 //
 // Run FetchGIF on a goroutine; deliver the result via app.Post.
 func (f *Fetcher) FetchGIF(ctx context.Context, url string) ([]Frame, error) {
-	raw, err := f.getRaw(ctx, url)
+	raw, cacheable, err := f.getRaw(ctx, url)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +81,7 @@ func (f *Fetcher) FetchGIF(ctx context.Context, url string) ([]Frame, error) {
 		return nil, fmt.Errorf("media: decode gif %s: %w", url, err)
 	}
 	// Store first frame in LRU as a thumbnail.
-	if f.Cache != nil && len(frames) > 0 {
+	if f.Cache != nil && cacheable && len(frames) > 0 {
 		f.Cache.PutLRU(url, frames[0].Image)
 	}
 	return frames, nil
@@ -88,33 +89,33 @@ func (f *Fetcher) FetchGIF(ctx context.Context, url string) ([]Frame, error) {
 
 // getRaw returns the raw bytes for url, consulting the disk cache before
 // making a network request. On a network hit it writes the bytes to disk.
-func (f *Fetcher) getRaw(ctx context.Context, url string) ([]byte, error) {
+func (f *Fetcher) getRaw(ctx context.Context, url string) ([]byte, bool, error) {
 	// Disk hit: no network needed.
 	if f.Cache != nil {
 		raw, err := f.Cache.GetDisk(url)
 		if err == nil && raw != nil {
-			return raw, nil
+			return raw, true, nil
 		}
 	}
 
-	raw, err := f.httpGet(ctx, url)
+	raw, cacheable, err := f.httpGet(ctx, url)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Populate disk cache (best-effort — write errors are non-fatal).
-	if f.Cache != nil {
+	if f.Cache != nil && cacheable {
 		_ = f.Cache.PutDisk(url, raw)
 	}
-	return raw, nil
+	return raw, cacheable, nil
 }
 
 // httpGet performs an HTTP GET for url and returns the response body.
 // It honours ctx cancellation throughout the round-trip.
-func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, error) {
+func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("media: build request for %s: %w", url, err)
+		return nil, false, fmt.Errorf("media: build request for %s: %w", url, err)
 	}
 
 	doer := Doer(http.DefaultClient)
@@ -124,17 +125,27 @@ func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, error) {
 
 	resp, err := doer.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("media: GET %s: %w", url, err)
+		return nil, false, fmt.Errorf("media: GET %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("media: GET %s: unexpected status %d", url, resp.StatusCode)
+		return nil, false, fmt.Errorf("media: GET %s: unexpected status %d", url, resp.StatusCode)
 	}
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("media: read body %s: %w", url, err)
+		return nil, false, fmt.Errorf("media: read body %s: %w", url, err)
 	}
-	return raw, nil
+	return raw, responseCacheable(resp.Header), nil
+}
+
+func responseCacheable(header http.Header) bool {
+	for _, directive := range strings.Split(strings.ToLower(header.Get("Cache-Control")), ",") {
+		directive = strings.TrimSpace(directive)
+		if directive == "no-store" || directive == "no-cache" || directive == "max-age=0" {
+			return false
+		}
+	}
+	return true
 }

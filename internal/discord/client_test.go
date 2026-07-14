@@ -1,14 +1,19 @@
 package discord
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/diamondburned/arikawa/v3/discord"
 )
 
 func TestNewSessionDoesNotPanic(t *testing.T) {
+	withCachedBuildNumber(t, 123456)
+
 	sess, err := NewSession("testtoken")
 	if err != nil {
 		t.Fatal(err)
@@ -18,7 +23,55 @@ func TestNewSessionDoesNotPanic(t *testing.T) {
 	}
 }
 
+func TestFetchBuildNumberWithClient(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("User-Agent"); got != clientBrowserUA {
+			t.Errorf("User-Agent = %q, want %q", got, clientBrowserUA)
+		}
+		if got := r.Header.Get("Accept"); got != "text/html" {
+			t.Errorf("Accept = %q, want text/html", got)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`<html>"BUILD_NUMBER": "987654"</html>`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+
+	got, err := fetchBuildNumberWithClient(client, "https://discord.test/app")
+	if err != nil {
+		t.Fatalf("fetchBuildNumberWithClient() error = %v", err)
+	}
+	if got != 987654 {
+		t.Fatalf("fetchBuildNumberWithClient() = %d, want 987654", got)
+	}
+}
+
+func TestFetchBuildNumberWithClientRejectsMissingBuildNumber(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`<html>no build metadata</html>`)),
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})}
+
+	if _, err := fetchBuildNumberWithClient(client, "https://discord.test/app"); err != errNoBuildNumber {
+		t.Fatalf("fetchBuildNumberWithClient() error = %v, want %v", err, errNoBuildNumber)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func TestSuperProperties(t *testing.T) {
+	withCachedBuildNumber(t, 123456)
+
 	got, err := superProperties()
 	if err != nil {
 		t.Fatal(err)
@@ -159,22 +212,23 @@ func channelName(channel discord.Channel) string {
 
 func testToken(t *testing.T) string {
 	t.Helper()
+	if os.Getenv("DISCORD_INTEGRATION") != "1" {
+		t.Skip("set DISCORD_INTEGRATION=1 to run live Discord tests")
+	}
 	token := os.Getenv("TOKEN")
 	if token == "" {
-		raw, err := os.ReadFile("../../.env")
-		if err != nil {
-			t.Skip("TOKEN not set and .env not found")
-		}
-		for _, line := range strings.Split(string(raw), "\n") {
-			key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
-			if ok && key == "TOKEN" {
-				token = strings.Trim(value, `"'`)
-				break
-			}
-		}
-	}
-	if token == "" {
-		t.Skip("TOKEN not set")
+		t.Skip("TOKEN is required with DISCORD_INTEGRATION=1")
 	}
 	return token
+}
+
+func withCachedBuildNumber(t *testing.T, number int) {
+	t.Helper()
+	oldNumber := buildNumber
+	buildOnce = sync.Once{}
+	buildOnce.Do(func() { buildNumber = number })
+	t.Cleanup(func() {
+		buildOnce = sync.Once{}
+		buildNumber = oldNumber
+	})
 }

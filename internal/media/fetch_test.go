@@ -13,6 +13,7 @@ import (
 type stubDoer struct {
 	status int
 	body   []byte
+	header http.Header
 	calls  int
 }
 
@@ -20,8 +21,23 @@ func (s *stubDoer) Do(req *http.Request) (*http.Response, error) {
 	s.calls++
 	return &http.Response{
 		StatusCode: s.status,
+		Header:     s.header,
 		Body:       io.NopCloser(bytes.NewReader(s.body)),
 	}, nil
+}
+
+func TestFetcherHonorsNoStoreResponsePolicy(t *testing.T) {
+	raw := makePNG(t, 1, 1, color.RGBA{A: 255})
+	stub := &stubDoer{status: http.StatusOK, body: raw, header: http.Header{"Cache-Control": []string{"no-store"}}}
+	f := &Fetcher{HTTP: stub, Cache: newTempCache(t, 4)}
+	for i := 0; i < 2; i++ {
+		if _, err := f.Fetch(context.Background(), "https://example.com/no-store.png"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if stub.calls != 2 {
+		t.Fatalf("no-store requests = %d, want 2", stub.calls)
+	}
 }
 
 // newStubFetcher returns a Fetcher backed by a fake transport and a temp-dir

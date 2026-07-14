@@ -15,19 +15,21 @@ import (
 // fakeThreadClient records thread REST calls. Each method sends on sig after it
 // runs so tests can wait for the background goroutine deterministically.
 type fakeThreadClient struct {
-	mu             sync.Mutex
-	active         *api.ActiveThreads
-	activeN        int
-	activeErr      error
-	archived       *api.ArchivedThreads
-	archivedPages  []*api.ArchivedThreads
-	archivedBefore []discord.Timestamp
-	archivedN      int
-	joinN          int
-	leaveN         int
-	startMsgN      int
-	err            error
-	sig            chan struct{}
+	mu              sync.Mutex
+	active          *api.ActiveThreads
+	activeN         int
+	activeErr       error
+	archived        *api.ArchivedThreads
+	archivedPages   []*api.ArchivedThreads
+	archivedBefore  []discord.Timestamp
+	archivedN       int
+	archivedReady   chan struct{}
+	archivedRelease chan struct{}
+	joinN           int
+	leaveN          int
+	startMsgN       int
+	err             error
+	sig             chan struct{}
 }
 
 func (f *fakeThreadClient) signal() {
@@ -50,6 +52,10 @@ func (f *fakeThreadClient) ActiveThreads(discord.GuildID) (*api.ActiveThreads, e
 }
 
 func (f *fakeThreadClient) PublicArchivedThreads(_ discord.ChannelID, before discord.Timestamp, _ uint) (*api.ArchivedThreads, error) {
+	if f.archivedReady != nil {
+		close(f.archivedReady)
+		<-f.archivedRelease
+	}
 	f.mu.Lock()
 	f.archivedN++
 	f.archivedBefore = append(f.archivedBefore, before)
@@ -62,6 +68,36 @@ func (f *fakeThreadClient) PublicArchivedThreads(_ discord.ChannelID, before dis
 		return &api.ArchivedThreads{}, nil
 	}
 	return f.archived, nil
+}
+
+func TestLoadArchivedThreadsCapturesParentGuildBeforeWorker(t *testing.T) {
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	tc := &fakeThreadClient{
+		archivedReady:   ready,
+		archivedRelease: release,
+		archived: &api.ArchivedThreads{ActiveThreads: api.ActiveThreads{Threads: []discord.Channel{
+			{ID: 10, Type: discord.GuildPublicThread, ParentID: 100, ThreadMetadata: &discord.ThreadMetadata{Archived: true}},
+		}}},
+	}
+	a, changed := newThreadTestApp(tc)
+	a.Store().UpsertChannel(store.Channel{ID: 100, GuildID: 7, Kind: store.ChannelForum})
+
+	a.LoadArchivedThreads(100)
+	waitSig(t, ready)
+	// The worker is blocked in the REST call. A worker-side store lookup would
+	// observe this UI-only update instead of the parent guild at load start.
+	a.Store().UpsertChannel(store.Channel{ID: 100, GuildID: 9, Kind: store.ChannelForum})
+	close(release)
+	waitSig(t, changed)
+
+	thread, ok := a.Store().Channel(10)
+	if !ok {
+		t.Fatal("archived thread was not stored")
+	}
+	if thread.GuildID != 7 {
+		t.Fatalf("archived thread guild = %d, want snapshot guild 7", thread.GuildID)
+	}
 }
 
 func TestLoadArchivedThreadsPaginatesUntilHasMoreIsFalse(t *testing.T) {
@@ -77,6 +113,7 @@ func TestLoadArchivedThreadsPaginatesUntilHasMoreIsFalse(t *testing.T) {
 		}}, More: false},
 	}}
 	a, changed := newThreadTestApp(tc)
+	a.Store().UpsertChannel(store.Channel{ID: 100, GuildID: 7, Kind: store.ChannelForum})
 
 	a.LoadArchivedThreads(100)
 	waitSig(t, changed)
@@ -95,6 +132,11 @@ func TestLoadArchivedThreadsPaginatesUntilHasMoreIsFalse(t *testing.T) {
 	}
 	if got := len(a.Store().ArchivedThreads(100)); got != 3 {
 		t.Errorf("archived threads = %d, want 3 accumulated pages", got)
+	}
+	for _, post := range a.Store().ArchivedThreads(100) {
+		if post.GuildID != 7 {
+			t.Errorf("archived post %d guild = %d, want parent guild 7", post.ID, post.GuildID)
+		}
 	}
 }
 

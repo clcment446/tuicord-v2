@@ -236,6 +236,14 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 			return false
 		}
 		switch ev.Key {
+		case input.KeyEnter:
+			if len(w.items) == 0 {
+				return false
+			}
+			if w.onSelect != nil {
+				w.onSelect(w.selected)
+			}
+			return true
 		case input.KeyUp:
 			w.SetSelected(w.selected - 1)
 			return true

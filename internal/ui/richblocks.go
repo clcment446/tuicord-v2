@@ -7,6 +7,7 @@ import (
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
+	uitext "awesomeProject/internal/tui/text"
 )
 
 // renderMedia renders a message's attachments and stickers as text chips. This
@@ -121,36 +122,74 @@ func stickerChip(s store.Sticker) string {
 	return fmt.Sprintf("[sticker: %s]", s.Name)
 }
 
-// renderReactions renders the reactions summary line, e.g. "⤷ 👍 3 · :pepe: 12".
+// renderReactions renders the reactions summary line, embedding custom emoji
+// images when media rendering is enabled.
 // A reaction the current user added is drawn in reverse video. It returns ok=false
 // when there are no reactions.
-func (w *ChatView) renderReactions(reactions []store.Reaction) (chatLine, bool) {
+func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix string) (chatLine, bool) {
 	if len(reactions) == 0 {
 		return chatLine{}, false
 	}
 	base := mergeStyle(w.styles.Text, w.styles.Muted)
 	segs := []chatSegment{{text: "⤷ ", style: base}}
+	used := uitext.Width("⤷ ")
+	var inline []positionedInlineMedia
 	for i, r := range reactions {
 		if i > 0 {
 			segs = append(segs, chatSegment{text: " · ", style: base})
+			used += uitext.Width(" · ")
 		}
 		style := base
 		if r.Me {
 			style.Attrs |= screen.Reverse
 		}
-		segs = append(segs, chatSegment{text: reactionLabel(r), style: style})
+		if r.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
+			const emojiCols = 2
+			emojiURL := customEmojiURLParts(r.EmojiID, r.EmojiName, r.Animated)
+			state := w.ensureMedia(emojiURL)
+			placeholder := "  "
+			if state != nil && state.loading {
+				placeholder = mediaSpinner(w.spinner) + " "
+			}
+			segs = append(segs, chatSegment{text: placeholder, style: style})
+			if state != nil && state.err == nil && state.img != nil {
+				variant := w.mediaVariant(state, mediaSpec{
+					maxCols: emojiCols,
+					maxRows: 1,
+					sourceW: 48,
+					sourceH: 48,
+					square:  true,
+				})
+				inline = append(inline, positionedInlineMedia{
+					col: used,
+					media: &inlineMedia{
+						url:          emojiURL,
+						label:        r.EmojiName,
+						placementKey: fmt.Sprintf("%s:reaction:%d:%s", placementPrefix, i, emojiURL),
+						cols:         emojiCols,
+						rows:         1,
+						img:          variant.img,
+						style:        style,
+					},
+				})
+			}
+			used += emojiCols
+			count := fmt.Sprintf(" %d", r.Count)
+			segs = append(segs, chatSegment{text: count, style: style})
+			used += uitext.Width(count)
+			continue
+		}
+		label := reactionLabel(r)
+		segs = append(segs, chatSegment{text: label, style: style})
+		used += uitext.Width(label)
 	}
-	return chatLine{segments: segs}, true
+	return chatLine{segments: segs, inlineMedia: inline}, true
 }
 
-// reactionLabel formats one reaction as "<emoji> <count>". Custom emoji show
-// their name between colons; unicode emoji show the glyph directly.
+// reactionLabel formats one reaction as "<emoji> <count>". Custom emoji use
+// their name without Discord's colon-delimited source syntax.
 func reactionLabel(r store.Reaction) string {
-	emoji := r.EmojiName
-	if r.EmojiID != 0 {
-		emoji = ":" + r.EmojiName + ":"
-	}
-	return fmt.Sprintf("%s %d", emoji, r.Count)
+	return fmt.Sprintf("%s %d", r.EmojiName, r.Count)
 }
 
 // humanSize formats a byte count as a compact human-readable string.

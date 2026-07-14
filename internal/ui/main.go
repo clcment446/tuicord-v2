@@ -49,12 +49,15 @@ type MainView struct {
 	replyMention     bool
 	composerReadOnly bool
 
-	forumView      *ForumView
-	forumActive    bool
-	forumID        store.ChannelID
-	onNewForumPost func(string)
-	onForumFilter  func()
-	onForumHover   func(store.ChannelID, bool)
+	forumView       *ForumView
+	forumPreviewID  store.ChannelID
+	forumPreview    *ChatView
+	forumPreviewBox *widget.Border
+	forumActive     bool
+	forumID         store.ChannelID
+	onNewForumPost  func(string)
+	onForumFilter   func()
+	onForumHover    func(store.ChannelID, bool)
 
 	state     *uistate.State
 	reportErr func(error)
@@ -101,6 +104,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.memberList.SetStyle(styles.Text)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
 	if fetcher := newChatMediaFetcher(); fetcher != nil {
 		mv.chat.SetMedia(fetcher, media.DefaultConfig(), a.Post)
 	}
@@ -265,7 +269,6 @@ func (mv *MainView) onGuildSelected(index int) {
 	mv.app.SetActive(guild, 0)
 	mv.app.LoadRoles(guild)
 	mv.app.LoadChannels(guild)
-	mv.app.LoadActiveThreads(guild)
 	mv.refreshChannels()
 	// Auto-select the first navigable channel.
 	if i := mv.firstNavigableChannel(); i >= 0 {
@@ -378,8 +381,6 @@ func (mv *MainView) onChannelSelected(index int) {
 	}
 	mv.showChat()
 	mv.app.LoadHistory(row.ChannelID, 50)
-	// Message-less threads and threads opened cold need their history too.
-	mv.app.LoadActiveThreads(mv.app.ActiveGuild())
 	mv.updateChannelChrome()
 }
 
@@ -485,12 +486,21 @@ func (mv *MainView) openForum(id store.ChannelID) {
 	}
 	mv.forumActive = true
 	mv.forumID = id
-	mv.app.LoadActiveThreads(mv.app.ActiveGuild())
+	mv.app.LoadForumMetadata(id)
+	mv.app.LoadArchivedThreads(id)
 	if mv.forumView == nil {
 		mv.forumView = NewForumView(mv.styles, mv.ascii, mv.onOpenPost, mv.app.LoadArchivedThreads)
 		mv.forumView.onFilterCycle = mv.refreshForum
 		mv.forumView.onFilterMenu = mv.onForumFilter
 		mv.forumView.onNavigate = mv.navigateForum
+		mv.forumPreview = NewChatView(mv.app.Store(), func() store.ChannelID { return mv.forumPreviewID }, mv.resolver, mv.styles)
+		mv.forumPreviewBox = mv.titled("Post preview", mv.forumPreview)
+		mv.forumView.SetPreview(mv.forumPreviewBox)
+		mv.forumView.onPreview = func(post store.ChannelID) {
+			mv.forumPreviewID = post
+			mv.app.LoadHistory(post, 50)
+			mv.forumPreviewBox.SetTitle("Post preview")
+		}
 	}
 	if mv.chatBorder != nil {
 		mv.chatBorder.SetChild(mv.forumView)

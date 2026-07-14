@@ -220,10 +220,33 @@ func TestParseHeaderStripsMarker(t *testing.T) {
 
 func TestParseBlockquoteAddsGutter(t *testing.T) {
 	spans := Parse("> hi", Resolver{})
-	assertSpans(t, spans, []Span{{Kind: Kind_Quote, Text: "▏ hi"}})
+	assertSpans(t, spans, []Span{
+		{Kind: Kind_Quote, Text: "▏ "},
+		{Kind: Kind_Text, Text: "hi", Quoted: true},
+	})
 
 	multi := Parse(">>> one\ntwo", Resolver{})
-	assertSpans(t, multi, []Span{{Kind: Kind_Quote, Text: "▏ one\n▏ two"}})
+	assertSpans(t, multi, []Span{
+		{Kind: Kind_Quote, Text: "▏ "},
+		{Kind: Kind_Text, Text: "one", Quoted: true},
+		{Kind: Kind_Quote, Text: "\n▏ "},
+		{Kind: Kind_Text, Text: "two", Quoted: true},
+	})
+}
+
+func TestParseBlockquoteParsesCustomEmoji(t *testing.T) {
+	spans := Parse("> <:wave:123>", Resolver{})
+	if len(spans) != 2 {
+		t.Fatalf("spans = %+v, want gutter and emoji", spans)
+	}
+	if spans[1].Kind != Kind_Emoji || spans[1].EmojiID != 123 || !spans[1].Quoted {
+		t.Fatalf("quoted emoji span = %+v", spans[1])
+	}
+
+	spans = Parse(">>> <:wave:123>\n<a:spin:456>", Resolver{})
+	if len(spans) != 4 || spans[1].Kind != Kind_Emoji || spans[3].Kind != Kind_Emoji {
+		t.Fatalf("multiline quoted emoji spans = %+v", spans)
+	}
 }
 
 func TestHeaderMarkerOnlyAtLineStart(t *testing.T) {

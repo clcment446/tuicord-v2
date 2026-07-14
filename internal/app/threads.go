@@ -72,10 +72,11 @@ func (a *App) LoadArchivedThreads(channel store.ChannelID) {
 	if !a.beginArchivedLoad(channel) {
 		return
 	}
-	go a.loadArchivedThreads(channel)
+	parent, _ := a.store.Channel(channel)
+	go a.loadArchivedThreads(channel, parent.GuildID)
 }
 
-func (a *App) loadArchivedThreads(channel store.ChannelID) {
+func (a *App) loadArchivedThreads(channel store.ChannelID, parentGuild store.GuildID) {
 	before := a.archivedCursor(channel)
 	page, err := a.threads.PublicArchivedThreads(discord.ChannelID(channel), before, archivedPageLimit)
 	if err != nil {
@@ -85,6 +86,9 @@ func (a *App) loadArchivedThreads(channel store.ChannelID) {
 	}
 	threads := make([]store.Channel, 0, len(page.Threads))
 	for _, t := range page.Threads {
+		if t.GuildID == 0 {
+			t.GuildID = discord.GuildID(parentGuild)
+		}
 		threads = append(threads, convertChannel(t))
 	}
 	a.ui.Post(func() {

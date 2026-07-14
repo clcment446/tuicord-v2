@@ -36,6 +36,86 @@ func TestTextInputPasteCombiningClusterDeletesAsUnit(t *testing.T) {
 	}
 }
 
+func TestTextInputCtrlNavigationAndBackspace(t *testing.T) {
+	tests := []struct {
+		name       string
+		key        input.Key
+		value      string
+		cursor     int
+		wantValue  string
+		wantCursor int
+	}{
+		{
+			name:       "ctrl left moves to previous word",
+			key:        input.KeyLeft,
+			value:      "hello world",
+			cursor:     len("hello world"),
+			wantValue:  "hello world",
+			wantCursor: len("hello "),
+		},
+		{
+			name:       "ctrl right moves to next word",
+			key:        input.KeyRight,
+			value:      "hello world",
+			cursor:     0,
+			wantValue:  "hello world",
+			wantCursor: len("hello "),
+		},
+		{
+			name:       "ctrl up moves to start",
+			key:        input.KeyUp,
+			value:      "hello world",
+			cursor:     len("hello world"),
+			wantValue:  "hello world",
+			wantCursor: 0,
+		},
+		{
+			name:       "ctrl down moves to end",
+			key:        input.KeyDown,
+			value:      "hello world",
+			cursor:     0,
+			wantValue:  "hello world",
+			wantCursor: len("hello world"),
+		},
+		{
+			name:       "ctrl backspace deletes preceding word",
+			key:        input.KeyBackspace,
+			value:      "hello world",
+			cursor:     len("hello world"),
+			wantValue:  "hello ",
+			wantCursor: len("hello "),
+		},
+		{
+			name:       "ctrl backspace deletes preceding word and whitespace",
+			key:        input.KeyBackspace,
+			value:      "hello world",
+			cursor:     len("hello "),
+			wantValue:  "world",
+			wantCursor: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := NewTextInput("")
+			w.SetValue(tt.value)
+			if tt.cursor != len(tt.value) {
+				w.SetCursor(tt.cursor)
+			}
+
+			if !w.Handle(input.KeyEvent{Key: tt.key, Mods: input.Ctrl}) {
+				t.Fatal("Ctrl key was not handled")
+			}
+			if got := w.Value(); got != tt.wantValue {
+				t.Fatalf("value = %q, want %q", got, tt.wantValue)
+			}
+			if got := w.Cursor(); got != tt.wantCursor {
+				t.Fatalf("cursor = %d, want %d", got, tt.wantCursor)
+			}
+		})
+	}
+}
+
 func TestTextInputCursorBlinksOnTick(t *testing.T) {
 	w := NewTextInput("")
 	w.SetValue("hi")

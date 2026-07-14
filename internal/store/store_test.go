@@ -169,3 +169,14 @@ func TestSetMessagesReplacesHistoryOldestFirst(t *testing.T) {
 		t.Fatalf("messages channel ids = %d,%d; want 7,7", got[0].ChannelID, got[1].ChannelID)
 	}
 }
+
+func TestPrependMessagesKeepsOlderHistoryFirst(t *testing.T) {
+	s := New(0)
+	s.SetMessages(7, []Message{{ID: 3}, {ID: 4}})
+	s.PrependMessages(7, []Message{{ID: 1}, {ID: 2}})
+
+	got := s.Messages(7)
+	if len(got) != 4 || got[0].ID != 1 || got[1].ID != 2 || got[2].ID != 3 || got[3].ID != 4 {
+		t.Fatalf("messages = %+v, want IDs 1,2,3,4", got)
+	}
+}

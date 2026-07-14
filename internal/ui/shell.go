@@ -6,7 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
@@ -100,9 +99,6 @@ func (s *Shell) Layout() *layout.Node {
 func (s *Shell) Draw(screen.Region) {}
 
 func (s *Shell) DrawOverlay(r screen.Region) {
-	if s != nil && s.forumPreview != nil && s.overlay == nil && s.popup == nil {
-		s.forumPreview.Draw(r)
-	}
 	if s != nil && s.popup != nil {
 		s.popup.Measure(tui.Size{W: r.Width(), H: r.Height()})
 		s.popup.Draw(r)
@@ -184,25 +180,11 @@ func (s *Shell) Handle(ev tui.Event) bool {
 }
 
 func (s *Shell) setForumHover(id store.ChannelID, isForum bool) {
-	if s == nil || !isForum {
-		s.forumPreview = nil
-		return
-	}
-	forum, ok := s.app.Store().Channel(id)
-	if !ok || forum.Forum == nil {
-		s.forumPreview = nil
-		return
-	}
-	posts := s.app.Store().Threads(id)
-	tagByID := make(map[uint64]store.Tag, len(forum.Forum.Tags))
-	for _, tag := range forum.Forum.Tags {
-		tagByID[tag.ID] = tag
-	}
-	labels := make([]string, 0, len(posts))
-	for _, post := range sortForumPosts(posts, forum.Forum.DefaultSort) {
-		labels = append(labels, forumPostLabel(post, tagByID, time.Now(), s.mv.ascii))
-	}
-	s.forumPreview = &forumPreview{title: forum.Name, labels: labels, style: s.styles}
+	// Forum previews are rendered in the retained right-hand split pane owned
+	// by MainView; pointer hover no longer creates a screen-wide overlay.
+	_ = id
+	_ = isForum
+	s.forumPreview = nil
 }
 
 type forumPreview struct {

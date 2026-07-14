@@ -106,27 +106,37 @@ func (p *parser) scanHeader(i int) int {
 }
 
 // scanQuote consumes a "> " line quote, or ">>> " for a quote running to the
-// end of the message. The quoted text becomes one Kind_Quote span prefixed with
-// a gutter bar. Inner inline markup is not parsed in v1.
+// end of the message. The gutter remains a Kind_Quote span, while the quoted
+// body is parsed normally so entities such as custom emoji are preserved.
 func (p *parser) scanQuote(i int) int {
 	switch {
 	case p.has(i, ">>> "):
 		text := strings.TrimRight(p.src[i+4:], "\n")
-		p.emit(Span{Kind: Kind_Quote, Text: quoteText(text)})
+		emitQuotedLines(p, text)
 		return len(p.src)
 	case p.has(i, "> "):
 		end := lineEnd(p.src, i+2)
-		p.emit(Span{Kind: Kind_Quote, Text: quoteText(p.src[i+2 : end])})
+		emitQuotedLines(p, p.src[i+2:end])
 		return end
 	default:
 		return i
 	}
 }
 
-// quoteText prefixes each line of a blockquote with a gutter bar so the quote
-// reads as a distinct block in the flat span stream.
-func quoteText(s string) string {
-	return "▏ " + strings.ReplaceAll(s, "\n", "\n▏ ")
+func emitQuotedLines(p *parser, text string) {
+	for i, line := range strings.Split(text, "\n") {
+		gutter := "▏ "
+		if i > 0 {
+			gutter = "\n▏ "
+		}
+		p.emit(Span{Kind: Kind_Quote, Text: gutter})
+		inner := &parser{src: line, res: p.res, format: p.format}
+		inner.run()
+		for _, span := range inner.spans {
+			span.Quoted = true
+			p.spans = append(p.spans, span)
+		}
+	}
 }
 
 // lineEnd returns the index of the next newline at or after start, or len(s).

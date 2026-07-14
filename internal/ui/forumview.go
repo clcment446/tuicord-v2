@@ -36,7 +36,7 @@ type forumTarget struct {
 type ForumView struct {
 	header  *widget.Text
 	list    *widget.ItemList
-	body    *widget.Node
+	body    tui.Widget
 	node    layout.Node
 	styles  Styles
 	ascii   bool
@@ -53,6 +53,7 @@ type ForumView struct {
 	// rebuild the row list from its post slices.
 	onFilterCycle func()
 	onFilterMenu  func()
+	onPreview     func(store.ChannelID)
 }
 
 // NewForumView builds an empty forum view. onOpen fires for a post row; the
@@ -73,12 +74,24 @@ func NewForumView(styles Styles, ascii bool, onOpen func(store.ChannelID), onLoa
 	fv.list.SetSelectedStyle(styles.Accent)
 	fv.list.SetBadgeStyle(styles.Accent)
 	fv.list.OnSelect(fv.onSelect)
-	fv.body = widget.Column(fv.header, fv.list)
-	fv.body.Children()[0].Layout().Basis = 1
-	fv.body.Children()[0].Layout().Grow = 0
-	fv.body.Children()[1].Layout().Grow = 1
+	fv.setBody(nil)
 	return fv
 }
+
+func (fv *ForumView) setBody(preview tui.Widget) {
+	left := widget.Column(fv.header, fv.list)
+	left.Children()[0].Layout().Basis = 1
+	left.Children()[0].Layout().Grow = 0
+	left.Children()[1].Layout().Grow = 1
+	if preview == nil {
+		fv.body = left
+		return
+	}
+	fv.body = widget.NewSplit(left, preview).Basis(34).MinFirst(18).MinSecond(20).Vertical()
+}
+
+// SetPreview installs the right-hand pane used to show the selected post.
+func (fv *ForumView) SetPreview(preview tui.Widget) { fv.setBody(preview) }
 
 // SetForum installs the forum and its posts. active are the live posts; archived
 // are the paginated archived posts already loaded (may be empty). unread reports
@@ -180,6 +193,9 @@ func (fv *ForumView) onSelect(index int) {
 	t := fv.targets[index]
 	switch t.kind {
 	case forumTargetPost:
+		if fv.onPreview != nil {
+			fv.onPreview(t.channel)
+		}
 		if fv.onOpen != nil {
 			fv.onOpen(t.channel)
 		}

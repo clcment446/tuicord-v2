@@ -16,9 +16,9 @@ func LerpColor(a, b uint32, t float64) uint32 {
 	br := float64(b >> 16 & 0xFF)
 	bg := float64(b >> 8 & 0xFF)
 	bb := float64(b & 0xFF)
-	r := uint32(ar+(br-ar)*t + 0.5)
-	g := uint32(ag+(bg-ag)*t + 0.5)
-	bl := uint32(ab+(bb-ab)*t + 0.5)
+	r := uint32(ar + (br-ar)*t + 0.5)
+	g := uint32(ag + (bg-ag)*t + 0.5)
+	bl := uint32(ab + (bb-ab)*t + 0.5)
 	return r<<16 | g<<8 | bl
 }
 

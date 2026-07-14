@@ -44,14 +44,22 @@ func resolveBuildNumber() int {
 }
 
 func fetchBuildNumber() (int, error) {
-	req, err := http.NewRequest(http.MethodGet, buildAppURL, nil)
+	client := &http.Client{Timeout: 10 * time.Second}
+	return fetchBuildNumberWithClient(client, buildAppURL)
+}
+
+type httpDoer interface {
+	Do(*http.Request) (*http.Response, error)
+}
+
+func fetchBuildNumberWithClient(client httpDoer, appURL string) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, appURL, nil)
 	if err != nil {
 		return 0, err
 	}
 	req.Header.Set("User-Agent", clientBrowserUA)
 	req.Header.Set("Accept", "text/html")
 
-	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, err

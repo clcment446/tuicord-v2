@@ -84,3 +84,18 @@ func TestItemListSetSelectedSilentDoesNotNotify(t *testing.T) {
 		t.Fatalf("onSelect calls = %v, want none", selected)
 	}
 }
+
+func TestItemListEnterSelectsInitiallySelectedRow(t *testing.T) {
+	list := NewItemList([]Item{{Label: "first"}, {Label: "second"}})
+	selected := -1
+	list.OnSelect(func(index int) {
+		selected = index
+	})
+
+	if !list.Handle(input.KeyEvent{Key: input.KeyEnter}) {
+		t.Fatal("Enter should be handled")
+	}
+	if selected != 0 {
+		t.Fatalf("Enter selected row = %d, want 0", selected)
+	}
+}

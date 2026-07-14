@@ -44,6 +44,9 @@ func convertChannel(c discord.Channel) store.Channel {
 	name := c.Name
 	if name == "" && (c.Type == discord.DirectMessage || c.Type == discord.GroupDM) {
 		name = dmName(c.DMRecipients)
+		if name == "" && c.ID.IsValid() {
+			name = "DM " + c.ID.String()
+		}
 	}
 	out := store.Channel{
 		ID:         store.ChannelID(c.ID),
@@ -130,7 +133,7 @@ func convertForumMeta(c discord.Channel) *store.ForumMeta {
 
 func dmName(recipients []discord.User) string {
 	if len(recipients) == 0 {
-		return "Direct Message"
+		return ""
 	}
 	names := make([]string, 0, len(recipients))
 	for _, user := range recipients {

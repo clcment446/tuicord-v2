@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"strings"
@@ -94,6 +95,24 @@ func TestChatViewResolvesMarkup(t *testing.T) {
 	}
 	if got := buf.Cell(10, 1).Style.Attrs & screen.Bold; got == 0 {
 		t.Fatal("bold span was not drawn bold")
+	}
+}
+
+func TestChatViewMarkupPreservesBackgroundForQuoteAndEmoji(t *testing.T) {
+	base := screen.Style{Fg: screen.RGB(220, 220, 220), Bg: screen.RGB(40, 20, 10)}
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{Muted: screen.Style{Fg: screen.RGB(150, 150, 150), Bg: screen.RGB(1, 2, 3)}})
+	lines := view.renderContent("> green\n<:wave:123>", 80, base)
+	if len(lines) != 2 {
+		t.Fatalf("rendered lines = %d, want 2", len(lines))
+	}
+	for i, line := range lines {
+		if len(line.segments) == 0 || line.segments[0].style.Bg != base.Bg {
+			t.Errorf("line %d background = %+v, want %+v", i, line.segments[0].style.Bg, base.Bg)
+		}
+	}
+	emojiStyle := view.markupStyle(markup.Span{Kind: markup.Kind_Emoji, Quoted: true}, base)
+	if emojiStyle.Bg != base.Bg {
+		t.Fatalf("quoted emoji background = %+v, want %+v", emojiStyle.Bg, base.Bg)
 	}
 }
 
@@ -580,6 +599,63 @@ func TestChatViewMouseWheelScrollsMessages(t *testing.T) {
 	}
 	if view.scroll != 0 {
 		t.Fatalf("scroll = %d, want 0", view.scroll)
+	}
+}
+
+func TestChatViewEscapeReturnsToNewestMessages(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+
+	view.Handle(input.KeyEvent{Key: input.KeyUp})
+	view.Handle(input.KeyEvent{Key: input.KeyUp})
+	if view.scroll != 2 {
+		t.Fatalf("scroll = %d, want 2 before escape", view.scroll)
+	}
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyEsc}) {
+		t.Fatal("escape was not handled")
+	}
+	if view.scroll != 0 {
+		t.Fatalf("scroll = %d after escape, want 0", view.scroll)
+	}
+}
+
+func TestChatViewKeepsReadingPositionWhenNewMessageArrives(t *testing.T) {
+	st := store.New(0)
+	for i := 0; i < 6; i++ {
+		st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Content: fmt.Sprintf("message-%d", i)})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(30, 4)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+	if !view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelUp}) {
+		t.Fatal("wheel up was not handled")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	want := rowsText(buf)
+
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Content: "new message"})
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowsText(buf); got != want {
+		t.Fatalf("reading viewport moved after new message:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestChatViewPinsAuthorWhenViewportStartsInsideLongMessage(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general"})
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, AuthorID: 42, Author: "alice", Content: "one two three four five six seven eight"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(12, 3)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+	view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelUp})
+	view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelUp})
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 0); got != "alice" {
+		t.Fatalf("sticky author row = %q, want alice", got)
 	}
 }
 

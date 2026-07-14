@@ -133,6 +133,9 @@ type Span struct {
 	Kind Kind
 	Text string
 	URL  string // set for Kind_Link
+	// Quoted marks spans parsed inside a blockquote. It lets renderers preserve
+	// quote styling while still handling inline entities such as custom emoji.
+	Quoted bool
 
 	// Format carries stacked inline formatting attributes. Simple text-only
 	// formatting keeps using Kind_Bold/Kind_Italic/etc for compatibility, so

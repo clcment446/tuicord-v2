@@ -117,7 +117,7 @@ func DecodeGIF(r io.Reader) ([]Frame, error) {
 				}
 			}
 			draw.Draw(canvas, src.Bounds(), &image.Uniform{bg}, image.Point{}, draw.Src)
-		// 0, 1, 3: leave canvas as-is.
+			// 0, 1, 3: leave canvas as-is.
 		}
 	}
 

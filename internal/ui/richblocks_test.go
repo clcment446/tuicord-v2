@@ -58,6 +58,34 @@ func TestChatViewRendersReactionsLine(t *testing.T) {
 	}
 }
 
+func TestChatViewEmbedsServerEmojiInReactions(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Reactions: []store.Reaction{{EmojiName: "party", EmojiID: 123, Count: 2}},
+	})
+	url := "https://cdn.discordapp.com/emojis/123.webp?size=48&name=party&lossless=true"
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(48, 48)}}
+	buf := screen.NewBuffer(24, 3)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	for y := range buf.Height() {
+		if got := rowText(buf, y); strings.Contains(got, ":party:") {
+			t.Fatalf("reaction row contains colon markers: %q", got)
+		}
+	}
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1 embedded reaction emoji", len(graphics))
+	}
+	if !bytes.Contains(graphics[0].Data, []byte("c=2")) || !bytes.Contains(graphics[0].Data, []byte("r=1")) {
+		t.Fatalf("reaction emoji placement = %q, want 2 columns by 1 row", graphics[0].Data)
+	}
+}
+
 func TestChatViewRendersAttachmentChip(t *testing.T) {
 	// Arrange
 	st := store.New(0)

@@ -476,6 +476,33 @@ func (s *Store) SetMessages(channel ChannelID, messages []Message) {
 	s.messages[channel] = r
 }
 
+// PrependMessages adds older messages before the existing channel history.
+// Both slices must be ordered oldest-first.
+func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
+	if len(messages) == 0 {
+		return
+	}
+	current := s.Messages(channel)
+	known := make(map[MessageID]struct{}, len(current))
+	for _, message := range current {
+		if message.ID != 0 {
+			known[message.ID] = struct{}{}
+		}
+	}
+	combined := make([]Message, 0, len(messages)+len(current))
+	for _, message := range messages {
+		if message.ID != 0 {
+			if _, exists := known[message.ID]; exists {
+				continue
+			}
+			known[message.ID] = struct{}{}
+		}
+		combined = append(combined, message)
+	}
+	combined = append(combined, current...)
+	s.SetMessages(channel, combined)
+}
+
 // ReplaceMessage swaps a pending optimistic message (matched by Nonce) for the
 // confirmed message from the gateway. It reports whether a match was found; if
 // not, the caller should AppendMessage instead.

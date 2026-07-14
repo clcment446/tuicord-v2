@@ -394,16 +394,16 @@ func TestMessageRichFields(t *testing.T) {
 	// a round-trip through AppendMessage / Messages.
 	s := New(0)
 	msg := Message{
-		ID:       42,
+		ID:        42,
 		ChannelID: 5,
 		AuthorID:  99,
 		Attachments: []Attachment{{
 			URL: "https://cdn.discordapp.com/attachments/a.png",
-			W: 800, H: 600, Size: 12345,
+			W:   800, H: 600, Size: 12345,
 		}},
-		Embeds: []Embed{{Kind: EmbedRich, Title: "cool embed", Color: 0x7289DA}},
-		Stickers: []Sticker{{ID: 1, Name: "blob", Format: StickerGIF}},
-		Reactions: []Reaction{{EmojiName: "🔥", Count: 7, Me: true}},
+		Embeds:     []Embed{{Kind: EmbedRich, Title: "cool embed", Color: 0x7289DA}},
+		Stickers:   []Sticker{{ID: 1, Name: "blob", Format: StickerGIF}},
+		Reactions:  []Reaction{{EmojiName: "🔥", Count: 7, Me: true}},
 		Components: []Component{{Kind: ComponentButton, Label: "Click me", CustomID: "btn_1"}},
 	}
 

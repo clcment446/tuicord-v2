@@ -65,6 +65,7 @@ type forumPoster interface {
 // history.
 type historyLoader interface {
 	Messages(discord.ChannelID, uint) ([]discord.Message, error)
+	MessagesBefore(discord.ChannelID, discord.MessageID, uint) ([]discord.Message, error)
 }
 
 type roleLoader interface {
@@ -85,6 +86,9 @@ type directoryLoader interface {
 
 type channelLoader interface {
 	Channels(discord.GuildID) ([]discord.Channel, error)
+}
+type channelDetailsLoader interface {
+	Channel(discord.ChannelID) (*discord.Channel, error)
 }
 type channelManager interface {
 	CreateChannel(discord.GuildID, api.CreateChannelData) (*discord.Channel, error)
@@ -159,6 +163,7 @@ type App struct {
 	roleManage    roleManager
 	dirs          directoryLoader
 	chans         channelLoader
+	channelDetail channelDetailsLoader
 	channelManage channelManager
 	threads       threadClient
 	forum         forumPoster
@@ -166,20 +171,22 @@ type App struct {
 	gifs          gifSearcher
 	handle        *session.Session
 
-	resourceMu      sync.Mutex
-	historyLoaded   map[store.ChannelID]struct{}
-	historyPending  map[store.ChannelID]struct{}
-	rolesLoaded     map[store.GuildID]struct{}
-	rolesPending    map[store.GuildID]struct{}
-	guildsLoaded    bool
-	guildsPending   bool
-	channelsLoaded  map[store.GuildID]struct{}
-	channelsPending map[store.GuildID]struct{}
-	threadsLoaded   map[store.GuildID]struct{}
-	threadsPending  map[store.GuildID]struct{}
-	archivedLoaded  map[store.ChannelID]struct{}
-	archivedPending map[store.ChannelID]struct{}
-	archivedBefore  map[store.ChannelID]discord.Timestamp
+	resourceMu       sync.Mutex
+	historyLoaded    map[store.ChannelID]struct{}
+	historyPending   map[store.ChannelID]struct{}
+	historyExhausted map[store.ChannelID]struct{}
+	rolesLoaded      map[store.GuildID]struct{}
+	rolesPending     map[store.GuildID]struct{}
+	guildsLoaded     bool
+	guildsPending    bool
+	channelsLoaded   map[store.GuildID]struct{}
+	channelsPending  map[store.GuildID]struct{}
+	threadsLoaded    map[store.GuildID]struct{}
+	threadsPending   map[store.GuildID]struct{}
+	archivedLoaded   map[store.ChannelID]struct{}
+	archivedPending  map[store.ChannelID]struct{}
+	archivedBefore   map[store.ChannelID]discord.Timestamp
+	forumMetaPending map[store.ChannelID]struct{}
 
 	onReady  func()
 	onChange func()
@@ -204,6 +211,7 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		roleManage:    sess,
 		dirs:          sess,
 		chans:         sess,
+		channelDetail: sess,
 		channelManage: sess,
 		threads:       sess,
 		forum:         restForumPoster{sess: sess},
@@ -238,6 +246,9 @@ func (a *App) ensureResourceMaps() {
 	if a.historyPending == nil {
 		a.historyPending = map[store.ChannelID]struct{}{}
 	}
+	if a.historyExhausted == nil {
+		a.historyExhausted = map[store.ChannelID]struct{}{}
+	}
 	if a.rolesLoaded == nil {
 		a.rolesLoaded = map[store.GuildID]struct{}{}
 	}
@@ -264,6 +275,9 @@ func (a *App) ensureResourceMaps() {
 	}
 	if a.archivedBefore == nil {
 		a.archivedBefore = map[store.ChannelID]discord.Timestamp{}
+	}
+	if a.forumMetaPending == nil {
+		a.forumMetaPending = map[store.ChannelID]struct{}{}
 	}
 }
 
@@ -311,144 +325,10 @@ func (a *App) OnError(fn func(error)) { a.onError = fn }
 // RegisterHandlers subscribes to the gateway events the client consumes. Each
 // handler marshals its store mutation onto the UI goroutine via Post.
 func (a *App) RegisterHandlers() {
-	a.handle.AddHandler(func(e *gateway.ReadyEvent) {
-		a.handleReady(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildCreateEvent) {
-		a.handleGuildCreate(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildEmojisUpdateEvent) {
-		guildID := store.GuildID(e.GuildID)
-		emojis := convertGuildEmojis(e.Emojis)
-		a.ui.Post(func() {
-			a.store.SetGuildEmojis(guildID, emojis)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.UserSettingsUpdateEvent) {
-		folders := convertGuildFolders(e.GuildFolders)
-		a.ui.Post(func() {
-			a.store.SetGuildFolders(folders)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageCreateEvent) {
-		a.handleMessageCreate(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageUpdateEvent) {
-		a.handleMessageUpdate(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageDeleteEvent) {
-		a.handleMessageDelete(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageDeleteBulkEvent) {
-		a.handleMessageDeleteBulk(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageReactionAddEvent) {
-		a.handleReactionAdd(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveEvent) {
-		a.handleReactionRemove(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
-		a.handleReactionRemoveAll(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildMembersChunkEvent) {
-		a.handleMembersChunk(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildMemberAddEvent) {
-		a.handleMemberUpsert(e.GuildID, e.Member)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildMemberUpdateEvent) {
-		member := discord.Member{User: e.User}
-		e.UpdateMember(&member)
-		a.handleMemberUpsert(e.GuildID, member)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildMemberRemoveEvent) {
-		guildID := store.GuildID(e.GuildID)
-		userID := store.UserID(e.User.ID)
-		a.ui.Post(func() {
-			a.store.RemoveMember(guildID, userID)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildRoleCreateEvent) {
-		a.handleRoleUpsert(e.GuildID, e.Role)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildRoleUpdateEvent) {
-		a.handleRoleUpsert(e.GuildID, e.Role)
-	})
-
-	a.handle.AddHandler(func(e *gateway.GuildRoleDeleteEvent) {
-		guildID := store.GuildID(e.GuildID)
-		roleID := store.RoleID(e.RoleID)
-		a.ui.Post(func() {
-			a.store.RemoveRole(guildID, roleID)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadCreateEvent) {
-		a.handleThreadUpsert(e.Channel)
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadUpdateEvent) {
-		a.handleThreadUpsert(e.Channel)
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadDeleteEvent) {
-		id := store.ChannelID(e.ID)
-		a.ui.Post(func() {
-			a.store.RemoveThread(id)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadListSyncEvent) {
-		a.handleThreadListSync(e)
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadMemberUpdateEvent) {
-		id := store.ChannelID(e.ThreadMember.ID)
-		a.ui.Post(func() {
-			// A ThreadMemberUpdate for the current user means we joined; leaving
-			// arrives via ThreadMembersUpdate/RemovedMemberIDs handled below.
-			a.store.SetThreadJoined(id, true)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	})
-
-	a.handle.AddHandler(func(e *gateway.ThreadMembersUpdateEvent) {
-		a.handleThreadMembersUpdate(e)
-	})
+	a.registerGatewayLifecycleHandlers()
+	a.registerGatewayMessageHandlers()
+	a.registerGatewayMemberHandlers()
+	a.registerGatewayThreadHandlers()
 }
 
 // handleThreadUpsert writes a thread channel from a THREAD_CREATE/UPDATE event
@@ -961,7 +841,50 @@ func (a *App) loadHistory(channel store.ChannelID, limit uint) {
 	a.ui.Post(func() {
 		a.store.SetMessages(channel, converted)
 		a.finishHistoryLoad(channel, true)
+		if limit == 0 || len(messages) < int(limit) {
+			a.markHistoryExhausted(channel)
+		}
 		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+// LoadOlderHistory fetches the next page before the oldest cached message.
+// Calls made while a page is in flight or when Discord has no older messages
+// are ignored.
+func (a *App) LoadOlderHistory(channel store.ChannelID) {
+	if a == nil || a.history == nil || channel == 0 || !a.beginOlderHistoryLoad(channel) {
+		return
+	}
+	messages := a.store.Messages(channel)
+	if len(messages) == 0 {
+		a.finishOlderHistory(channel, true)
+		return
+	}
+	before := messages[0].ID
+	if before == 0 {
+		a.finishOlderHistory(channel, true)
+		return
+	}
+	go a.loadOlderHistory(channel, discord.MessageID(before), 50)
+}
+
+func (a *App) loadOlderHistory(channel store.ChannelID, before discord.MessageID, limit uint) {
+	messages, err := a.history.MessagesBefore(discord.ChannelID(channel), before, limit)
+	if err != nil {
+		a.finishOlderHistory(channel, false)
+		a.reportError(err)
+		return
+	}
+	converted := make([]store.Message, 0, len(messages))
+	for i := len(messages) - 1; i >= 0; i-- {
+		converted = append(converted, convertMessage(messages[i]))
+	}
+	a.ui.Post(func() {
+		a.store.PrependMessages(channel, converted)
+		a.finishOlderHistory(channel, len(messages) < int(limit))
+		if len(converted) > 0 && a.onChange != nil {
 			a.onChange()
 		}
 	})
@@ -1003,6 +926,7 @@ func (a *App) loadGuilds(limit uint) {
 		})
 		return
 	}
+	privateChannels = a.hydratePrivateChannels(privateChannels)
 	a.ui.Post(func() {
 		for _, guild := range guilds {
 			a.store.UpsertGuild(store.Guild{ID: store.GuildID(guild.ID), Name: guild.Name})
@@ -1022,6 +946,32 @@ func (a *App) loadGuilds(limit uint) {
 	})
 }
 
+// hydratePrivateChannels fills recipient data omitted by some user-session
+// startup responses. Each missing DM is fetched concurrently and the enriched
+// result is cached in the store with the rest of the directory.
+func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Channel {
+	if a == nil || a.channelDetail == nil {
+		return channels
+	}
+	var wg sync.WaitGroup
+	for i := range channels {
+		if channels[i].Name != "" || len(channels[i].DMRecipients) > 0 {
+			continue
+		}
+		id := channels[i].ID
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			full, err := a.channelDetail.Channel(id)
+			if err == nil && full != nil {
+				channels[i] = *full
+			}
+		}(i)
+	}
+	wg.Wait()
+	return channels
+}
+
 // LoadChannels fetches a guild's channel list once unless gateway already
 // supplied it.
 func (a *App) LoadChannels(guild store.GuildID) {
@@ -1032,6 +982,44 @@ func (a *App) LoadChannels(guild store.GuildID) {
 		return
 	}
 	go a.loadChannels(guild)
+}
+
+// LoadForumMetadata refreshes a forum channel from Discord's channel endpoint.
+// Gateway and guild-directory channel objects are not guaranteed to include
+// available_tags, while the channel endpoint does.
+func (a *App) LoadForumMetadata(channel store.ChannelID) {
+	if a == nil || a.channelDetail == nil || channel == 0 {
+		return
+	}
+	a.resourceMu.Lock()
+	a.ensureResourceMaps()
+	if _, ok := a.forumMetaPending[channel]; ok {
+		a.resourceMu.Unlock()
+		return
+	}
+	a.forumMetaPending[channel] = struct{}{}
+	a.resourceMu.Unlock()
+	go func() {
+		c, err := a.channelDetail.Channel(discord.ChannelID(channel))
+		a.ui.Post(func() {
+			a.resourceMu.Lock()
+			delete(a.forumMetaPending, channel)
+			a.resourceMu.Unlock()
+			if err != nil || c == nil {
+				if err != nil {
+					a.reportError(err)
+				}
+				return
+			}
+			if existing, ok := a.store.Channel(channel); ok && c.GuildID == 0 {
+				c.GuildID = discord.GuildID(existing.GuildID)
+			}
+			a.store.UpsertChannel(convertChannel(*c))
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	}()
 }
 
 func (a *App) loadChannels(guild store.GuildID) {
@@ -1136,6 +1124,37 @@ func (a *App) finishHistoryLoad(channel store.ChannelID, ok bool) {
 	if ok {
 		a.historyLoaded[channel] = struct{}{}
 	}
+}
+
+func (a *App) beginOlderHistoryLoad(channel store.ChannelID) bool {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	if _, ok := a.historyPending[channel]; ok {
+		return false
+	}
+	if _, ok := a.historyExhausted[channel]; ok {
+		return false
+	}
+	a.historyPending[channel] = struct{}{}
+	return true
+}
+
+func (a *App) finishOlderHistory(channel store.ChannelID, exhausted bool) {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	delete(a.historyPending, channel)
+	if exhausted {
+		a.historyExhausted[channel] = struct{}{}
+	}
+}
+
+func (a *App) markHistoryExhausted(channel store.ChannelID) {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.historyExhausted[channel] = struct{}{}
 }
 
 func (a *App) beginRoleLoad(guild store.GuildID) bool {

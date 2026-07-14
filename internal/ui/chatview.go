@@ -24,12 +24,13 @@ import (
 // message sits just above the composer. It reads the store live during Draw, so
 // no explicit refresh is needed when new messages arrive — a redraw suffices.
 type ChatView struct {
-	store    *store.Store
-	active   func() store.ChannelID
-	resolver func() markup.Resolver
-	styles   Styles
-	scroll   int
-	node     layout.Node
+	store      *store.Store
+	active     func() store.ChannelID
+	resolver   func() markup.Resolver
+	onReachTop func()
+	styles     Styles
+	scroll     int
+	node       layout.Node
 
 	visibleLines       []chatLine
 	contextMessage     store.Message
@@ -50,6 +51,10 @@ type ChatView struct {
 	post         func(func())
 	media        map[string]*chatMediaState
 	mediaSlots   chan struct{}
+	spinner      int
+	// renderedLineCount lets a scrolled viewport compensate for lines appended
+	// below it without changing the user's reading position.
+	renderedLineCount int
 
 	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
 	// message currently being rendered a viewport-unique placement key.
@@ -80,6 +85,14 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 	}
 }
 
+// OnReachTop registers a callback invoked when the user scrolls toward older
+// messages. The callback runs on the UI goroutine.
+func (w *ChatView) OnReachTop(fn func()) {
+	if w != nil {
+		w.onReachTop = fn
+	}
+}
+
 // SetMedia enables asynchronous inline media loading for attachments, stickers,
 // emoji CDN links, and image embeds. post must schedule callbacks on the UI
 // goroutine; passing nil leaves text-chip fallbacks in place.
@@ -91,7 +104,7 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	w.mediaCfg = cfg
 	w.post = post
 	if w.mediaSlots == nil {
-		w.mediaSlots = make(chan struct{}, 4)
+		w.mediaSlots = make(chan struct{}, 8)
 	}
 	if w.media == nil {
 		w.media = map[string]*chatMediaState{}
@@ -130,7 +143,7 @@ func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style
 	case state.err != nil:
 		return []chatLine{{segments: []chatSegment{{text: label + " (failed)", style: muted}}}}
 	case state.img == nil:
-		return []chatLine{{segments: []chatSegment{{text: label + " (loading)", style: muted}}}}
+		return []chatLine{{segments: []chatSegment{{text: label + " " + mediaSpinner(w.spinner), style: muted}}}}
 	default:
 		variant := w.mediaVariant(state, spec)
 		if placementKey == "" {
@@ -163,6 +176,20 @@ func (w *ChatView) ensureMedia(url string) *chatMediaState {
 	w.media[url] = state
 	go w.fetchMedia(url)
 	return state
+}
+
+func mediaSpinner(step int) string {
+	frames := [...]string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+	return "[" + frames[step%len(frames)] + "]"
+}
+
+func (w *ChatView) mediaLoading() bool {
+	for _, state := range w.media {
+		if state != nil && state.loading {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *ChatView) fetchMedia(url string) {
@@ -272,15 +299,27 @@ func (w *ChatView) Draw(r screen.Region) {
 	if r.Width() <= 0 || r.Height() <= 0 {
 		return
 	}
+	previousLineCount := w.renderedLineCount
 	lines := w.render(r.Width())
+	if w.scroll > 0 && previousLineCount > 0 && len(lines) > previousLineCount {
+		w.scroll += len(lines) - previousLineCount
+	}
+	w.renderedLineCount = len(lines)
 	// Bottom-align: show the last r.Height() lines, offset by scroll.
 	start := max(len(lines)-r.Height()-w.scroll, 0)
 	end := min(start+r.Height(), len(lines))
-	w.visibleLines = append(w.visibleLines[:0], lines[start:end]...)
+	displayLines := lines[start:end]
+	if len(displayLines) > 0 && !displayLines[0].author && displayLines[0].message.Author != "" {
+		// Keep the sender visible when the viewport begins inside a long message.
+		// Replace the last visible content row so the total viewport height stays
+		// stable while the author remains directly beneath the channel title.
+		pinned := w.authorLine(displayLines[0].message, w.guildOf(w.active()))
+		displayLines = append([]chatLine{pinned}, displayLines[:len(displayLines)-1]...)
+	}
+	w.visibleLines = append(w.visibleLines[:0], displayLines...)
 	y := 0
 	drawnMedia := map[*inlineMedia]struct{}{}
-	for i := start; i < end; i++ {
-		line := lines[i]
+	for _, line := range displayLines {
 		if line.media != nil {
 			drawChatLine(r, 0, y, line)
 			if _, ok := drawnMedia[line.media]; !ok {
@@ -303,6 +342,7 @@ type chatLine struct {
 	style       screen.Style
 	segments    []chatSegment
 	message     store.Message
+	author      bool
 	media       *inlineMedia
 	mediaRow    int
 	mediaX      int
@@ -444,19 +484,8 @@ func (w *ChatView) render(width int) []chatLine {
 		showAuthor := !previousSet || !sameMessageAuthor(previous, m) ||
 			previous.Failed != m.Failed || previous.Pending != m.Pending
 		if showAuthor {
-			header := m.Author
-			if m.Failed {
-				header += " (failed)"
-			} else if m.Pending {
-				header += " (sending…)"
-			}
-			// Author line (role-colored when the member has a colored role), then
-			// wrapped content indented under it.
-			authorStyle := w.styles.Accent
-			if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
-				authorStyle.Fg = rgbColor(color)
-			}
-			lines = append(lines, chatLine{text: header, style: authorStyle, message: m})
+			line := w.authorLine(m, guild)
+			lines = append(lines, line)
 		}
 		if m.Content != "" && !suppressContent(m) {
 			lines = append(lines, stampMessage(w.renderContent(m.Content, width, style), m)...)
@@ -464,7 +493,7 @@ func (w *ChatView) render(width int) []chatLine {
 		lines = append(lines, stampMessage(w.renderMedia(m, width, style), m)...)
 		lines = append(lines, stampMessage(w.renderEmbeds(m, width, style), m)...)
 		lines = append(lines, stampMessage(w.renderComponentTree(m, width, style), m)...)
-		if line, ok := w.renderReactions(m.Reactions); ok {
+		if line, ok := w.renderReactions(m.Reactions, messagePlacementPrefix(m)); ok {
 			line.message = m
 			lines = append(lines, line)
 		}
@@ -475,6 +504,20 @@ func (w *ChatView) render(width int) []chatLine {
 		previousSet = true
 	}
 	return lines
+}
+
+func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
+	header := m.Author
+	if m.Failed {
+		header += " (failed)"
+	} else if m.Pending {
+		header += " (sending…)"
+	}
+	authorStyle := w.styles.Accent
+	if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
+		authorStyle.Fg = rgbColor(color)
+	}
+	return chatLine{text: header, style: authorStyle, message: m, author: true}
 }
 
 func sameMessageAuthor(a, b store.Message) bool {
@@ -564,7 +607,11 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 			}
 			emojiURL := customEmojiURL(span)
 			state := w.ensureMedia(emojiURL)
-			line = appendChatSegment(line, chatSegment{text: strings.Repeat(" ", emojiCols), style: style})
+			placeholder := strings.Repeat(" ", emojiCols)
+			if state != nil && state.loading {
+				placeholder = mediaSpinner(w.spinner) + " "
+			}
+			line = appendChatSegment(line, chatSegment{text: placeholder, style: style})
 			if state != nil && state.err == nil && state.img != nil {
 				variant := w.mediaVariant(state, mediaSpec{
 					maxCols: emojiCols,
@@ -583,6 +630,7 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 						cols:         emojiCols,
 						rows:         1,
 						img:          variant.img,
+						style:        style,
 					},
 				})
 			}
@@ -598,18 +646,25 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 }
 
 func customEmojiURL(span markup.Span) string {
+	return customEmojiURLParts(span.EmojiID, strings.Trim(span.Text, ":"), span.EmojiAnimated)
+}
+
+func customEmojiURLParts(id uint64, name string, animated bool) string {
 	ext := "webp"
-	if span.EmojiAnimated {
+	if animated {
 		ext = "gif"
 	}
-	name := url.QueryEscape(strings.Trim(span.Text, ":"))
 	return "https://cdn.discordapp.com/emojis/" +
-		strconv.FormatUint(span.EmojiID, 10) + "." + ext +
-		"?size=48&name=" + name + "&lossless=true"
+		strconv.FormatUint(id, 10) + "." + ext +
+		"?size=48&name=" + url.QueryEscape(name) + "&lossless=true"
 }
 
 func (w *ChatView) markupStyle(span markup.Span, base screen.Style) screen.Style {
 	style := base
+	if span.Quoted {
+		style = mergeStyle(style, w.styles.Muted)
+		style.Bg = base.Bg
+	}
 	switch span.Kind {
 	case markup.Kind_Bold:
 		style.Attrs |= screen.Bold
@@ -628,6 +683,7 @@ func (w *ChatView) markupStyle(span markup.Span, base screen.Style) screen.Style
 		style.Attrs |= screen.Underline
 	case markup.Kind_Quote:
 		style = mergeStyle(style, w.styles.Muted)
+		style.Bg = base.Bg
 	case markup.Kind_Header:
 		style = mergeStyle(style, w.styles.Accent)
 		style.Attrs |= screen.Bold | screen.Underline
@@ -701,7 +757,11 @@ func mergeStyle(base, overlay screen.Style) screen.Style {
 func (w *ChatView) Handle(ev tui.Event) bool {
 	switch ev := ev.(type) {
 	case input.TickEvent:
-		return w.expireComponentFlashes(time.Now())
+		loading := w.mediaLoading()
+		if loading {
+			w.spinner++
+		}
+		return w.expireComponentFlashes(time.Now()) || loading
 	case input.KeyEvent:
 		if ev.Release {
 			return false
@@ -717,6 +777,9 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			}
 		}
 		switch ev.Key {
+		case input.KeyEsc:
+			w.scroll = 0
+			return true
 		case input.KeyUp:
 			w.scrollUp()
 			return true
@@ -1041,6 +1104,9 @@ func (w *ChatView) TakeComponentAction() (ComponentAction, bool) {
 
 func (w *ChatView) scrollUp() {
 	w.scroll++
+	if w.onReachTop != nil {
+		w.onReachTop()
+	}
 }
 
 func (w *ChatView) scrollDown() {

@@ -12,16 +12,16 @@ func solidImage(w, h int) image.Image {
 
 func TestDownscale_FitsWithinBudget(t *testing.T) {
 	tests := []struct {
-		name              string
-		srcW, srcH        int
-		maxCols, maxRows  int
-		wantW, wantH      int
+		name             string
+		srcW, srcH       int
+		maxCols, maxRows int
+		wantW, wantH     int
 	}{
 		{
 			// Image already fits → returned unchanged (same pointer identity
 			// is acceptable, but the bounds must match the source).
-			name:    "image already fits",
-			srcW:    10, srcH: 4,
+			name: "image already fits",
+			srcW: 10, srcH: 4,
 			maxCols: 20, maxRows: 6,
 			wantW: 10, wantH: 4,
 		},
@@ -29,8 +29,8 @@ func TestDownscale_FitsWithinBudget(t *testing.T) {
 			// 100×100 into 10 cols × 5 rows. Cell budget → 10 px wide, 10 px tall.
 			// Limiting factor is height (100 → 10) → scale = 0.1.
 			// Result: 10×10.
-			name:    "square limited by height",
-			srcW:    100, srcH: 100,
+			name: "square limited by height",
+			srcW: 100, srcH: 100,
 			maxCols: 10, maxRows: 5,
 			wantW: 10, wantH: 10,
 		},
@@ -40,8 +40,8 @@ func TestDownscale_FitsWithinBudget(t *testing.T) {
 			// Width scale = 10/200 = 0.05; height scale = 20/50 = 0.4.
 			// Limiting factor is width → scale = 0.05.
 			// Result: 10×2.
-			name:    "wide image limited by width",
-			srcW:    200, srcH: 50,
+			name: "wide image limited by width",
+			srcW: 200, srcH: 50,
 			maxCols: 10, maxRows: 10,
 			wantW: 10, wantH: 2,
 		},
@@ -51,8 +51,8 @@ func TestDownscale_FitsWithinBudget(t *testing.T) {
 			// Width scale = 10/1 = 10; height scale = 10/100 = 0.1.
 			// Limiting factor is height → scale = 0.1.
 			// Result: 1×10.
-			name:    "very tall narrow image",
-			srcW:    1, srcH: 100,
+			name: "very tall narrow image",
+			srcW: 1, srcH: 100,
 			maxCols: 10, maxRows: 5,
 			wantW: 1, wantH: 10,
 		},
@@ -62,8 +62,8 @@ func TestDownscale_FitsWithinBudget(t *testing.T) {
 			// Width scale = 20/60 ≈ 0.333; height scale = 20/30 ≈ 0.667.
 			// Limiting factor is width → scale ≈ 0.333.
 			// Result: 20×10.
-			name:    "landscape limited by width with cellAspect",
-			srcW:    60, srcH: 30,
+			name: "landscape limited by width with cellAspect",
+			srcW: 60, srcH: 30,
 			maxCols: 20, maxRows: 10,
 			wantW: 20, wantH: 10,
 		},
