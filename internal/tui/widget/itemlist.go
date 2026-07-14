@@ -29,6 +29,7 @@ type ItemList struct {
 	selectedStyle screen.Style
 	badgeStyle    screen.Style
 	onSelect      func(int)
+	onHover       func(int)
 	node          layout.Node
 	viewH         int
 
@@ -131,6 +132,14 @@ func (w *ItemList) OnSelect(fn func(int)) {
 		return
 	}
 	w.onSelect = fn
+}
+
+// OnHover registers a callback for pointer motion over a visible row.
+func (w *ItemList) OnHover(fn func(int)) {
+	if w == nil {
+		return
+	}
+	w.onHover = fn
 }
 
 // CanFocus reports that the list can receive keyboard focus.
@@ -248,6 +257,12 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		}
 	case input.MouseEvent:
 		switch ev.Kind {
+		case input.MouseMotion:
+			index := w.offset + ev.Y
+			if index >= 0 && index < len(w.items) && w.onHover != nil {
+				w.onHover(index)
+				return true
+			}
 		case input.MousePress:
 			if ev.Btn == input.ButtonRight {
 				index := w.offset + ev.Y

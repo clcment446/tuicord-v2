@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 
@@ -70,6 +71,13 @@ type roleLoader interface {
 	Roles(discord.GuildID) ([]discord.Role, error)
 }
 
+type roleManager interface {
+	CreateRole(discord.GuildID, api.CreateRoleData) (*discord.Role, error)
+	ModifyRole(discord.GuildID, discord.RoleID, api.ModifyRoleData) (*discord.Role, error)
+	DeleteRole(discord.GuildID, discord.RoleID, api.AuditLogReason) error
+	MoveRoles(discord.GuildID, api.MoveRolesData) ([]discord.Role, error)
+}
+
 type directoryLoader interface {
 	Guilds(uint) ([]discord.Guild, error)
 	PrivateChannels() ([]discord.Channel, error)
@@ -77,6 +85,22 @@ type directoryLoader interface {
 
 type channelLoader interface {
 	Channels(discord.GuildID) ([]discord.Channel, error)
+}
+type channelManager interface {
+	CreateChannel(discord.GuildID, api.CreateChannelData) (*discord.Channel, error)
+	ModifyChannel(discord.ChannelID, api.ModifyChannelData) error
+	DeleteChannel(discord.ChannelID, api.AuditLogReason) error
+	MoveChannels(discord.GuildID, api.MoveChannelsData) error
+}
+
+type gifSearcher interface {
+	SearchGIFs(string) ([]clientdiscord.GIFResult, error)
+}
+
+type restGIFSearcher struct{ client *api.Client }
+
+func (s restGIFSearcher) SearchGIFs(query string) ([]clientdiscord.GIFResult, error) {
+	return clientdiscord.SearchGIFs(s.client, query)
 }
 
 // DirectMessagesGuildID is the synthetic guild that owns private channels in
@@ -99,6 +123,7 @@ type componentInteraction struct {
 	MessageID     string                   `json:"message_id"`
 	ApplicationID string                   `json:"application_id"`
 	SessionID     string                   `json:"session_id"`
+	MessageFlags  uint64                   `json:"message_flags,omitempty"`
 	Data          componentInteractionData `json:"data"`
 }
 
@@ -126,17 +151,20 @@ func (r restInteractionPoster) postComponentInteraction(p componentInteraction) 
 
 // App wires the session, store, and UI together and tracks navigation state.
 type App struct {
-	store    *store.Store
-	ui       poster
-	send     sender
-	history  historyLoader
-	roles    roleLoader
-	dirs     directoryLoader
-	chans    channelLoader
-	threads  threadClient
-	forum    forumPoster
-	interact componentInteractionPoster
-	handle   *session.Session
+	store         *store.Store
+	ui            poster
+	send          sender
+	history       historyLoader
+	roles         roleLoader
+	roleManage    roleManager
+	dirs          directoryLoader
+	chans         channelLoader
+	channelManage channelManager
+	threads       threadClient
+	forum         forumPoster
+	interact      componentInteractionPoster
+	gifs          gifSearcher
+	handle        *session.Session
 
 	resourceMu      sync.Mutex
 	historyLoaded   map[store.ChannelID]struct{}
@@ -151,6 +179,7 @@ type App struct {
 	threadsPending  map[store.GuildID]struct{}
 	archivedLoaded  map[store.ChannelID]struct{}
 	archivedPending map[store.ChannelID]struct{}
+	archivedBefore  map[store.ChannelID]discord.Timestamp
 
 	onReady  func()
 	onChange func()
@@ -167,18 +196,39 @@ type App struct {
 // New returns an orchestrator over the given session, store, and UI runtime.
 func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 	return &App{
-		store:    st,
-		ui:       ui,
-		send:     sess,
-		history:  sess,
-		roles:    sess,
-		dirs:     sess,
-		chans:    sess,
-		threads:  sess,
-		forum:    restForumPoster{sess: sess},
-		interact: restInteractionPoster{sess: sess},
-		handle:   sess,
+		store:         st,
+		ui:            ui,
+		send:          sess,
+		history:       sess,
+		roles:         sess,
+		roleManage:    sess,
+		dirs:          sess,
+		chans:         sess,
+		channelManage: sess,
+		threads:       sess,
+		forum:         restForumPoster{sess: sess},
+		interact:      restInteractionPoster{sess: sess},
+		gifs:          restGIFSearcher{client: sess.Client},
+		handle:        sess,
 	}
+}
+
+// SearchGIFs searches Discord's Tenor proxy away from the UI thread and posts
+// completion back onto the UI event loop.
+func (a *App) SearchGIFs(query string, done func([]clientdiscord.GIFResult, error)) {
+	query = strings.TrimSpace(query)
+	if a == nil || a.gifs == nil || query == "" || done == nil {
+		return
+	}
+	go func() {
+		results, err := a.gifs.SearchGIFs(query)
+		a.ui.Post(func() {
+			if err != nil && a.onError != nil {
+				a.onError(err)
+			}
+			done(results, err)
+		})
+	}()
 }
 
 func (a *App) ensureResourceMaps() {
@@ -211,6 +261,9 @@ func (a *App) ensureResourceMaps() {
 	}
 	if a.archivedPending == nil {
 		a.archivedPending = map[store.ChannelID]struct{}{}
+	}
+	if a.archivedBefore == nil {
+		a.archivedBefore = map[store.ChannelID]discord.Timestamp{}
 	}
 }
 
@@ -552,10 +605,12 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 	a.ui.Post(func() {
 		a.store.UpdateMessage(channel, id, func(m *store.Message) {
 			m.Content = patch.Content
+			m.Flags = patch.Flags
 			m.Attachments = patch.Attachments
 			m.Embeds = patch.Embeds
 			m.Stickers = patch.Stickers
 			m.Components = patch.Components
+			m.ComponentTree = patch.ComponentTree
 			m.Pinned = patch.Pinned
 		})
 		if a.onChange != nil {
@@ -691,6 +746,19 @@ func (a *App) Send(content string) {
 	go a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce}, nonce)
 }
 
+// SendSticker posts a native Discord sticker to the active channel.
+func (a *App) SendSticker(id uint64) {
+	if id == 0 || a.activeChannel == 0 {
+		return
+	}
+	channel := a.activeChannel
+	nonce := newNonce()
+	a.store.AppendMessage(store.Message{ChannelID: channel, Author: "you", Nonce: nonce, Pending: true})
+	go a.deliver(channel, api.SendMessageData{
+		Nonce: nonce, StickerIDs: []discord.StickerID{discord.StickerID(id)},
+	}, nonce)
+}
+
 // Reply sends content as a Discord inline reply to message.
 func (a *App) Reply(content string, message store.Message, mention bool) {
 	if content == "" || message.ChannelID == 0 || message.ID == 0 {
@@ -756,6 +824,7 @@ func (a *App) SubmitComponent(sub ComponentSubmit) {
 		MessageID:     strconv.FormatUint(uint64(msg.ID), 10),
 		ApplicationID: strconv.FormatUint(appID, 10),
 		SessionID:     a.sessionID,
+		MessageFlags:  msg.Flags,
 		Data: componentInteractionData{
 			ComponentType: componentType,
 			CustomID:      sub.CustomID,

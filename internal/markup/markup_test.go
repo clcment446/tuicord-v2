@@ -85,11 +85,21 @@ func TestParseMentionAndChannel(t *testing.T) {
 	spans := Parse("hi <@42> in <#7>", testResolver())
 	want := []Span{
 		{Kind: Kind_Text, Text: "hi "},
-		{Kind: Kind_Mention, Text: "@alice"},
+		{Kind: Kind_Mention, Text: "@alice", Action: &Action{Kind: ActionUserMention, Target: "42"}},
 		{Kind: Kind_Text, Text: " in "},
 		{Kind: Kind_ChannelMention, Text: "#general"},
 	}
 	assertSpans(t, spans, want)
+}
+
+func TestMentionEntitiesCarryClickActions(t *testing.T) {
+	spans := Parse("<@42> <@&7>", Resolver{Member: func(uint64) (string, bool) { return "alice", true }, Role: func(uint64) (string, uint32, bool) { return "mod", 0, true }})
+	if spans[0].Action == nil || spans[0].Action.Kind != ActionUserMention || spans[0].Action.Target != "42" {
+		t.Fatalf("user action = %+v", spans[0].Action)
+	}
+	if spans[2].Action == nil || spans[2].Action.Kind != ActionRoleMention || spans[2].Action.Target != "7" {
+		t.Fatalf("role action = %+v", spans[2].Action)
+	}
 }
 
 func TestParseNicknameMention(t *testing.T) {
@@ -194,7 +204,7 @@ func TestParseFormattingAppliesToNestedEntities(t *testing.T) {
 	spans := Parse("**hi <@42>**", testResolver())
 	want := []Span{
 		{Kind: Kind_Bold, Text: "hi "},
-		{Kind: Kind_Mention, Text: "@alice", Format: FormatBold},
+		{Kind: Kind_Mention, Text: "@alice", Format: FormatBold, Action: &Action{Kind: ActionUserMention, Target: "42"}},
 	}
 	assertSpans(t, spans, want)
 }
@@ -305,7 +315,7 @@ func TestParseRoleMentionInContext(t *testing.T) {
 	spans := Parse("hello <@&100> world", res)
 	want := []Span{
 		{Kind: Kind_Text, Text: "hello "},
-		{Kind: Kind_RoleMention, Text: "@Moderator", FG: 0xFF5500},
+		{Kind: Kind_RoleMention, Text: "@Moderator", FG: 0xFF5500, Action: &Action{Kind: ActionRoleMention, Target: "100"}},
 		{Kind: Kind_Text, Text: " world"},
 	}
 	assertSpans(t, spans, want)

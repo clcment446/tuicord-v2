@@ -3,6 +3,7 @@ package app
 import (
 	"strconv"
 	"strings"
+	"time"
 
 	"awesomeProject/internal/store"
 
@@ -75,10 +76,10 @@ func (a *App) LoadArchivedThreads(channel store.ChannelID) {
 }
 
 func (a *App) loadArchivedThreads(channel store.ChannelID) {
-	// A zero Timestamp requests the first (most recent) page.
-	page, err := a.threads.PublicArchivedThreads(discord.ChannelID(channel), discord.Timestamp{}, archivedPageLimit)
+	before := a.archivedCursor(channel)
+	page, err := a.threads.PublicArchivedThreads(discord.ChannelID(channel), before, archivedPageLimit)
 	if err != nil {
-		a.finishArchivedLoad(channel, false)
+		a.finishArchivedLoad(channel, false, false, discord.Timestamp{})
 		a.reportError(err)
 		return
 	}
@@ -90,7 +91,8 @@ func (a *App) loadArchivedThreads(channel store.ChannelID) {
 		for _, t := range threads {
 			a.store.UpsertChannel(t)
 		}
-		a.finishArchivedLoad(channel, true)
+		next := archivedCursor(page.Threads)
+		a.finishArchivedLoad(channel, true, page.More, next)
 		if a.onChange != nil {
 			a.onChange()
 		}
@@ -267,12 +269,38 @@ func (a *App) beginArchivedLoad(channel store.ChannelID) bool {
 	return true
 }
 
-func (a *App) finishArchivedLoad(channel store.ChannelID, ok bool) {
+func (a *App) finishArchivedLoad(channel store.ChannelID, ok, more bool, before discord.Timestamp) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
 	delete(a.archivedPending, channel)
-	if ok {
+	if ok && !more {
 		a.archivedLoaded[channel] = struct{}{}
 	}
+	if ok && more {
+		a.archivedBefore[channel] = before
+	}
+}
+
+func (a *App) archivedCursor(channel store.ChannelID) discord.Timestamp {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.archivedBefore[channel]
+}
+
+// archivedCursor returns the oldest archive timestamp in a page, which Discord
+// accepts as the exclusive `before` cursor for the following page.
+func archivedCursor(threads []discord.Channel) discord.Timestamp {
+	var oldest discord.Timestamp
+	for _, thread := range threads {
+		if thread.ThreadMetadata == nil {
+			continue
+		}
+		stamp := thread.ThreadMetadata.ArchiveTimestamp
+		if time.Time(oldest).IsZero() || time.Time(stamp).Before(time.Time(oldest)) {
+			oldest = stamp
+		}
+	}
+	return oldest
 }

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"image"
+	"image/color"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +37,23 @@ func TestChatViewRendersBottomAligned(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("row %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+func TestChatViewRendersConsecutiveMessagesFromAuthorAsOneBlock(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", Content: "first"})
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", Content: "second"})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(20, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	want := []string{"alice", "first", "second"}
+	for i, row := range want {
+		if got := rowText(buf, i); got != row {
+			t.Errorf("row %d = %q, want %q", i, got, row)
 		}
 	}
 }
@@ -385,6 +404,48 @@ func TestChatViewRendersEmbedsWithBorderAndTint(t *testing.T) {
 	}
 	if border.Bg == base.Bg || border.Bg == rgbColor(0x5865F2) {
 		t.Fatalf("embed bg = %+v, want subtle tint between base and accent", border.Bg)
+	}
+}
+
+func TestChatViewKeepsLoadedEmbedImageInsideTintedFrame(t *testing.T) {
+	const imageURL = "https://example.com/card.png"
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID:        25,
+		ChannelID: 1,
+		Author:    "bot",
+		Embeds: []store.Embed{{
+			Kind:     store.EmbedImage,
+			ImageURL: imageURL,
+			Title:    "Card image",
+		}},
+	})
+	base := screen.Style{Fg: screen.RGB(220, 220, 220), Bg: screen.RGB(10, 10, 10)}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{Text: base})
+	view.media = map[string]*chatMediaState{
+		imageURL: {img: func() image.Image {
+			img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+			for y := 0; y < 4; y++ {
+				for x := 0; x < 4; x++ {
+					img.SetRGBA(x, y, color.RGBA{R: 255, A: 255})
+				}
+			}
+			return img
+		}()},
+	}
+	buf := screen.NewBuffer(30, 8)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	for _, row := range []int{5, 6} {
+		if left, right := buf.Cell(0, row).Content, buf.Cell(29, row).Content; left != "│" || right != "│" {
+			t.Fatalf("image row %d borders = %q/%q, want frame borders; rows:\n%s", row, left, right, rowsText(buf))
+		}
+		if got := buf.Cell(0, row).Style; !got.Bg.Set() {
+			t.Fatalf("left border row %d has no background: %+v", row, got)
+		}
+		if got := buf.Cell(1, row).Style; !got.Bg.Set() {
+			t.Fatalf("image fill row %d has no background: %+v", row, got)
+		}
 	}
 }
 

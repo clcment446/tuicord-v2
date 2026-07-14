@@ -127,8 +127,60 @@ func TestPickerStickerTab(t *testing.T) {
 	if len(p.filtered) != 1 || !strings.HasPrefix(p.filtered[0].label, "hello") {
 		t.Fatalf("sticker tab = %+v", p.filtered)
 	}
-	if !strings.Contains(p.filtered[0].insert, "/stickers/99.png") {
-		t.Fatalf("sticker insert = %q", p.filtered[0].insert)
+	if p.filtered[0].stickerID != 99 || p.filtered[0].insert != "" {
+		t.Fatalf("native sticker entry = %+v", p.filtered[0])
+	}
+}
+
+func TestPickerNativeStickerSelectionAndRecentOrder(t *testing.T) {
+	st := newTestPickerStore()
+	st.SetGuildStickers(1, []store.GuildSticker{{ID: 99, Name: "hello"}, {ID: 100, Name: "wave"}})
+	var selected uint64
+	p := NewPicker(st, Styles{}, 1, false, true, func(string) {}, func() {})
+	p.SetStickerSelect(func(id uint64) { selected = id })
+	p.SetRecentStickers([]uint64{100})
+	p.setTab(tabSticker)
+	if len(p.filtered) != 2 || p.filtered[0].stickerID != 100 {
+		t.Fatalf("recent sticker order = %+v", p.filtered)
+	}
+	p.Handle(input.KeyEvent{Key: input.KeyEnter})
+	if selected != 100 {
+		t.Fatalf("selected sticker = %d, want 100", selected)
+	}
+}
+
+func TestPickerOtherGuildStickerUsesFakeNitroURL(t *testing.T) {
+	st := newTestPickerStore()
+	st.SetGuildStickers(2, []store.GuildSticker{{ID: 200, Name: "other"}})
+	p := NewPicker(st, Styles{}, 1, false, true, func(string) {}, func() {})
+	p.setTab(tabSticker)
+	typeRunes(p, "other")
+	if len(p.filtered) != 1 || p.filtered[0].stickerID != 0 ||
+		!strings.Contains(p.filtered[0].insert, "/stickers/200.png") {
+		t.Fatalf("other-guild sticker = %+v", p.filtered)
+	}
+}
+
+func TestPickerGIFSearchAndInsert(t *testing.T) {
+	var requested string
+	var inserted string
+	p := NewPicker(newTestPickerStore(), Styles{}, 1, false, true,
+		func(s string) { inserted = s }, func() {})
+	p.SetGIFSearch(func(query string, done func([]GIFResult, error)) {
+		requested = query
+		done([]GIFResult{{Title: "Party Cat", URL: "https://media.tenor.com/party.gif"}}, nil)
+	})
+	p.setTab(tabGIF)
+	typeRunes(p, "party cat")
+	if requested != "party cat" {
+		t.Fatalf("gif query = %q", requested)
+	}
+	if len(p.filtered) != 1 || p.filtered[0].insert != "https://media.tenor.com/party.gif" {
+		t.Fatalf("gif results = %+v", p.filtered)
+	}
+	p.Handle(input.KeyEvent{Key: input.KeyEnter})
+	if inserted != "https://media.tenor.com/party.gif" {
+		t.Fatalf("inserted = %q", inserted)
 	}
 }
 

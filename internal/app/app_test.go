@@ -243,6 +243,22 @@ func TestSendIgnoredWithoutActiveChannel(t *testing.T) {
 	}
 }
 
+func TestSendStickerUsesNativeStickerIDs(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+	a.SetActive(1, 42)
+	a.SendSticker(99)
+	<-fs.done
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.lastSend.StickerIDs) != 1 || uint64(fs.lastSend.StickerIDs[0]) != 99 {
+		t.Fatalf("sticker_ids = %v, want [99]", fs.lastSend.StickerIDs)
+	}
+	if fs.lastSend.Content != "" {
+		t.Fatalf("content = %q, want empty native sticker message", fs.lastSend.Content)
+	}
+}
+
 func TestReplyNoMentionBuildsReferenceAndAllowedMentions(t *testing.T) {
 	fs := &fakeSender{done: make(chan struct{})}
 	a := newTestApp(fs)
@@ -574,9 +590,11 @@ func TestLoadRolesStoresRolesAndUsesSessionCache(t *testing.T) {
 		rolesDone: make(chan struct{}),
 	}
 	a := newTestApp(fs)
+	loaded := make(chan struct{})
+	a.OnChange(func() { close(loaded) })
 
 	a.LoadRoles(1)
-	<-fs.rolesDone
+	<-loaded
 	a.LoadRoles(1)
 
 	fs.mu.Lock()

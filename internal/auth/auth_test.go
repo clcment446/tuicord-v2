@@ -3,13 +3,15 @@ package auth
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
 type memoryStore struct {
-	token string
-	err   error
-	saved string
+	token  string
+	err    error
+	saved  string
+	setErr error
 }
 
 func (s *memoryStore) GetToken() (string, error) {
@@ -18,7 +20,7 @@ func (s *memoryStore) GetToken() (string, error) {
 
 func (s *memoryStore) SetToken(token string) error {
 	s.saved = token
-	return nil
+	return s.setErr
 }
 
 func (s *memoryStore) DeleteToken() error {
@@ -78,5 +80,28 @@ func TestResolveTokenReturnsErrNoToken(t *testing.T) {
 	})
 	if !errors.Is(err, ErrNoToken) {
 		t.Fatalf("got %v, want ErrNoToken", err)
+	}
+}
+
+func TestResolveTokenReturnsTokenWhenStoreIsUnavailable(t *testing.T) {
+	storeErr := errors.New("The name is not activatable")
+	store := &memoryStore{setErr: storeErr}
+	var reported error
+
+	got, err := ResolveToken(context.Background(), Options{
+		Store: store,
+		Prompt: func(context.Context) (string, error) {
+			return "pasted-token", nil
+		},
+		OnStoreError: func(err error) { reported = err },
+	})
+	if err != nil {
+		t.Fatalf("ResolveToken returned an error after successful login: %v", err)
+	}
+	if got != "pasted-token" {
+		t.Fatalf("got %q, want pasted-token", got)
+	}
+	if reported == nil || !strings.Contains(reported.Error(), storeErr.Error()) {
+		t.Fatalf("reported persistence error = %v, want %q", reported, storeErr)
 	}
 }

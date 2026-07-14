@@ -2,16 +2,21 @@ package ui
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
+	"awesomeProject/internal/markup"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/term"
+	"awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 )
@@ -22,20 +27,54 @@ import (
 // Children returns whichever subtree is active, so focus, hit-testing, and
 // drawing all follow.
 type Shell struct {
-	mv      *MainView
-	app     *app.App
-	cfg     config.Config
-	styles  Styles
-	overlay tui.Widget // nil = show the main view
-	popup   tui.Widget // small interactive layer drawn over current()
-	toast   *Toast
-	cancel  context.CancelFunc
-	node    layout.Node
+	mv           *MainView
+	app          *app.App
+	cfg          config.Config
+	styles       Styles
+	overlay      tui.Widget // nil = show the main view
+	popup        tui.Widget // small interactive layer drawn over current()
+	toast        *Toast
+	forumPreview *forumPreview
+	cancel       context.CancelFunc
+	node         layout.Node
 }
 
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
-	return &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, node: layout.Node{Grow: 1}}
+	mv.onNewForumPost = s.openForumPostPrompt
+	mv.onForumFilter = s.openForumFilterMenu
+	mv.onForumHover = s.setForumHover
+	// ForumView is created lazily; MainView invokes this hook when it exists.
+	return s
+}
+
+func (s *Shell) openForumPostPrompt(title string) {
+	forum, ok := s.app.Store().Channel(s.mv.forumID)
+	if !ok || forum.Forum == nil {
+		return
+	}
+	p := NewForumPostPrompt(forum.Forum.Tags, s.styles, func(title, body string, tags []uint64) {
+		s.app.CreateForumPost(forum.ID, title, body, tags)
+	}, s.closeOverlay)
+	p.SetTitle(title)
+	s.overlay = p
+}
+
+func (s *Shell) openForumFilterMenu() {
+	if s.mv.forumView == nil {
+		return
+	}
+	forum, ok := s.app.Store().Channel(s.mv.forumID)
+	if !ok || forum.Forum == nil {
+		return
+	}
+	items := []widget.MenuItem{{Label: "All tags", OnSelect: func() { s.closePopup(); s.mv.forumView.SetFilter(0) }}}
+	for _, value := range forum.Forum.Tags {
+		tag := value
+		items = append(items, widget.MenuItem{Label: tag.Name, OnSelect: func() { s.closePopup(); s.mv.forumView.SetFilter(tag.ID) }})
+	}
+	s.showPopupMenu(items, 0, 0)
 }
 
 func (s *Shell) current() tui.Widget {
@@ -61,6 +100,9 @@ func (s *Shell) Layout() *layout.Node {
 func (s *Shell) Draw(screen.Region) {}
 
 func (s *Shell) DrawOverlay(r screen.Region) {
+	if s != nil && s.forumPreview != nil && s.overlay == nil && s.popup == nil {
+		s.forumPreview.Draw(r)
+	}
 	if s != nil && s.popup != nil {
 		s.popup.Measure(tui.Size{W: r.Width(), H: r.Height()})
 		s.popup.Draw(r)
@@ -84,6 +126,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if s.popup != nil {
 		return s.popup.Handle(ev)
+	}
+	if mouse, ok := ev.(input.MouseEvent); ok && mouse.Kind == input.MousePress {
+		s.forumPreview = nil
 	}
 
 	if s.overlay != nil {
@@ -127,11 +172,153 @@ func (s *Shell) Handle(ev tui.Event) bool {
 		}
 	}
 	handled := s.mv.Root.Handle(ev)
+	if action, ok := s.mv.chat.TakeEntityAction(); ok {
+		s.dispatchEntityAction(action)
+		return true
+	}
 	if action, ok := s.mv.chat.TakeComponentAction(); ok {
 		s.dispatchComponentAction(action)
 		return true
 	}
 	return handled
+}
+
+func (s *Shell) setForumHover(id store.ChannelID, isForum bool) {
+	if s == nil || !isForum {
+		s.forumPreview = nil
+		return
+	}
+	forum, ok := s.app.Store().Channel(id)
+	if !ok || forum.Forum == nil {
+		s.forumPreview = nil
+		return
+	}
+	posts := s.app.Store().Threads(id)
+	tagByID := make(map[uint64]store.Tag, len(forum.Forum.Tags))
+	for _, tag := range forum.Forum.Tags {
+		tagByID[tag.ID] = tag
+	}
+	labels := make([]string, 0, len(posts))
+	for _, post := range sortForumPosts(posts, forum.Forum.DefaultSort) {
+		labels = append(labels, forumPostLabel(post, tagByID, time.Now(), s.mv.ascii))
+	}
+	s.forumPreview = &forumPreview{title: forum.Name, labels: labels, style: s.styles}
+}
+
+type forumPreview struct {
+	title  string
+	labels []string
+	style  Styles
+}
+
+func (p *forumPreview) Draw(r screen.Region) {
+	if p == nil || r.Width() < 20 || r.Height() < 4 {
+		return
+	}
+	w := min(52, max(28, r.Width()/3))
+	h := min(r.Height()-2, len(p.labels)+3)
+	x := r.Width() - w - 1
+	box := r.Clip(screen.Rect{X: x, Y: 1, W: w, H: h})
+	bg := screen.RGB(28, 31, 38)
+	border := p.style.Accent
+	box.Fill(screen.Rect{W: w, H: h}, screen.Cell{Content: " ", Style: screen.Style{Bg: bg}})
+	for xx := 0; xx < w; xx++ {
+		box.Set(xx, 0, screen.Cell{Content: "─", Style: border})
+		box.Set(xx, h-1, screen.Cell{Content: "─", Style: border})
+	}
+	for yy := 0; yy < h; yy++ {
+		box.Set(0, yy, screen.Cell{Content: "│", Style: border})
+		box.Set(w-1, yy, screen.Cell{Content: "│", Style: border})
+	}
+	box.Set(0, 0, screen.Cell{Content: "╭", Style: border})
+	box.Set(w-1, 0, screen.Cell{Content: "╮", Style: border})
+	box.Set(0, h-1, screen.Cell{Content: "╰", Style: border})
+	box.Set(w-1, h-1, screen.Cell{Content: "╯", Style: border})
+	drawPreviewText(box, 2, 1, p.title+" · forum", w-4, screen.Style{Fg: p.style.Accent.Fg, Bg: bg, Attrs: screen.Bold})
+	for i, label := range p.labels {
+		if i+2 >= h-1 {
+			break
+		}
+		drawPreviewText(box, 2, i+2, "· "+label, w-4, screen.Style{Fg: p.style.Text.Fg, Bg: bg})
+	}
+}
+
+func drawPreviewText(r screen.Region, x, y int, value string, width int, style screen.Style) {
+	col := x
+	for cluster := range text.Clusters(value) {
+		if cluster.Width == 0 || col-x+cluster.Width > width {
+			break
+		}
+		r.Set(col, y, screen.Cell{Content: cluster.Text, Style: style})
+		col += cluster.Width
+	}
+}
+
+func (s *Shell) dispatchEntityAction(action markup.Action) {
+	id, err := strconv.ParseUint(action.Target, 10, 64)
+	if err != nil {
+		return
+	}
+	switch action.Kind {
+	case markup.ActionUserMention:
+		s.openProfile(store.UserID(id))
+	case markup.ActionRoleMention:
+		s.openRoleOptions(store.RoleID(id))
+	}
+}
+
+// openProfile uses the gateway member cache as the reliable offline fallback.
+func (s *Shell) openProfile(id store.UserID) {
+	m, ok := s.app.Store().Member(s.app.ActiveGuild(), id)
+	if !ok {
+		s.ShowNotice("Profile", "User "+strconv.FormatUint(uint64(id), 10))
+		return
+	}
+	detail := m.Name + "\nUser ID: " + strconv.FormatUint(uint64(id), 10)
+	for _, rid := range m.RoleIDs {
+		if r, ok := s.app.Store().Role(s.app.ActiveGuild(), rid); ok {
+			detail += "\n@" + r.Name
+		}
+	}
+	text := widget.NewText(detail)
+	text.SetStyle(s.styles.Text)
+	s.overlay = titled("Profile", text)
+}
+
+func (s *Shell) openRoleOptions(id store.RoleID) {
+	role, ok := s.app.Store().Role(s.app.ActiveGuild(), id)
+	if !ok {
+		return
+	}
+	canManage := s.app.Store().MemberCan(s.app.ActiveGuild(), s.app.SelfID(), store.PermManageRoles)
+	items := []widget.MenuItem{
+		{Label: fmt.Sprintf("%s · #%06X", role.Name, role.Color), Disabled: true},
+		{Label: "Create role…", Disabled: !canManage, OnSelect: func() {
+			s.closePopup()
+			s.overlay = NewPrompt("Create role", "Role name…", s.styles, func(name string) { s.app.CreateRole(s.app.ActiveGuild(), name) }, s.closeOverlay)
+		}},
+		{Label: "Rename…", Disabled: !canManage, OnSelect: func() {
+			s.closePopup()
+			s.overlay = NewPrompt("Rename role", "Role name…", s.styles, func(name string) { s.app.RenameRole(s.app.ActiveGuild(), id, name) }, s.closeOverlay)
+		}},
+		{Label: "Change color…", Disabled: !canManage, OnSelect: func() {
+			s.closePopup()
+			s.overlay = NewPrompt("Role color", "RRGGBB", s.styles, func(value string) {
+				if color, err := strconv.ParseUint(strings.TrimPrefix(value, "#"), 16, 32); err == nil && color <= 0xffffff {
+					s.app.SetRoleColor(s.app.ActiveGuild(), id, uint32(color))
+				} else {
+					s.ShowNotice("Invalid color", "Use six hexadecimal digits")
+				}
+			}, s.closeOverlay)
+		}},
+		{Label: "Toggle hoist", Disabled: !canManage, OnSelect: func() { s.closePopup(); s.app.SetRoleHoist(s.app.ActiveGuild(), id, !role.Hoist) }},
+		{Label: "Toggle mentionable", Disabled: !canManage, OnSelect: func() { s.closePopup(); s.app.SetRoleMentionable(s.app.ActiveGuild(), id, !role.Mentionable) }},
+		{Separator: true},
+		{Label: "Delete…", Danger: true, Disabled: !canManage, OnSelect: func() {
+			s.showPopupMenu([]widget.MenuItem{{Label: "Delete — click again", Danger: true, OnSelect: func() { s.closePopup(); s.app.DeleteRole(s.app.ActiveGuild(), id) }}, {Label: "Cancel", OnSelect: s.closePopup}}, 0, 0)
+		}},
+	}
+	s.showPopupMenu(items, 0, 0)
 }
 
 // dispatchComponentAction forwards a chat component activation to Discord.
@@ -170,10 +357,17 @@ func (s *Shell) openQuickSwitcher() {
 // entries are inserted at the composer cursor.
 func (s *Shell) openPicker() {
 	st := s.app.Store()
-	s.overlay = NewPicker(st, s.styles, s.app.ActiveGuild(), st.HasNitro(), s.cfg.Nitro.Fake,
+	p := NewPicker(st, s.styles, s.app.ActiveGuild(), st.HasNitro(), s.cfg.Nitro.Fake,
 		func(text string) { s.mv.InsertIntoComposer(text) },
 		s.closeOverlay,
 	)
+	p.SetGIFSearch(s.app.SearchGIFs)
+	p.SetRecentStickers(s.mv.recentStickers())
+	p.SetStickerSelect(func(id uint64) {
+		s.app.SendSticker(id)
+	})
+	p.SetStickerRecent(s.mv.recordRecentSticker)
+	s.overlay = p
 }
 
 func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
@@ -295,6 +489,29 @@ func (s *Shell) openChannelMenu(row store.ChannelRow, x, y int) {
 	s.showPopupMenu(items, x, y)
 }
 
+func (s *Shell) openServerSettings(guild store.GuildID) {
+	s.overlay = NewServerSettings(s.app.Store(), guild, s.styles, func(c store.Channel) { s.openChannelSettings(guild, c) }, func(r store.Role) { s.openRoleOptions(r.ID) })
+}
+func (s *Shell) openChannelSettings(guild store.GuildID, c store.Channel) {
+	can := s.app.Store().MemberCan(guild, s.app.SelfID(), store.PermManageChannels)
+	items := []widget.MenuItem{
+		{Label: "Create channel…", Disabled: !can, OnSelect: func() {
+			s.closePopup()
+			s.overlay = NewPrompt("Create channel", "Channel name…", s.styles, func(name string) { s.app.CreateTextChannel(guild, name) }, s.closeOverlay)
+		}},
+		{Label: "Rename…", Disabled: !can, OnSelect: func() {
+			s.closePopup()
+			s.overlay = NewPrompt("Rename channel", "Channel name…", s.styles, func(name string) { s.app.RenameChannel(c.ID, name) }, s.closeOverlay)
+		}},
+		{Label: "Move up", Disabled: !can || c.Position <= 0, OnSelect: func() { s.closePopup(); s.app.MoveChannel(guild, c.ID, c.Position-1) }},
+		{Label: "Move down", Disabled: !can, OnSelect: func() { s.closePopup(); s.app.MoveChannel(guild, c.ID, c.Position+1) }},
+		{Separator: true}, {Label: "Delete…", Danger: true, Disabled: !can, OnSelect: func() {
+			s.showPopupMenu([]widget.MenuItem{{Label: "Delete — click again", Danger: true, OnSelect: func() { s.closePopup(); s.app.DeleteChannel(c.ID) }}, {Label: "Cancel", OnSelect: s.closePopup}}, 0, 0)
+		}},
+	}
+	s.showPopupMenu(items, 0, 0)
+}
+
 // openGuildMenu shows the sidebar context menu for a guild or folder: pin/unpin
 // and copy id for guilds, collapse/expand for folders.
 func (s *Shell) openGuildMenu(row store.GuildRow, x, y int) {
@@ -314,6 +531,8 @@ func (s *Shell) openGuildMenu(row store.GuildRow, x, y int) {
 			pinLabel = "Unpin server"
 		}
 		items = []widget.MenuItem{
+			{Label: "Server settings…", OnSelect: func() { s.closePopup(); s.openServerSettings(row.GuildID) }},
+			{Separator: true},
 			{Label: pinLabel, OnSelect: func() {
 				s.closePopup()
 				s.mv.TogglePinGuild(row.GuildID)

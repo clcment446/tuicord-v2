@@ -20,6 +20,7 @@ type forumTargetKind int
 const (
 	forumTargetPost forumTargetKind = iota
 	forumTargetLoadArchived
+	forumTargetFilter
 )
 
 type forumTarget struct {
@@ -47,9 +48,11 @@ type ForumView struct {
 
 	onOpen         func(store.ChannelID)
 	onLoadArchived func(store.ChannelID)
+	onNavigate     func(int)
 	// onFilterCycle is invoked after the tag filter changes so the owner can
 	// rebuild the row list from its post slices.
 	onFilterCycle func()
+	onFilterMenu  func()
 }
 
 // NewForumView builds an empty forum view. onOpen fires for a post row; the
@@ -119,8 +122,14 @@ func (fv *ForumView) rebuild(active, archived []store.Channel, unread func(store
 	active = sortForumPosts(active, sort)
 	archived = sortForumPosts(archived, sort)
 
-	items := make([]widget.Item, 0, len(active)+len(archived)+2)
+	items := make([]widget.Item, 0, len(active)+len(archived)+3)
 	fv.targets = fv.targets[:0]
+	filterName := "all"
+	if tag, ok := fv.activeFilter(); ok {
+		filterName = tag.Name
+	}
+	items = append(items, widget.Item{Label: "Filter tags… [" + filterName + "]", Style: fv.styles.Accent})
+	fv.targets = append(fv.targets, forumTarget{kind: forumTargetFilter})
 	addPost := func(p store.Channel, dim bool) {
 		if !postMatchesFilter(p, filterID) {
 			return
@@ -178,6 +187,26 @@ func (fv *ForumView) onSelect(index int) {
 		if fv.onLoadArchived != nil {
 			fv.onLoadArchived(t.channel)
 		}
+	case forumTargetFilter:
+		if fv.onFilterMenu != nil {
+			fv.onFilterMenu()
+		}
+	}
+}
+
+// SetFilter selects a tag by ID, or all posts when id is zero.
+func (fv *ForumView) SetFilter(id uint64) {
+	fv.filterIdx = 0
+	if fv.forum.Forum != nil {
+		for i, tag := range fv.forum.Forum.Tags {
+			if tag.ID == id {
+				fv.filterIdx = i + 1
+				break
+			}
+		}
+	}
+	if fv.onFilterCycle != nil {
+		fv.onFilterCycle()
 	}
 }
 
@@ -216,13 +245,24 @@ func (fv *ForumView) CanFocus() bool { return true }
 func (fv *ForumView) Handle(ev tui.Event) bool {
 	if key, ok := ev.(input.KeyEvent); ok && !key.Release {
 		if key.Key == input.KeyRune && (key.Rune == 'f' || key.Rune == 'F') {
-			fv.cycleFilter()
-			// The container owns the post slices, so ask it to rebuild by
-			// reporting handled; MainView re-populates on the next refresh.
-			if fv.onFilterCycle != nil {
-				fv.onFilterCycle()
+			if fv.onFilterMenu != nil {
+				fv.onFilterMenu()
 			}
 			return true
+		}
+		if fv.onNavigate != nil {
+			switch key.Key {
+			case input.KeyUp:
+				if fv.list.Selected() <= 0 {
+					fv.onNavigate(-1)
+					return true
+				}
+			case input.KeyDown:
+				if fv.list.Selected() >= len(fv.list.Items())-1 {
+					fv.onNavigate(1)
+					return true
+				}
+			}
 		}
 	}
 	return fv.list.Handle(ev)

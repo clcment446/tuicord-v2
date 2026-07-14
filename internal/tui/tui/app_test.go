@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -126,9 +127,25 @@ func TestOverlayDrawsAfterChildren(t *testing.T) {
 	}
 }
 
+func TestCanceledContextSwallowsWriteError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root := &drawWidget{testWidget: *newTestWidget("root", false), content: "x"}
+	root.node.Grow = 1
+
+	err := New().run(ctx, root, errWriter{}, nil, nil, nil, Size{W: 1, H: 1})
+	if err != nil {
+		t.Fatalf("run returned %v, want nil after canceled shutdown", err)
+	}
+}
+
 type discardWriter struct{}
 
 func (discardWriter) Write(p []byte) (int, error) { return io.Discard.Write(p) }
+
+type errWriter struct{}
+
+func (errWriter) Write([]byte) (int, error) { return 0, errors.New("file already closed") }
 
 type handlingWidget struct {
 	testWidget

@@ -657,7 +657,7 @@ func prependComponentFrame(line chatLine, frame componentFrame) chatLine {
 	if frame.prefix == "" {
 		return line
 	}
-	next := chatLine{message: line.message, media: line.media, mediaRow: line.mediaRow, inlineMedia: line.inlineMedia}
+	next := chatLine{message: line.message, media: line.media, mediaRow: line.mediaRow, mediaX: line.mediaX, inlineMedia: line.inlineMedia}
 	next.segments = append(next.segments, chatSegment{text: frame.prefix, style: frame.style})
 	next.segments = append(next.segments, line.segments...)
 	next.text = frame.prefix + line.text

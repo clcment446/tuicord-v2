@@ -43,6 +43,22 @@ func TestLoadFromLayersOverDefault(t *testing.T) {
 	}
 }
 
+func TestAuthPreferredModeRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	want := Default()
+	want.Auth.PreferredMode = AuthModeBrowser
+	if err := saveTo(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Auth.PreferredMode != AuthModeBrowser {
+		t.Fatalf("preferred auth mode = %q, want %q", got.Auth.PreferredMode, AuthModeBrowser)
+	}
+}
+
 func TestLoadFromMalformedReturnsError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("this is not = = toml"), 0o644); err != nil {

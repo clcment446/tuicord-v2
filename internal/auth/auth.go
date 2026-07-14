@@ -21,9 +21,10 @@ type TokenStore interface {
 type PromptFunc func(context.Context) (string, error)
 
 type Options struct {
-	Store  TokenStore
-	Getenv func(string) string
-	Prompt PromptFunc
+	Store        TokenStore
+	Getenv       func(string) string
+	Prompt       PromptFunc
+	OnStoreError func(error)
 }
 
 func ResolveToken(ctx context.Context, opts Options) (string, error) {
@@ -58,7 +59,9 @@ func ResolveToken(ctx context.Context, opts Options) (string, error) {
 
 	if opts.Store != nil {
 		if err := opts.Store.SetToken(token); err != nil {
-			return "", fmt.Errorf("save auth token: %w", err)
+			if opts.OnStoreError != nil {
+				opts.OnStoreError(fmt.Errorf("save auth token: %w", err))
+			}
 		}
 	}
 

@@ -36,6 +36,8 @@ type ChatView struct {
 	contextMessageSet  bool
 	componentAction    ComponentAction
 	componentActionSet bool
+	entityAction       markup.Action
+	entityActionSet    bool
 	componentFlashes   map[string]time.Time
 	expandedComponents map[string]bool
 	selectedComponents map[string]map[string]bool
@@ -47,6 +49,7 @@ type ChatView struct {
 	mediaFetcher *media.Fetcher
 	post         func(func())
 	media        map[string]*chatMediaState
+	mediaSlots   chan struct{}
 
 	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
 	// message currently being rendered a viewport-unique placement key.
@@ -87,6 +90,9 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	w.mediaFetcher = fetcher
 	w.mediaCfg = cfg
 	w.post = post
+	if w.mediaSlots == nil {
+		w.mediaSlots = make(chan struct{}, 4)
+	}
 	if w.media == nil {
 		w.media = map[string]*chatMediaState{}
 	}
@@ -130,7 +136,7 @@ func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style
 		if placementKey == "" {
 			placementKey = url
 		}
-		block := &inlineMedia{url: url, label: label, placementKey: placementKey, cols: variant.cols, rows: variant.rows, img: variant.img}
+		block := &inlineMedia{url: url, label: label, placementKey: placementKey, cols: variant.cols, rows: variant.rows, img: variant.img, style: base}
 		lines := make([]chatLine, variant.rows)
 		for i := range lines {
 			lines[i] = chatLine{media: block, mediaRow: i}
@@ -160,6 +166,8 @@ func (w *ChatView) ensureMedia(url string) *chatMediaState {
 }
 
 func (w *ChatView) fetchMedia(url string) {
+	w.mediaSlots <- struct{}{}
+	defer func() { <-w.mediaSlots }()
 	img, err := w.mediaFetcher.Fetch(context.Background(), url)
 	w.post(func() {
 		state := w.media[url]
@@ -238,7 +246,7 @@ func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia
 		cols = max(min(width-x, block.cols), 1)
 	}
 	rows := max(block.rows, 1)
-	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url))
+	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url)).SetStyle(block.style)
 	if block.placementKey != "" {
 		img.SetPlacementID(stableImageID(block.placementKey))
 	}
@@ -274,9 +282,10 @@ func (w *ChatView) Draw(r screen.Region) {
 	for i := start; i < end; i++ {
 		line := lines[i]
 		if line.media != nil {
+			drawChatLine(r, 0, y, line)
 			if _, ok := drawnMedia[line.media]; !ok {
 				drawnMedia[line.media] = struct{}{}
-				w.drawInlineMedia(r, 0, y-line.mediaRow, line.media, r.Width())
+				w.drawInlineMedia(r, line.mediaX, y-line.mediaRow, line.media, r.Width())
 			}
 			y++
 			continue
@@ -296,8 +305,15 @@ type chatLine struct {
 	message     store.Message
 	media       *inlineMedia
 	mediaRow    int
+	mediaX      int
 	inlineMedia []positionedInlineMedia
 	actions     []componentHit
+	entities    []entityHit
+}
+
+type entityHit struct {
+	start, end int
+	action     markup.Action
 }
 
 type chatSegment struct {
@@ -312,6 +328,7 @@ type inlineMedia struct {
 	cols         int
 	rows         int
 	img          image.Image
+	style        screen.Style
 }
 
 type positionedInlineMedia struct {
@@ -412,6 +429,8 @@ func (w *ChatView) render(width int) []chatLine {
 	guild := w.guildOf(channel)
 	msgs := w.store.Messages(channel)
 	var lines []chatLine
+	var previous store.Message
+	previousSet := false
 	for _, m := range msgs {
 		w.emojiKeyPrefix = messagePlacementPrefix(m)
 		w.emojiSeq = 0
@@ -422,19 +441,23 @@ func (w *ChatView) render(width int) []chatLine {
 		case m.Pending:
 			style = w.styles.Pending
 		}
-		header := m.Author
-		if m.Failed {
-			header += " (failed)"
-		} else if m.Pending {
-			header += " (sending…)"
+		showAuthor := !previousSet || !sameMessageAuthor(previous, m) ||
+			previous.Failed != m.Failed || previous.Pending != m.Pending
+		if showAuthor {
+			header := m.Author
+			if m.Failed {
+				header += " (failed)"
+			} else if m.Pending {
+				header += " (sending…)"
+			}
+			// Author line (role-colored when the member has a colored role), then
+			// wrapped content indented under it.
+			authorStyle := w.styles.Accent
+			if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
+				authorStyle.Fg = rgbColor(color)
+			}
+			lines = append(lines, chatLine{text: header, style: authorStyle, message: m})
 		}
-		// Author line (role-colored when the member has a colored role), then
-		// wrapped content indented under it.
-		authorStyle := w.styles.Accent
-		if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
-			authorStyle.Fg = rgbColor(color)
-		}
-		lines = append(lines, chatLine{text: header, style: authorStyle, message: m})
 		if m.Content != "" && !suppressContent(m) {
 			lines = append(lines, stampMessage(w.renderContent(m.Content, width, style), m)...)
 		}
@@ -448,8 +471,17 @@ func (w *ChatView) render(width int) []chatLine {
 		if line, ok := w.renderThreadStarter(m, channel); ok {
 			lines = append(lines, line)
 		}
+		previous = m
+		previousSet = true
 	}
 	return lines
+}
+
+func sameMessageAuthor(a, b store.Message) bool {
+	if a.AuthorID != 0 || b.AuthorID != 0 {
+		return a.AuthorID != 0 && a.AuthorID == b.AuthorID
+	}
+	return a.Author == b.Author
 }
 
 // renderThreadStarter emits a "⤷ thread-name (N messages)" line under a message
@@ -489,15 +521,17 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 	}
 	var lines []chatLine
 	var line []chatSegment
+	var entities []entityHit
 	var inline []positionedInlineMedia
 	used := 0
 	flush := func() {
-		lines = append(lines, chatLine{segments: line, inlineMedia: inline})
+		lines = append(lines, chatLine{segments: line, inlineMedia: inline, entities: entities})
 		line = nil
+		entities = nil
 		inline = nil
 		used = 0
 	}
-	appendText := func(s string, style screen.Style) {
+	appendText := func(s string, style screen.Style, action *markup.Action) {
 		parts := strings.Split(s, "\n")
 		for i, part := range parts {
 			if i > 0 {
@@ -511,6 +545,9 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 					flush()
 				}
 				line = appendChatSegment(line, chatSegment{text: cluster.Text, style: style})
+				if action != nil {
+					entities = append(entities, entityHit{start: used, end: used + cluster.Width, action: *action})
+				}
 				used += cluster.Width
 			}
 		}
@@ -552,7 +589,7 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 			used += emojiCols
 			continue
 		}
-		appendText(span.Text, style)
+		appendText(span.Text, style, span.Action)
 	}
 	if len(line) > 0 || len(lines) == 0 {
 		flush()
@@ -770,6 +807,13 @@ func (w *ChatView) activateAt(x, y int, shiftMulti bool) bool {
 	if y < 0 || y >= len(w.visibleLines) {
 		return false
 	}
+	for _, hit := range w.visibleLines[y].entities {
+		if x >= hit.start && x < hit.end {
+			w.entityAction = hit.action
+			w.entityActionSet = true
+			return true
+		}
+	}
 	for _, hit := range w.visibleLines[y].actions {
 		if x >= hit.start && x < hit.end {
 			action := hit.action
@@ -781,6 +825,16 @@ func (w *ChatView) activateAt(x, y int, shiftMulti bool) bool {
 		}
 	}
 	return false
+}
+
+// TakeEntityAction returns a clicked user/role mention action.
+func (w *ChatView) TakeEntityAction() (markup.Action, bool) {
+	if w == nil || !w.entityActionSet {
+		return markup.Action{}, false
+	}
+	a := w.entityAction
+	w.entityActionSet = false
+	return a, true
 }
 
 func (w *ChatView) enableComponentMulti(action componentAction) {

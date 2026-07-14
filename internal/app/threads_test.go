@@ -15,17 +15,19 @@ import (
 // fakeThreadClient records thread REST calls. Each method sends on sig after it
 // runs so tests can wait for the background goroutine deterministically.
 type fakeThreadClient struct {
-	mu        sync.Mutex
-	active    *api.ActiveThreads
-	activeN   int
-	activeErr error
-	archived  *api.ArchivedThreads
-	archivedN int
-	joinN     int
-	leaveN    int
-	startMsgN int
-	err       error
-	sig       chan struct{}
+	mu             sync.Mutex
+	active         *api.ActiveThreads
+	activeN        int
+	activeErr      error
+	archived       *api.ArchivedThreads
+	archivedPages  []*api.ArchivedThreads
+	archivedBefore []discord.Timestamp
+	archivedN      int
+	joinN          int
+	leaveN         int
+	startMsgN      int
+	err            error
+	sig            chan struct{}
 }
 
 func (f *fakeThreadClient) signal() {
@@ -47,14 +49,53 @@ func (f *fakeThreadClient) ActiveThreads(discord.GuildID) (*api.ActiveThreads, e
 	return f.active, nil
 }
 
-func (f *fakeThreadClient) PublicArchivedThreads(discord.ChannelID, discord.Timestamp, uint) (*api.ArchivedThreads, error) {
+func (f *fakeThreadClient) PublicArchivedThreads(_ discord.ChannelID, before discord.Timestamp, _ uint) (*api.ArchivedThreads, error) {
 	f.mu.Lock()
 	f.archivedN++
+	f.archivedBefore = append(f.archivedBefore, before)
+	n := f.archivedN
 	f.mu.Unlock()
+	if n <= len(f.archivedPages) {
+		return f.archivedPages[n-1], nil
+	}
 	if f.archived == nil {
 		return &api.ArchivedThreads{}, nil
 	}
 	return f.archived, nil
+}
+
+func TestLoadArchivedThreadsPaginatesUntilHasMoreIsFalse(t *testing.T) {
+	firstCursor := discord.NewTimestamp(time.Unix(200, 0))
+	oldestCursor := discord.NewTimestamp(time.Unix(100, 0))
+	tc := &fakeThreadClient{archivedPages: []*api.ArchivedThreads{
+		{ActiveThreads: api.ActiveThreads{Threads: []discord.Channel{
+			{ID: 10, Type: discord.GuildPublicThread, ParentID: 100, ThreadMetadata: &discord.ThreadMetadata{Archived: true, ArchiveTimestamp: firstCursor}},
+			{ID: 11, Type: discord.GuildPublicThread, ParentID: 100, ThreadMetadata: &discord.ThreadMetadata{Archived: true, ArchiveTimestamp: oldestCursor}},
+		}}, More: true},
+		{ActiveThreads: api.ActiveThreads{Threads: []discord.Channel{
+			{ID: 12, Type: discord.GuildPublicThread, ParentID: 100, ThreadMetadata: &discord.ThreadMetadata{Archived: true, ArchiveTimestamp: discord.NewTimestamp(time.Unix(50, 0))}},
+		}}, More: false},
+	}}
+	a, changed := newThreadTestApp(tc)
+
+	a.LoadArchivedThreads(100)
+	waitSig(t, changed)
+	a.LoadArchivedThreads(100)
+	waitSig(t, changed)
+	a.LoadArchivedThreads(100) // exhausted: no third request
+
+	if tc.archivedN != 2 {
+		t.Fatalf("archived requests = %d, want 2", tc.archivedN)
+	}
+	if !time.Time(tc.archivedBefore[0]).IsZero() {
+		t.Errorf("first before = %v, want zero", tc.archivedBefore[0])
+	}
+	if got := tc.archivedBefore[1]; !time.Time(got).Equal(time.Time(oldestCursor)) {
+		t.Errorf("second before = %v, want oldest %v", got, oldestCursor)
+	}
+	if got := len(a.Store().ArchivedThreads(100)); got != 3 {
+		t.Errorf("archived threads = %d, want 3 accumulated pages", got)
+	}
 }
 
 func (f *fakeThreadClient) StartThreadWithMessage(discord.ChannelID, discord.MessageID, api.StartThreadData) (*discord.Channel, error) {

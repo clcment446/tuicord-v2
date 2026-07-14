@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
@@ -21,7 +22,7 @@ var ErrLoginAborted = errors.New("login aborted")
 //
 // It satisfies auth.PromptFunc when wrapped: the returned token is persisted by
 // auth.ResolveToken.
-func RunLogin(ctx context.Context, styles Styles, theme tui.Theme) (string, error) {
+func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode string, onModeSelected func(string)) (string, error) {
 	loginCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -37,7 +38,7 @@ func RunLogin(ctx context.Context, styles Styles, theme tui.Theme) (string, erro
 		cancel()
 	}
 
-	root := buildLogin(loginCtx, app, styles, setToken, cancel)
+	root := buildLogin(loginCtx, app, styles, setToken, cancel, preferredMode, onModeSelected)
 	if err := app.RunContext(loginCtx, root); err != nil {
 		return "", err
 	}
@@ -49,7 +50,7 @@ func RunLogin(ctx context.Context, styles Styles, theme tui.Theme) (string, erro
 
 // buildLogin composes the login layout: a token entry on the left and the QR
 // remote-auth panel on the right.
-func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), cancel context.CancelFunc) tui.Widget {
+func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), cancel context.CancelFunc, preferredMode string, onModeSelected func(string)) tui.Widget {
 	tokenInput := widget.NewTextInput("Paste token, press Enter")
 	tokenInput.SetStyle(styles.Text)
 	tokenInput.OnSubmit(setToken)
@@ -63,13 +64,27 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		widget.NewText("Option 2 — scan the QR code with the Discord mobile app."),
 	)
 
-	qr := NewQRPanel(ctx, app, styles, setToken)
+	qr := NewQRPanel(ctx, app, styles, setToken, preferredMode, onModeSelected)
 
 	root := widget.NewSplit(titled("Login", tokenPanel), titled("QR Code", qr)).
 		Basis(36).
 		MinFirst(30).
 		Vertical()
 	return newCancelRoot(root, cancel)
+}
+
+func normalizedLoginMode(mode string) string {
+	if mode == config.AuthModeBrowser {
+		return config.AuthModeBrowser
+	}
+	return config.AuthModeTUI
+}
+
+func loginModeLabel(mode string) string {
+	if mode == config.AuthModeBrowser {
+		return "Open a full Firefox window"
+	}
+	return "Solve CAPTCHA inside the terminal"
 }
 
 type cancelRoot struct {

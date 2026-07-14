@@ -108,6 +108,18 @@ func NewImageFrom(img image.Image) *Image {
 	return &Image{img: img, mode: ImageUnicode, id: newImageID(), node: layout.Node{Grow: 1}}
 }
 
+// SetImage replaces the image displayed by w. It is safe to call from the UI
+// goroutine when a browser screenshot arrives.
+func (w *Image) SetImage(img image.Image) *Image {
+	if w == nil {
+		return nil
+	}
+	w.img = img
+	w.path = ""
+	w.err = nil
+	return w
+}
+
 // NewKittyImage returns an image widget that renders through Kitty graphics.
 func NewKittyImage(path string) *Image {
 	return NewImage(path).SetMode(ImageKitty)

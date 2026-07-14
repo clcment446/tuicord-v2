@@ -260,6 +260,12 @@ func (a *App) run(
 	a.Invalidate()
 	for {
 		if err := render(); err != nil {
+			// Canceling a prompt closes the terminal input to unblock its read.
+			// A final render can race that close; cancellation is still a clean
+			// shutdown, so do not surface the resulting write error to the user.
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil
+			}
 			return err
 		}
 		select {

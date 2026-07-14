@@ -3,6 +3,8 @@ package ui
 import (
 	"testing"
 
+	"awesomeProject/internal/config"
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
 )
 
@@ -63,5 +65,29 @@ func TestQRPanelDrawShowsStatus(t *testing.T) {
 	p.Draw(buf.Clip(buf.Bounds()))
 	if rowText(buf, 1) != "Connecting…" {
 		t.Errorf("status row = %q, want Connecting…", rowText(buf, 1))
+	}
+}
+
+func TestBrowserMouseActionsMoveBeforeClick(t *testing.T) {
+	actions := browserMouseActions(input.MouseEvent{Btn: input.ButtonLeft, Kind: input.MousePress}, 321, 123)
+	if len(actions) != 2 {
+		t.Fatalf("got %d actions, want move and press", len(actions))
+	}
+	if actions[0]["type"] != "pointerMove" || actions[0]["x"] != 321 || actions[0]["y"] != 123 {
+		t.Fatalf("first action = %#v, want pointerMove at click coordinates", actions[0])
+	}
+	if actions[1]["type"] != "pointerDown" || actions[1]["button"] != 0 {
+		t.Fatalf("second action = %#v, want primary pointerDown", actions[1])
+	}
+}
+
+func TestModeChoicesPutPreferredFirst(t *testing.T) {
+	first, second := modeChoices(config.AuthModeBrowser)
+	if first != config.AuthModeBrowser || second != config.AuthModeTUI {
+		t.Fatalf("browser preference choices = %q, %q", first, second)
+	}
+	first, second = modeChoices("")
+	if first != config.AuthModeTUI || second != config.AuthModeBrowser {
+		t.Fatalf("default preference choices = %q, %q", first, second)
 	}
 }

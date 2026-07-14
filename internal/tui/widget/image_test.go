@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"awesomeProject/internal/tui/screen"
+	"awesomeProject/internal/tui/tui"
 )
 
 func TestImageDrawsASCIIFallback(t *testing.T) {
@@ -280,5 +281,14 @@ func TestKittyUploadCacheEvictsLeastRecentlyUsed(t *testing.T) {
 	}
 	if string(got) != "xy" {
 		t.Fatalf("cache returned %q, want rebuilt value after LRU eviction", string(got))
+	}
+}
+
+func TestImageSetImageReplacesSource(t *testing.T) {
+	w := NewImageFrom(image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	w.SetImage(image.NewRGBA(image.Rect(0, 0, 3, 2)))
+	got := w.Measure(tui.Size{W: 20, H: 20})
+	if got.W != 3 || got.H != 1 {
+		t.Fatalf("Measure after SetImage = %+v, want 3x1", got)
 	}
 }

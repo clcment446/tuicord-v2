@@ -76,6 +76,14 @@ type Display struct {
 	ASCII bool `toml:"ascii"`
 }
 
+// Auth controls how interactive Discord authentication is presented.
+type Auth struct {
+	// PreferredMode is "tui" for an in-terminal browser surface or "browser"
+	// for a full Firefox window. Empty means the login prompt chooses the
+	// default terminal mode first.
+	PreferredMode string `toml:"preferred_mode"`
+}
+
 // Config is the full user configuration.
 type Config struct {
 	Layout  Layout  `toml:"layout"`
@@ -83,7 +91,13 @@ type Config struct {
 	Colors  Colors  `toml:"colors"`
 	Nitro   Nitro   `toml:"nitro"`
 	Display Display `toml:"display"`
+	Auth    Auth    `toml:"auth"`
 }
+
+const (
+	AuthModeTUI     = "tui"
+	AuthModeBrowser = "browser"
+)
 
 // Default returns the built-in configuration used when no file exists and as
 // the base that a user's file is decoded over.
@@ -135,6 +149,39 @@ func Load() (Config, error) {
 		return Default(), err
 	}
 	return loadFrom(path)
+}
+
+// Save writes the current configuration to the user config path.
+func Save(cfg Config) error {
+	path, err := Path()
+	if err != nil {
+		return err
+	}
+	return saveTo(path, cfg)
+}
+
+func saveTo(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.toml-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func loadFrom(path string) (Config, error) {

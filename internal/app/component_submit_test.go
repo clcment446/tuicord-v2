@@ -48,6 +48,7 @@ func TestSubmitComponentPostsInteractionPayload(t *testing.T) {
 	a := &App{store: store.New(0), ui: syncPoster{}, interact: fi, sessionID: "sess-1"}
 	a.SetActive(7, 42)
 	msg := componentTestMessage()
+	msg.Flags = 1 << 15
 	a.store.AppendMessage(msg)
 
 	// Act
@@ -72,6 +73,9 @@ func TestSubmitComponentPostsInteractionPayload(t *testing.T) {
 	}
 	if p.Data.ComponentType != 3 || p.Data.CustomID != "sell_items" {
 		t.Fatalf("data = %+v, want string select sell_items", p.Data)
+	}
+	if p.MessageFlags != 1<<15 {
+		t.Fatalf("message flags = %d, want Components V2 flag", p.MessageFlags)
 	}
 	if got := len(p.Data.Values); got != 2 || p.Data.Values[0] != "101" {
 		t.Fatalf("values = %v, want [101 102]", p.Data.Values)

@@ -49,9 +49,12 @@ type MainView struct {
 	replyMention     bool
 	composerReadOnly bool
 
-	forumView   *ForumView
-	forumActive bool
-	forumID     store.ChannelID
+	forumView      *ForumView
+	forumActive    bool
+	forumID        store.ChannelID
+	onNewForumPost func(string)
+	onForumFilter  func()
+	onForumHover   func(store.ChannelID, bool)
 
 	state     *uistate.State
 	reportErr func(error)
@@ -92,6 +95,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.channelList.SetSelectedStyle(styles.Accent)
 	mv.channelList.SetBadgeStyle(styles.Accent)
 	mv.channelList.OnSelect(mv.onChannelSelected)
+	mv.channelList.OnHover(mv.onChannelHovered)
 
 	mv.memberList = widget.NewItemList(nil)
 	mv.memberList.SetStyle(styles.Text)
@@ -379,6 +383,14 @@ func (mv *MainView) onChannelSelected(index int) {
 	mv.updateChannelChrome()
 }
 
+func (mv *MainView) onChannelHovered(index int) {
+	if mv == nil || index < 0 || index >= len(mv.channelRows) || mv.onForumHover == nil {
+		return
+	}
+	row := mv.channelRows[index]
+	mv.onForumHover(row.ChannelID, row.Kind == store.ChannelForum && row.Navigable())
+}
+
 // updateChannelChrome refreshes the chat-panel breadcrumb title and the
 // composer's read-only state for the currently active channel.
 func (mv *MainView) updateChannelChrome() {
@@ -477,6 +489,8 @@ func (mv *MainView) openForum(id store.ChannelID) {
 	if mv.forumView == nil {
 		mv.forumView = NewForumView(mv.styles, mv.ascii, mv.onOpenPost, mv.app.LoadArchivedThreads)
 		mv.forumView.onFilterCycle = mv.refreshForum
+		mv.forumView.onFilterMenu = mv.onForumFilter
+		mv.forumView.onNavigate = mv.navigateForum
 	}
 	if mv.chatBorder != nil {
 		mv.chatBorder.SetChild(mv.forumView)
@@ -493,6 +507,34 @@ func (mv *MainView) openForum(id store.ChannelID) {
 	}
 	mv.updateComposerStatus()
 	mv.refreshForum()
+}
+
+// navigateForum switches to the adjacent forum when the forum post list is at
+// either edge. This keeps normal Up/Down post navigation intact while making
+// adjacent forums reachable without leaving the forum view.
+func (mv *MainView) navigateForum(delta int) {
+	if delta == 0 || mv == nil {
+		return
+	}
+	forums := make([]int, 0)
+	for i, row := range mv.channelRows {
+		if row.Kind == store.ChannelForum && row.Navigable() {
+			forums = append(forums, i)
+		}
+	}
+	current := -1
+	for i, row := range forums {
+		if mv.channelRows[row].ChannelID == mv.forumID {
+			current = i
+			break
+		}
+	}
+	if current < 0 || len(forums) < 2 {
+		return
+	}
+	next := (current + delta + len(forums)) % len(forums)
+	mv.channelList.SetSelectedSilent(forums[next])
+	mv.onChannelSelected(forums[next])
 }
 
 // refreshForum repopulates the forum post list from the store. Safe to call from
@@ -560,6 +602,17 @@ func (mv *MainView) persist() {
 
 // OnPersistError registers a callback used to report view-state save failures.
 func (mv *MainView) OnPersistError(fn func(error)) { mv.reportErr = fn }
+
+func (mv *MainView) recentStickers() []uint64 {
+	return append([]uint64(nil), mv.state.RecentStickers...)
+}
+
+func (mv *MainView) recordRecentSticker(id uint64) {
+	mv.state.RecordRecentSticker(id)
+	if err := mv.state.Save(); err != nil && mv.reportErr != nil {
+		mv.reportErr(err)
+	}
+}
 
 // GuildContext returns the guild row a pending right-click landed on, if any.
 func (mv *MainView) GuildContext() (store.GuildRow, bool) {
@@ -666,11 +719,9 @@ func (mv *MainView) onSend(content string) {
 		return
 	}
 	if mv.forumActive {
-		var tags []uint64
-		if id := mv.forumView.FilterTagID(); id != 0 {
-			tags = []uint64{id}
+		if mv.onNewForumPost != nil {
+			mv.onNewForumPost(content)
 		}
-		mv.app.CreateForumPost(mv.forumID, content, "", tags)
 		mv.composer.SetValue("")
 		return
 	}

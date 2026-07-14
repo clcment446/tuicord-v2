@@ -113,6 +113,10 @@ const (
 	// ActionInvite shows an invite preview or joins a server.
 	// Action.Target is the invite code.
 	ActionInvite
+	// ActionUserMention opens the mentioned user's profile. Target is a user ID.
+	ActionUserMention
+	// ActionRoleMention opens role details/options. Target is a role ID.
+	ActionRoleMention
 )
 
 // Action describes the clickable target attached to a span.
@@ -120,7 +124,7 @@ type Action struct {
 	// Kind identifies the action type.
 	Kind ActionKind
 	// Target carries the action payload: a URL, "guild/channel",
-	// "guild/channel/message", or an invite code, depending on Kind.
+	// "guild/channel/message", an invite code, or an entity ID, depending on Kind.
 	Target string
 }
 

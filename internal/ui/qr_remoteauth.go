@@ -9,12 +9,15 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 
+	"awesomeProject/internal/captcha"
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/discord"
 
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
@@ -24,11 +27,6 @@ import (
 
 // remoteAuthGatewayURL is Discord's QR-login (remote auth) websocket endpoint.
 const remoteAuthGatewayURL = "wss://remote-auth-gateway.discord.gg/?v=2"
-
-// browserUA is a desktop browser User-Agent; the remote-auth gateway rejects
-// non-browser clients.
-const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-	"(KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 
 // remoteAuth drives Discord's QR remote-auth protocol to obtain a user token.
 //
@@ -40,18 +38,20 @@ const browserUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 
 type remoteAuth struct {
 	panel *QRPanel
 
-	conn     *websocket.Conn
-	writeMu  sync.Mutex
-	privKey  *rsa.PrivateKey
-	fpr      string
-	interval time.Duration
+	conn          *websocket.Conn
+	writeMu       sync.Mutex
+	privKey       *rsa.PrivateKey
+	fpr           string
+	interval      time.Duration
+	mode          string
+	preferredMode string
 }
 
 // runRemoteAuth executes the whole flow, updating the panel as it progresses.
 // Any error is surfaced as a panel status message; the user can still paste a
 // token instead.
-func runRemoteAuth(ctx context.Context, panel *QRPanel) {
-	ra := &remoteAuth{panel: panel}
+func runRemoteAuth(ctx context.Context, panel *QRPanel, mode string) {
+	ra := &remoteAuth{panel: panel, preferredMode: mode}
 	if err := ra.run(ctx); err != nil && ctx.Err() == nil && !isRemoteAuthClosed(err) {
 		panel.update(func() { panel.setStatus("QR login unavailable: " + err.Error()) })
 	}
@@ -66,7 +66,15 @@ func (ra *remoteAuth) run(ctx context.Context) error {
 
 	header := http.Header{}
 	header.Set("Origin", "https://discord.com")
-	header.Set("User-Agent", browserUA)
+	header.Set("User-Agent", discord.BrowserUserAgent())
+	header.Set("Accept-Language", "en-US,en;q=0.9")
+	header.Set("Cache-Control", "no-cache")
+	header.Set("Pragma", "no-cache")
+	header.Set("Sec-Ch-Ua", `"Not_A Brand";v="99", "Google Chrome";v="150", "Chromium";v="150"`)
+	header.Set("Sec-Ch-Ua-Mobile", "?0")
+	header.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+	header.Set("X-Discord-Locale", "en-US")
+	header.Set("X-Discord-Timezone", time.Now().Location().String())
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, remoteAuthGatewayURL, header)
 	if err != nil {
 		return err
@@ -129,7 +137,7 @@ func (ra *remoteAuth) dispatch(ctx context.Context, data []byte) (bool, error) {
 	case "pending_ticket":
 		return false, ra.onPendingTicket(data)
 	case "pending_login":
-		token, err := ra.onPendingLogin(data)
+		token, err := ra.onPendingLogin(ctx, data)
 		if err != nil {
 			return false, err
 		}
@@ -270,19 +278,19 @@ func (ra *remoteAuth) onPendingTicket(data []byte) error {
 	return nil
 }
 
-func (ra *remoteAuth) onPendingLogin(data []byte) (string, error) {
+func (ra *remoteAuth) onPendingLogin(ctx context.Context, data []byte) (string, error) {
 	var payload struct {
 		Ticket string `json:"ticket"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return "", err
 	}
-	return ra.exchangeTicket(payload.Ticket)
+	return ra.exchangeTicket(ctx, payload.Ticket)
 }
 
 // exchangeTicket trades the login ticket for the encrypted token over REST and
 // decrypts it with the private key.
-func (ra *remoteAuth) exchangeTicket(ticket string) (string, error) {
+func (ra *remoteAuth) exchangeTicket(ctx context.Context, ticket string) (string, error) {
 	headers := http.Header{}
 	headers.Set("Referer", "https://discord.com/login")
 	if ra.fpr != "" {
@@ -298,13 +306,108 @@ func (ra *remoteAuth) exchangeTicket(ticket string) (string, error) {
 
 	encrypted, err := client.ExchangeRemoteAuthTicket(ticket)
 	if err != nil {
+		challenge, ok := captchaChallenge(err)
+		if !ok {
+			return "", err
+		}
+		return ra.solveCaptcha(ctx, ticket, challenge)
+	}
+	return decryptRemoteAuthToken(ra.privKey, encrypted)
+}
+
+type captchaErrorResponse struct {
+	CaptchaKey       []string `json:"captcha_key"`
+	CaptchaSiteKey   string   `json:"captcha_sitekey"`
+	CaptchaRQData    string   `json:"captcha_rqdata"`
+	CaptchaRQToken   string   `json:"captcha_rqtoken"`
+	CaptchaSessionID string   `json:"captcha_session_id"`
+}
+
+func captchaChallenge(err error) (captcha.Challenge, bool) {
+	var httpErr *httputil.HTTPError
+	if !errors.As(err, &httpErr) {
+		return captcha.Challenge{}, false
+	}
+	var response captchaErrorResponse
+	if json.Unmarshal(httpErr.Body, &response) != nil || response.CaptchaSiteKey == "" {
+		return captcha.Challenge{}, false
+	}
+	for _, key := range response.CaptchaKey {
+		if key == "captcha-required" {
+			return captcha.Challenge{
+				SiteKey: response.CaptchaSiteKey, RequestData: response.CaptchaRQData,
+				RequestToken: response.CaptchaRQToken, SessionID: response.CaptchaSessionID,
+			}, true
+		}
+	}
+	return captcha.Challenge{}, false
+}
+
+func (ra *remoteAuth) solveCaptcha(ctx context.Context, ticket string, challenge captcha.Challenge) (string, error) {
+	mode, err := ra.panel.waitForCaptchaMode(ctx)
+	if err != nil {
 		return "", err
 	}
+	ra.mode = mode
+	ra.panel.update(func() { ra.panel.setStatus("Opening CAPTCHA in the terminal…") })
+	session, err := captcha.LaunchFirefox(ctx, captcha.FirefoxOptions{
+		URL: "https://discord.com/login", Headless: ra.mode != config.AuthModeBrowser,
+	})
+	if err != nil {
+		return "", fmt.Errorf("open Firefox CAPTCHA surface: %w", err)
+	}
+	defer session.Close()
+	if err := session.RenderChallenge(ctx, challenge); err != nil {
+		return "", err
+	}
+
+	first, err := session.Screenshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	if ra.mode == config.AuthModeBrowser {
+		ra.panel.update(func() {
+			ra.panel.captchaSession = nil
+			ra.panel.captchaStatus = "Complete the CAPTCHA in the Firefox window."
+			ra.panel.setStatus("Complete the CAPTCHA in the Firefox window.")
+		})
+	} else {
+		ra.panel.update(func() { ra.panel.setCaptchaSession(session, first) })
+	}
+
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+			img, err := session.Screenshot(ctx)
+			if err == nil && ra.mode != config.AuthModeBrowser {
+				ra.panel.update(func() { ra.panel.setCaptchaFrame(img) })
+			}
+			response, err := session.CaptchaResponse(ctx)
+			if err != nil {
+				return "", err
+			}
+			if response == "" {
+				continue
+			}
+			encrypted, err := session.ExchangeRemoteAuth(ctx, ticket, ra.fpr, challenge, response)
+			if err != nil {
+				return "", err
+			}
+			return decryptRemoteAuthToken(ra.privKey, encrypted)
+		}
+	}
+}
+
+func decryptRemoteAuthToken(privKey *rsa.PrivateKey, encrypted string) (string, error) {
 	decoded, err := base64.StdEncoding.DecodeString(encrypted)
 	if err != nil {
 		return "", err
 	}
-	token, err := rsa.DecryptOAEP(sha256.New(), nil, ra.privKey, decoded, nil)
+	token, err := rsa.DecryptOAEP(sha256.New(), nil, privKey, decoded, nil)
 	if err != nil {
 		return "", err
 	}

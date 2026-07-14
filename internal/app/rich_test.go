@@ -85,6 +85,40 @@ func TestMessageUpdatePatchesEmbedsInPlace(t *testing.T) {
 	}
 }
 
+func TestMessageUpdatePatchesComponentsV2TreeForRenderer(t *testing.T) {
+	// Arrange: the message was rendered with the original Components V2 tree.
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{
+		ID:        8,
+		ChannelID: 3,
+		Flags:     uint64(discord.IsComponentsV2),
+		ComponentTree: []store.ComponentNode{{
+			Kind:    store.ComponentTextDisplay,
+			Content: "old content",
+		}},
+	})
+
+	// Act: Discord sends the edited V2 message as a MESSAGE_UPDATE.
+	a.handleMessageUpdate(&gateway.MessageUpdateEvent{Message: discord.Message{
+		ID:        8,
+		ChannelID: 3,
+		Flags:     discord.IsComponentsV2,
+		Components: discord.TopLevelComponents{
+			&discord.ContainerComponent{Components: []discord.Component{
+				&discord.TextDisplayComponent{Content: "new content"},
+			}},
+		},
+	}})
+
+	// Assert: the renderer's V2 tree must point at the edited content.
+	msgs := a.store.Messages(3)
+	if len(msgs) != 1 || len(msgs[0].ComponentTree) != 1 ||
+		len(msgs[0].ComponentTree[0].Children) != 1 ||
+		msgs[0].ComponentTree[0].Children[0].Content != "new content" {
+		t.Fatalf("component tree after update = %+v", msgs)
+	}
+}
+
 func TestConvertMessageComponentsV2Tree(t *testing.T) {
 	msg := discord.Message{
 		Flags: discord.IsComponentsV2,

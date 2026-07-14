@@ -96,6 +96,8 @@ type SendMessageData struct {
 	Content string `json:"content,omitempty"`
 	// Nonce is a nonce that can be used for optimistic message sending.
 	Nonce string `json:"nonce,omitempty"`
+	// StickerIDs contains up to three stickers attached to the message.
+	StickerIDs []discord.StickerID `json:"sticker_ids,omitempty"`
 
 	// TTS is true if this is a TTS message.
 	TTS bool `json:"tts,omitempty"`
@@ -153,7 +155,7 @@ func (data SendMessageData) WriteMultipart(body *multipart.Writer) error {
 // Content-Disposition subpart header MUST contain a filename parameter.
 func (c *Client) SendMessageComplex(
 	channelID discord.ChannelID, data SendMessageData) (*discord.Message, error) {
-	if data.Content == "" && len(data.Embeds) == 0 && len(data.Files) == 0 && len(data.Components) == 0 {
+	if data.Content == "" && len(data.Embeds) == 0 && len(data.Files) == 0 && len(data.Components) == 0 && len(data.StickerIDs) == 0 {
 		return nil, ErrEmptyMessage
 	}
 

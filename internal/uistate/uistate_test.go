@@ -46,6 +46,24 @@ func TestToggleCollapsed(t *testing.T) {
 	}
 }
 
+func TestRecordRecentStickerIsUniqueAndBounded(t *testing.T) {
+	st := &State{}
+	for id := uint64(1); id <= 25; id++ {
+		st.RecordRecentSticker(id)
+	}
+	st.RecordRecentSticker(20)
+	if len(st.RecentStickers) != 20 || st.RecentStickers[0] != 20 {
+		t.Fatalf("recent stickers = %v", st.RecentStickers)
+	}
+	seen := map[uint64]bool{}
+	for _, id := range st.RecentStickers {
+		if seen[id] {
+			t.Fatalf("duplicate recent sticker %d in %v", id, st.RecentStickers)
+		}
+		seen[id] = true
+	}
+}
+
 func TestToggleCollapsedFolderOffAndQuery(t *testing.T) {
 	st := &State{}
 	if st.IsFolderCollapsed(7) {

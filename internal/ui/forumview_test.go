@@ -1,11 +1,70 @@
 package ui
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/input"
 )
+
+func TestForumPostPromptSubmitsBodyAndMultipleTags(t *testing.T) {
+	var title, body string
+	var tags []uint64
+	p := NewForumPostPrompt([]store.Tag{{ID: 1, Name: "bug"}, {ID: 2, Name: "help"}}, Styles{}, func(gotTitle, gotBody string, gotTags []uint64) {
+		title, body, tags = gotTitle, gotBody, gotTags
+	}, func() {})
+	p.SetTitle("Crash")
+	p.SetBody("Steps to reproduce")
+	p.Handle(input.KeyEvent{Key: input.KeyTab})
+	p.Handle(input.KeyEvent{Key: input.KeyTab})
+	p.Handle(input.KeyEvent{Key: input.KeyRune, Rune: ' '})
+	p.Handle(input.KeyEvent{Key: input.KeyDown})
+	p.Handle(input.KeyEvent{Key: input.KeyRune, Rune: ' '})
+	p.Handle(input.KeyEvent{Key: input.KeyEnter, Mods: input.Ctrl})
+	if title != "Crash" || body != "Steps to reproduce" || !reflect.DeepEqual(tags, []uint64{1, 2}) {
+		t.Fatalf("submit = %q, %q, %v", title, body, tags)
+	}
+}
+
+func TestForumFilterRowOpensMenuAndSetFilter(t *testing.T) {
+	forum := store.Channel{ID: 1, Kind: store.ChannelForum, Forum: &store.ForumMeta{Tags: []store.Tag{{ID: 7, Name: "bug"}}}}
+	fv := NewForumView(Styles{}, false, nil, nil)
+	opened := 0
+	fv.onFilterMenu = func() { opened++ }
+	fv.SetForum(forum, nil, nil, nil)
+	fv.onSelect(0)
+	if opened != 1 {
+		t.Fatalf("filter menu opened %d times", opened)
+	}
+	fv.SetFilter(7)
+	if fv.FilterTagID() != 7 {
+		t.Fatalf("filter = %d, want 7", fv.FilterTagID())
+	}
+}
+
+func TestForumViewNavigatesAdjacentForumsAtListEdges(t *testing.T) {
+	forum := store.Channel{ID: 1, Kind: store.ChannelForum}
+	fv := NewForumView(Styles{}, false, nil, nil)
+	var delta int
+	fv.onNavigate = func(got int) { delta = got }
+	fv.SetForum(forum, nil, nil, nil)
+
+	if !fv.Handle(input.KeyEvent{Key: input.KeyUp}) {
+		t.Fatal("up at the first row should navigate forums")
+	}
+	if delta != -1 {
+		t.Fatalf("up delta = %d, want -1", delta)
+	}
+	fv.list.SetSelectedSilent(len(fv.list.Items()) - 1)
+	if !fv.Handle(input.KeyEvent{Key: input.KeyDown}) {
+		t.Fatal("down at the last row should navigate forums")
+	}
+	if delta != 1 {
+		t.Fatalf("down delta = %d, want 1", delta)
+	}
+}
 
 func post(id store.ChannelID, name string, tags []uint64, replies int, active time.Time) store.Channel {
 	return store.Channel{

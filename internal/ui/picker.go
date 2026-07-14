@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	appdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/picker"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
@@ -18,18 +19,28 @@ type pickerTab int
 const (
 	tabEmoji pickerTab = iota
 	tabCustom
+	tabGIF
 	tabSticker
 )
 
-var pickerTabNames = [...]string{"Emoji", "Custom", "Sticker"}
+var pickerTabNames = [...]string{"Emoji", "Custom", "GIF", "Sticker"}
+
+// GIFResult is the picker-facing projection of a Discord GIF search result.
+type GIFResult = appdiscord.GIFResult
+
+// GIFSearchFunc performs a GIF search off the UI thread and delivers its
+// result back on the UI thread.
+type GIFSearchFunc func(string, func([]GIFResult, error))
 
 // pickerEntry is one selectable result. insert is the string dropped into the
 // composer; usable is false when the account cannot send it (no Nitro and
 // fake-nitro disabled), in which case picking it is a no-op.
 type pickerEntry struct {
-	label  string
-	insert string
-	usable bool
+	label           string
+	insert          string
+	usable          bool
+	stickerID       uint64
+	recentStickerID uint64
 }
 
 // searchEntry pairs a precomputed lowercase search key with its entry.
@@ -57,9 +68,14 @@ type Picker struct {
 	custom   []searchEntry
 	stickers []searchEntry
 
-	filtered []pickerEntry
-	onInsert func(string)
-	onClose  func()
+	filtered        []pickerEntry
+	onInsert        func(string)
+	onClose         func()
+	onSticker       func(uint64)
+	onStickerRecent func(uint64)
+	searchGIF       GIFSearchFunc
+	gifQuery        string
+	gifResults      []pickerEntry
 
 	body *widget.Node
 	node layout.Node
@@ -89,7 +105,7 @@ func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fake
 	p.hintText.SetContent("←/→ tabs · ↑/↓ move · enter insert · esc close")
 
 	p.custom = buildCustomEntries(st, active, nitro, fakeNitro)
-	p.stickers = buildStickerEntries(st, fakeNitro)
+	p.stickers = buildStickerEntries(st, active, nitro, fakeNitro)
 
 	p.body = widget.Column(
 		titled("Picker — type to search", p.queryText),
@@ -133,22 +149,66 @@ func buildCustomEntries(st *store.Store, active store.GuildID, nitro, fakeNitro 
 }
 
 // buildStickerEntries resolves every guild's stickers into insertable entries.
-func buildStickerEntries(st *store.Store, fakeNitro bool) []searchEntry {
+func buildStickerEntries(st *store.Store, active store.GuildID, nitro, fakeNitro bool) []searchEntry {
 	var out []searchEntry
 	for _, g := range st.Guilds() {
 		for _, s := range st.GuildStickers(g.ID) {
-			text, ok := picker.StickerInsert(s.ID, fakeNitro)
+			native := g.ID == active || nitro
+			text, ok := "", native
+			stickerID := s.ID
+			if !native {
+				text, ok = picker.StickerInsert(s.ID, fakeNitro)
+				stickerID = 0
+			}
 			label := s.Name
+			if native {
+				label += "  (native)"
+			} else if ok {
+				label += "  (fake-nitro)"
+			}
 			if !ok {
 				label += "  (locked)"
 			}
 			out = append(out, searchEntry{
 				key:   strings.ToLower(s.Name),
-				entry: pickerEntry{label: label, insert: text, usable: ok},
+				entry: pickerEntry{label: label, insert: text, usable: ok, stickerID: stickerID, recentStickerID: s.ID},
 			})
 		}
 	}
 	return out
+}
+
+// SetStickerSelect installs the native-sticker send callback.
+func (p *Picker) SetStickerSelect(selectSticker func(uint64)) { p.onSticker = selectSticker }
+
+// SetStickerRecent installs the callback used to persist a successful sticker selection.
+func (p *Picker) SetStickerRecent(record func(uint64)) { p.onStickerRecent = record }
+
+// SetRecentStickers moves the supplied sticker IDs to the head of the sticker
+// catalog, preserving recent order and then catalog order for the remainder.
+func (p *Picker) SetRecentStickers(ids []uint64) {
+	byID := make(map[uint64]searchEntry, len(p.stickers))
+	for _, entry := range p.stickers {
+		if entry.entry.recentStickerID != 0 {
+			byID[entry.entry.recentStickerID] = entry
+		}
+	}
+	ordered := make([]searchEntry, 0, len(p.stickers))
+	seen := make(map[uint64]bool, len(ids))
+	for _, id := range ids {
+		if entry, ok := byID[id]; ok && !seen[id] {
+			entry.entry.label = "Recent · " + entry.entry.label
+			ordered = append(ordered, entry)
+			seen[id] = true
+		}
+	}
+	for _, entry := range p.stickers {
+		if !seen[entry.entry.recentStickerID] {
+			ordered = append(ordered, entry)
+		}
+	}
+	p.stickers = ordered
+	p.refilter()
 }
 
 func (p *Picker) refilter() {
@@ -165,6 +225,9 @@ func (p *Picker) refilter() {
 		}
 	case tabCustom:
 		p.appendMatches(p.custom, q)
+	case tabGIF:
+		p.filtered = append(p.filtered, p.gifResults...)
+		p.searchGIFs(strings.TrimSpace(p.query))
 	case tabSticker:
 		p.appendMatches(p.stickers, q)
 	}
@@ -180,6 +243,43 @@ func (p *Picker) refilter() {
 	p.list.SetItems(items)
 	p.list.SetSelectedSilent(0)
 	p.updateHeader()
+}
+
+// SetGIFSearch installs the asynchronous Discord GIF search callback.
+func (p *Picker) SetGIFSearch(search GIFSearchFunc) {
+	p.searchGIF = search
+	if p.tab == tabGIF {
+		p.searchGIFs(strings.TrimSpace(p.query))
+	}
+}
+
+func (p *Picker) searchGIFs(query string) {
+	if p.searchGIF == nil || query == "" || query == p.gifQuery {
+		return
+	}
+	p.gifQuery = query
+	p.searchGIF(query, func(results []GIFResult, err error) {
+		if err != nil || p.tab != tabGIF || strings.TrimSpace(p.query) != query {
+			return
+		}
+		entries := make([]pickerEntry, 0, len(results))
+		for _, result := range results {
+			resultURL := result.URL
+			if resultURL == "" {
+				resultURL = result.Src
+			}
+			if resultURL == "" {
+				continue
+			}
+			label := result.Title
+			if label == "" {
+				label = "GIF"
+			}
+			entries = append(entries, pickerEntry{label: label, insert: resultURL, usable: true})
+		}
+		p.gifResults = entries
+		p.refilter()
+	})
 }
 
 func (p *Picker) appendMatches(entries []searchEntry, q string) {
@@ -287,7 +387,18 @@ func (p *Picker) pick() {
 	}
 	e := p.filtered[i]
 	if !e.usable || e.insert == "" {
+		if e.stickerID == 0 || p.onSticker == nil {
+			return
+		}
+		if p.onStickerRecent != nil {
+			p.onStickerRecent(e.recentStickerID)
+		}
+		p.onSticker(e.stickerID)
+		p.onClose()
 		return
+	}
+	if e.recentStickerID != 0 && p.onStickerRecent != nil {
+		p.onStickerRecent(e.recentStickerID)
 	}
 	p.onInsert(e.insert)
 	p.onClose()

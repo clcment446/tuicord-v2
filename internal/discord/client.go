@@ -20,11 +20,17 @@ const (
 	clientOS           = "Windows"
 	clientOSVersion    = "10"
 	clientBrowser      = "Chrome"
-	clientBrowserVer   = "143.0.0.0"
-	clientBrowserUA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
+	clientBrowserVer   = "150.0.0.0"
+	clientBrowserUA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+	clientSecCHUA      = `"Not_A Brand";v="99", "Google Chrome";v="150", "Chromium";v="150"`
 	clientLocale       = discord.EnglishUS
 	clientCapabilities = 16381
 )
+
+// BrowserUserAgent returns the browser identity shared by REST and remote-auth
+// websocket requests. Keeping one source prevents Discord from seeing two
+// different client versions during a single login flow.
+func BrowserUserAgent() string { return clientBrowserUA }
 
 // errNoBuildNumber reports that the client build number was not found in the
 // fetched Discord app page.
@@ -43,9 +49,16 @@ func NewSession(token string) (*session.Session, error) {
 		UserGuildSettingsVersion: -1,
 		UserSettingsVersion:      -1,
 	}
-
 	id := gateway.NewIdentifier(cmd)
-	sess := session.NewCustom(id, apiCl, handler.New())
+
+	// Discord's current /gateway REST endpoint rejects user-token requests
+	// with "Only bots are allowed to use this endpoint". User sessions can
+	// connect directly to the public gateway websocket instead.
+	gw := gateway.NewCustomWithIdentifier(gateway.AddGatewayParams("wss://gateway.discord.gg/"), id, nil)
+	sess := session.NewWithGateway(gw, handler.New())
+	// NewWithGateway creates a default REST client; retain the browser-shaped
+	// client used for the rest of tuicord's authenticated requests.
+	sess.Client = apiCl
 	return sess, nil
 }
 

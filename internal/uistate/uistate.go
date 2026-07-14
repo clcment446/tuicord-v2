@@ -33,6 +33,27 @@ type State struct {
 	PinnedChannels      []uint64 `toml:"pinned_channels"`
 	CollapsedFolders    []int64  `toml:"collapsed_folders"`
 	CollapsedCategories []uint64 `toml:"collapsed_categories"`
+	RecentStickers      []uint64 `toml:"recent_stickers"`
+}
+
+const recentStickerLimit = 20
+
+// RecordRecentSticker moves id to the front of the bounded recent-sticker list.
+func (s *State) RecordRecentSticker(id uint64) {
+	if s == nil || id == 0 {
+		return
+	}
+	next := make([]uint64, 0, recentStickerLimit)
+	next = append(next, id)
+	for _, existing := range s.RecentStickers {
+		if existing != id {
+			next = append(next, existing)
+		}
+		if len(next) == recentStickerLimit {
+			break
+		}
+	}
+	s.RecentStickers = next
 }
 
 // Path returns the state-file path, honoring XDG_STATE_HOME and falling back to

@@ -36,8 +36,19 @@ func run() error {
 
 	token, err := auth.ResolveToken(ctx, auth.Options{
 		Store: auth.KeyringStore{},
+		OnStoreError: func(err error) {
+			// A missing Secret Service daemon must not prevent a valid pasted
+			// token from being used for this session. The token is still read
+			// from TOKEN on the next run, or can be pasted again.
+			fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
+		},
 		Prompt: func(ctx context.Context) (string, error) {
-			return ui.RunLogin(ctx, styles, theme(cfg))
+			return ui.RunLogin(ctx, styles, theme(cfg), cfg.Auth.PreferredMode, func(mode string) {
+				cfg.Auth.PreferredMode = mode
+				if err := config.Save(cfg); err != nil {
+					fmt.Fprintln(os.Stderr, "tuicord: warning: save auth preference:", err)
+				}
+			})
 		},
 	})
 	if err != nil {

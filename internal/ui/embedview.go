@@ -162,7 +162,21 @@ func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentSty
 	lines := []chatLine{top}
 	for _, line := range content {
 		if line.media != nil {
-			lines = append(lines, line)
+			// Media is drawn as a terminal graphic after the cell layer. Keep
+			// the frame in the cell layer so the graphic cannot cover either
+			// border, and give the image one cell of horizontal inset.
+			framed := chatLine{
+				segments: []chatSegment{
+					{text: "│", style: borderStyle},
+					{text: strings.Repeat(" ", innerWidth), style: contentStyle},
+					{text: "│", style: borderStyle},
+				},
+				message:  line.message,
+				media:    line.media,
+				mediaRow: line.mediaRow,
+				mediaX:   1,
+			}
+			lines = append(lines, framed)
 			continue
 		}
 		framed := chatLine{

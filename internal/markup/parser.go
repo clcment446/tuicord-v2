@@ -282,7 +282,7 @@ func (p *parser) scanEntity(i int) int {
 
 func (p *parser) entityMention(idStr string, next, fallback int) int {
 	if id, ok := parseID(idStr); ok {
-		p.emit(Span{Kind: Kind_Mention, Text: "@" + p.res.member(id)})
+		p.emit(Span{Kind: Kind_Mention, Text: "@" + p.res.member(id), Action: &Action{Kind: ActionUserMention, Target: strconv.FormatUint(id, 10)}})
 		return next
 	}
 	return fallback
@@ -292,7 +292,7 @@ func (p *parser) entityMention(idStr string, next, fallback int) int {
 func (p *parser) entityRoleMention(idStr string, next, fallback int) int {
 	if id, ok := parseID(idStr); ok {
 		name, color := p.res.role(id)
-		p.emit(Span{Kind: Kind_RoleMention, Text: "@" + name, FG: color})
+		p.emit(Span{Kind: Kind_RoleMention, Text: "@" + name, FG: color, Action: &Action{Kind: ActionRoleMention, Target: strconv.FormatUint(id, 10)}})
 		return next
 	}
 	return fallback
