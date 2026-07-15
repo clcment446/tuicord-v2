@@ -32,8 +32,12 @@ const (
 	disableFocusEvents    = "\x1b[?1004l"
 	enableSGRMouse        = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h"
 	disableSGRMouse       = "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l"
-	hideCursor            = "\x1b[?25l"
-	showCursor            = "\x1b[?25h"
+	// Kitty's disambiguate flag makes modified Enter (including Shift+Enter)
+	// distinguishable from the legacy carriage-return byte.
+	pushKittyKeyboard = "\x1b[>1u"
+	popKittyKeyboard  = "\x1b[<u"
+	hideCursor        = "\x1b[?25l"
+	showCursor        = "\x1b[?25h"
 )
 
 // Size is a terminal size in display cells.
@@ -77,11 +81,29 @@ type mouseSequences struct {
 	disable string
 }
 
+type sessionSequences struct {
+	enable  string
+	disable string
+}
+
 func terminalMouseSequences(opts Options) mouseSequences {
 	if !opts.Mouse {
 		return mouseSequences{}
 	}
 	return mouseSequences{enable: enableSGRMouse, disable: disableSGRMouse}
+}
+
+func terminalSessionSequences(opts Options, caps Capabilities) sessionSequences {
+	mouse := terminalMouseSequences(opts)
+	keyboardEnable, keyboardDisable := "", ""
+	if caps.KittyKeyboard {
+		keyboardEnable = pushKittyKeyboard
+		keyboardDisable = popKittyKeyboard
+	}
+	return sessionSequences{
+		enable:  enterAltScreen + hideCursor + enableBracketedPaste + enableFocusEvents + mouse.enable + keyboardEnable,
+		disable: keyboardDisable + mouse.disable + disableFocusEvents + disableBracketedPaste + showCursor + leaveAltScreen,
+	}
 }
 
 // Capabilities describes terminal features the renderer and input layer can
@@ -145,8 +167,8 @@ func open(opts Options) (*Terminal, error) {
 		done:         make(chan struct{}),
 		mouseEnabled: opts.Mouse,
 	}
-	mouse := terminalMouseSequences(opts).enable
-	if _, err := f.WriteString(enterAltScreen + hideCursor + enableBracketedPaste + enableFocusEvents + mouse); err != nil {
+	sequences := terminalSessionSequences(opts, t.caps)
+	if _, err := f.WriteString(sequences.enable); err != nil {
 		t.Close()
 		return nil, fmt.Errorf("initialize terminal: %w", err)
 	}
@@ -245,8 +267,8 @@ func (t *Terminal) Close() error {
 		signal.Stop(t.sig)
 		t.wg.Wait()
 		if t.file != nil {
-			mouse := terminalMouseSequences(Options{Mouse: t.mouseEnabled}).disable
-			_, writeErr := t.file.WriteString(mouse + disableFocusEvents + disableBracketedPaste + showCursor + leaveAltScreen)
+			sequences := terminalSessionSequences(Options{Mouse: t.mouseEnabled}, t.caps)
+			_, writeErr := t.file.WriteString(sequences.disable)
 			restoreErr := xterm.Restore(t.fd, t.state)
 			closeErr := t.file.Close()
 			t.err = errors.Join(writeErr, restoreErr, closeErr)

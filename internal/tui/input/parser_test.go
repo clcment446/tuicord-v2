@@ -24,6 +24,7 @@ func TestParserKeys(t *testing.T) {
 		{"delete", []byte("\x1b[3~"), []Event{KeyEvent{Key: KeyDelete}}},
 		{"ss3 function key", []byte("\x1bOP"), []Event{KeyEvent{Key: KeyF1}}},
 		{"kitty ctrl a", []byte("\x1b[97;5u"), []Event{KeyEvent{Key: KeyRune, Mods: Ctrl, Rune: 'a'}}},
+		{"kitty shift enter", []byte("\x1b[13;2u"), []Event{KeyEvent{Key: KeyEnter, Mods: Shift}}},
 		{"kitty release", []byte("\x1b[13;1;3u"), []Event{KeyEvent{Key: KeyEnter, Release: true}}},
 		{"alt rune", []byte("\x1bb"), []Event{KeyEvent{Key: KeyRune, Mods: Alt, Rune: 'b'}}},
 	}
