@@ -245,6 +245,23 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 			return true
 		}
 	}
+	if !ev.Release && ev.Key == input.KeyRune && ev.Mods == 0 && (ev.Rune == 'h' || ev.Rune == 'l') {
+		focused := a.Focus.Focused()
+		if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
+			forward := ev.Rune == 'l'
+			if traverser.HandleVimFocus(forward) {
+				a.Invalidate()
+				return true
+			}
+			if forward {
+				a.Focus.Next()
+			} else {
+				a.Focus.Prev()
+			}
+			a.Invalidate()
+			return true
+		}
+	}
 	if ev.Key == input.KeyTab && !ev.Release {
 		if ev.Mods&input.Shift != 0 {
 			a.Focus.Prev()
@@ -254,7 +271,14 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 		a.Invalidate()
 		return true
 	}
-	return a.handleFocused(ev)
+	handled := a.handleFocused(ev)
+	if requester, ok := root.(FocusRequester); ok {
+		if requested := requester.TakeFocusRequest(); requested != nil {
+			a.Focus.Set(requested)
+			a.Invalidate()
+		}
+	}
+	return handled
 }
 
 func (a *App) handleFocused(ev Event) bool {

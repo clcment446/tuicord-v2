@@ -97,6 +97,10 @@ type Channel struct {
 	// For threads, ParentID is the text/announcement/forum channel they hang off.
 	Position int
 	ParentID ChannelID
+	// RecipientIDs identifies the users in a DM/group-DM. It is empty for
+	// guild channels and lets profile actions find existing shared DMs without
+	// relying on mutable display names.
+	RecipientIDs []UserID
 	// Overwrites are the channel's permission overrides for roles and members,
 	// applied on top of guild-level permissions by [Store.ChannelPermissions].
 	Overwrites []PermissionOverwrite
@@ -229,10 +233,13 @@ func (m Message) Rev() uint64 { return m.rev }
 
 // Member is a guild member, used to resolve mentions.
 type Member struct {
-	ID      UserID
-	Name    string
-	Color   uint32
-	RoleIDs []RoleID
+	ID UserID
+	// Name is the server-local display name used by mention rendering.
+	Name     string
+	Username string
+	Nick     string
+	Color    uint32
+	RoleIDs  []RoleID
 }
 
 // Role is a Discord role used to interpret member role IDs.

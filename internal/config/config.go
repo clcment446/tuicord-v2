@@ -148,8 +148,11 @@ type Auth struct {
 // Accessibility controls alternate input paths for users who prefer or need
 // keyboard-first navigation.
 type Accessibility struct {
-	MouseOn     bool `toml:"mouse_on"`
-	FocusSplits bool `toml:"focus_splits"`
+	MouseOn                 bool `toml:"mouse_on"`
+	FocusSplits             bool `toml:"focus_splits"`
+	VimNavigation           bool `toml:"vim_navigation"`
+	MouseBreakpointTracking bool `toml:"mouse_breakpoint_tracking"`
+	HighlightFocusBlock     bool `toml:"highlight_focus_block"`
 }
 
 // SlashCommands controls experimental user-client application-command support.
@@ -449,6 +452,9 @@ ascii = false
 [accessibility]
 mouse_on = true
 focus_splits = false
+vim_navigation = false
+mouse_breakpoint_tracking = false
+highlight_focus_block = false
 
 [nitro]
 fake = true
