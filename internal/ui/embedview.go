@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strconv"
 	"strings"
 
 	"awesomeProject/internal/markup"
@@ -18,7 +19,12 @@ func (w *ChatView) renderEmbeds(m store.Message, width int, base screen.Style) [
 		if markedFakeNitroEmbed(e, markedMedia) {
 			continue
 		}
-		lines = append(lines, w.renderEmbed(m, e, i, width, base)...)
+		embed := w.renderEmbed(m, e, i, width, base)
+		if len(embed) > 0 {
+			embed[0].embedStart = true
+			embed[0].embedKey = messagePlacementPrefix(m) + ":embed:" + strconv.Itoa(i)
+		}
+		lines = append(lines, embed...)
 	}
 	return lines
 }
@@ -104,8 +110,8 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 	}
 	for _, f := range e.Fields {
 		name := mergeStyle(contentBase, w.styles.Cell("embeds.field.name"))
-		add(f.Name, name)
-		add(f.Value, contentBase)
+		content = append(content, w.renderContent(f.Name, inner, name)...)
+		content = append(content, w.renderContent(f.Value, inner, contentBase)...)
 	}
 	if chip := embedMediaChip(e); chip != "" {
 		add(chip, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))
@@ -208,35 +214,30 @@ func embedPlainLines(s string, width int, style screen.Style) []chatLine {
 }
 
 func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentStyle screen.Style) []chatLine {
-	top := chatLine{segments: []chatSegment{{text: "╭" + strings.Repeat("─", innerWidth) + "╮", style: borderStyle}}}
-	bottom := chatLine{segments: []chatSegment{{text: "╰" + strings.Repeat("─", innerWidth) + "╯", style: borderStyle}}}
+	top := chatLine{segments: []chatSegment{{text: "╭" + strings.Repeat("─", innerWidth) + "╮", style: borderStyle}}, restrictHighlight: true}
+	bottom := chatLine{segments: []chatSegment{{text: "╰" + strings.Repeat("─", innerWidth) + "╯", style: borderStyle}}, restrictHighlight: true}
 	lines := []chatLine{top}
 	for _, line := range content {
+		framed := translateChatLine(line, 1)
+		framed.restrictHighlight = true
+		framed.highlightStart = 1
+		framed.highlightEnd = innerWidth + 1
 		if line.media != nil {
 			// Media is drawn as a terminal graphic after the cell layer. Keep
 			// the frame in the cell layer so the graphic cannot cover either
 			// border, and give the image one cell of horizontal inset.
-			framed := chatLine{
-				segments: []chatSegment{
-					{text: "│", style: borderStyle},
-					{text: strings.Repeat(" ", innerWidth), style: contentStyle},
-					{text: "│", style: borderStyle},
-				},
-				message:  line.message,
-				media:    line.media,
-				mediaRow: line.mediaRow,
-				mediaX:   1,
+			framed.segments = []chatSegment{
+				{text: "│", style: borderStyle},
+				{text: strings.Repeat(" ", innerWidth), style: contentStyle},
+				{text: "│", style: borderStyle},
 			}
 			lines = append(lines, framed)
 			continue
 		}
-		framed := chatLine{
-			segments: []chatSegment{{text: "│", style: borderStyle}},
-			message:  line.message,
-		}
+		framed.segments = []chatSegment{{text: "│", style: borderStyle}}
 		used := 0
-		if line.text != "" && len(line.segments) == 0 {
-			line.segments = []chatSegment{{text: line.text, style: line.style}}
+		if framed.text != "" && len(framed.segments) == 1 {
+			framed.segments = append(framed.segments, chatSegment{text: framed.text, style: framed.style})
 		}
 		for _, segment := range line.segments {
 			segment.style.Bg = contentStyle.Bg
@@ -247,24 +248,10 @@ func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentSty
 			framed.segments = append(framed.segments, chatSegment{text: strings.Repeat(" ", pad), style: contentStyle})
 		}
 		framed.segments = append(framed.segments, chatSegment{text: "│", style: borderStyle})
-		for _, inline := range line.inlineMedia {
-			inline.col++
-			framed.inlineMedia = append(framed.inlineMedia, inline)
-		}
-		framed.actions = appendOffsetComponentHits(framed.actions, line.actions, 1)
 		lines = append(lines, framed)
 	}
 	lines = append(lines, bottom)
 	return lines
-}
-
-func appendOffsetComponentHits(dst, src []componentHit, offset int) []componentHit {
-	for _, hit := range src {
-		hit.start += offset
-		hit.end += offset
-		dst = append(dst, hit)
-	}
-	return dst
 }
 
 func embedMediaURL(e store.Embed) (string, bool) {

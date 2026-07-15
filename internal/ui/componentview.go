@@ -82,7 +82,7 @@ func (w *ChatView) renderComponentTree(m store.Message, width int, base screen.S
 	if len(tree) == 0 {
 		return nil
 	}
-	ctx := componentRenderContext{}
+	ctx := componentRenderContext{hideShortcuts: !w.componentShortcutsVisible(m)}
 	var lines []chatLine
 	for _, node := range tree {
 		lines = append(lines, w.renderComponentNode(&ctx, m, node, width, base, componentFrame{})...)
@@ -92,17 +92,26 @@ func (w *ChatView) renderComponentTree(m store.Message, width int, base screen.S
 
 type componentRenderContext struct {
 	shortcutIndex int
+	hideShortcuts bool
 }
 
 var componentShortcuts = []rune{'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'}
 
 func (ctx *componentRenderContext) nextShortcut() rune {
+	if ctx.hideShortcuts {
+		return 0
+	}
 	if ctx.shortcutIndex >= len(componentShortcuts) {
 		return 0
 	}
 	shortcut := componentShortcuts[ctx.shortcutIndex]
 	ctx.shortcutIndex++
 	return shortcut
+}
+
+func (w *ChatView) componentShortcutsVisible(message store.Message) bool {
+	return w != nil && w.keyboardFocused && w.focusedMessageSet &&
+		messagePlacementPrefix(w.focusedMessage) == messagePlacementPrefix(message)
 }
 
 type componentFrame struct {
@@ -310,6 +319,9 @@ func (w *ChatView) renderComponentControls(ctx *componentRenderContext, m store.
 		}
 		expandedNow := w.componentExpanded(action)
 		chip := componentControlChip(node, action.shortcut, expandedNow)
+		if width > 0 {
+			chip = text.Truncate(chip, max(width-prefixWidth, 0), text.Ellipsis)
+		}
 		chipWidth := text.Width(chip)
 		if width > 0 && x > prefixWidth && x+gap+chipWidth > width {
 			flush()
@@ -321,7 +333,7 @@ func (w *ChatView) renderComponentControls(ctx *componentRenderContext, m store.
 		}
 		style := w.componentControlStyle(node, action, base)
 		line.segments = append(line.segments, chatSegment{text: chip, style: style})
-		if !action.disabled {
+		if !action.disabled && chipWidth > 0 {
 			line.actions = append(line.actions, componentHit{start: x, end: x + chipWidth, action: action})
 		}
 		x += chipWidth
@@ -345,7 +357,7 @@ func (w *ChatView) renderComponentControls(ctx *componentRenderContext, m store.
 			options:    node.Options,
 			message:    m,
 		}
-		lines = append(lines, w.renderComponentOptions(ctx, m, node, action, base, frame)...)
+		lines = append(lines, w.renderComponentOptions(ctx, m, node, action, width, base, frame)...)
 	}
 	return lines
 }
@@ -380,7 +392,7 @@ func (w *ChatView) componentControlStyle(node store.ComponentNode, action compon
 	return style
 }
 
-func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.Message, node store.ComponentNode, parent componentAction, base screen.Style, frame componentFrame) []chatLine {
+func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.Message, node store.ComponentNode, parent componentAction, width int, base screen.Style, frame componentFrame) []chatLine {
 	options := componentOptions(node)
 	if len(options) == 0 {
 		return []chatLine{componentTextLine(frame, "  (no choices)", mergeStyle(base, w.styles.Cell("components.description")))}
@@ -414,17 +426,22 @@ func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.M
 			label = fmt.Sprintf("%c %s", action.shortcut, label)
 		}
 		content := "  " + marker + " " + label
+		if width > 0 {
+			content = text.Truncate(content, max(width-text.Width(frame.prefix), 0), text.Ellipsis)
+		}
 		style := base
 		if w.componentFlashing(action) {
 			style = mergeStyle(style, w.styles.Cell("components.disabled"))
 		}
 		line := componentTextLine(frame, content, style)
 		start := text.Width(frame.prefix)
-		line.actions = append(line.actions, componentHit{
-			start:  start,
-			end:    start + text.Width(content),
-			action: action,
-		})
+		if text.Width(content) > 0 {
+			line.actions = append(line.actions, componentHit{
+				start:  start,
+				end:    start + text.Width(content),
+				action: action,
+			})
+		}
 		lines = append(lines, line)
 	}
 	return lines
@@ -657,17 +674,11 @@ func prependComponentFrame(line chatLine, frame componentFrame) chatLine {
 	if frame.prefix == "" {
 		return line
 	}
-	next := chatLine{message: line.message, media: line.media, mediaRow: line.mediaRow, mediaX: line.mediaX, inlineMedia: line.inlineMedia}
+	next := translateChatLine(line, text.Width(frame.prefix))
+	next.segments = next.segments[:0]
 	next.segments = append(next.segments, chatSegment{text: frame.prefix, style: frame.style})
 	next.segments = append(next.segments, line.segments...)
 	next.text = frame.prefix + line.text
-	next.style = line.style
-	offset := text.Width(frame.prefix)
-	for _, hit := range line.actions {
-		hit.start += offset
-		hit.end += offset
-		next.actions = append(next.actions, hit)
-	}
 	return next
 }
 

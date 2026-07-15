@@ -13,6 +13,7 @@ import (
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
+	uitext "awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
 )
 
@@ -124,18 +125,18 @@ func TestChatViewHeadersHaveLevelStylesAndCollapse(t *testing.T) {
 	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, styles)
 	buf := screen.NewBuffer(40, 6)
 	view.Draw(buf.Clip(buf.Bounds()))
-	if got := buf.Cell(2, 1).Style.Fg; got != screen.RGB(1, 2, 3) {
-		t.Fatalf("h1 color = %+v, want h1 style", got)
-	}
-	if got := buf.Cell(2, 4).Style.Fg; got != screen.RGB(4, 5, 6) {
-		t.Fatalf("h2 color = %+v, want h2 style", got)
-	}
 	headerY := -1
-	for y, line := range view.visibleLines {
-		if line.header != nil && line.header.level == 2 {
+	for y := 0; y < buf.Height(); y++ {
+		if strings.HasPrefix(rowText(buf, y), "▾ two") {
 			headerY = y
 			break
 		}
+	}
+	if got := buf.Cell(2, 1).Style.Fg; got != screen.RGB(1, 2, 3) {
+		t.Fatalf("h1 color = %+v, want h1 style", got)
+	}
+	if headerY < 0 || buf.Cell(2, headerY).Style.Fg != screen.RGB(4, 5, 6) {
+		t.Fatalf("h2 color = %+v, want h2 style", buf.Cell(2, headerY).Style.Fg)
 	}
 	if headerY < 0 || !view.Handle(input.MouseEvent{Kind: input.MousePress, Btn: input.ButtonLeft, X: 0, Y: headerY}) {
 		t.Fatal("header collapse toggle was not handled")
@@ -146,6 +147,61 @@ func TestChatViewHeadersHaveLevelStylesAndCollapse(t *testing.T) {
 	}
 	if strings.Contains(rowsText(buf), "inside two") {
 		t.Fatal("collapsed h2 body remained visible")
+	}
+}
+
+func TestChatViewHeaderHitMatchesVisibleHeaderRow(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 7, ChannelID: 1, Author: "alice", Content: "# title\nbody"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(30, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 1); got != "▾ title" {
+		t.Fatalf("header row = %q, want visible header marker", got)
+	}
+	if !view.Handle(input.MouseEvent{Kind: input.MousePress, Btn: input.ButtonLeft, X: 0, Y: 1}) {
+		t.Fatal("clicking visible header marker was not handled")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if strings.Contains(rowsText(buf), "body") {
+		t.Fatal("header body remained visible after clicking its marker")
+	}
+}
+
+func TestPrependComponentFramePreservesAndOffsetsInteractionMetadata(t *testing.T) {
+	header := &headerHit{key: "heading", level: 1}
+	line := chatLine{
+		segments: []chatSegment{{text: "hello"}},
+		entities: []entityHit{{start: 0, end: 2, action: markup.Action{Kind: markup.ActionUserMention, Target: "7"}}},
+		header:   header,
+		spinner:  true,
+	}
+
+	got := prependComponentFrame(line, componentFrame{prefix: "│ "})
+	if len(got.entities) != 1 || got.entities[0].start != 2 || got.entities[0].end != 4 {
+		t.Fatalf("entity hits = %+v, want offset hit [2,4)", got.entities)
+	}
+	if got.header != header || !got.spinner {
+		t.Fatalf("framed metadata = header %p spinner %t, want preserved", got.header, got.spinner)
+	}
+}
+
+func TestChatViewComponentControlsStayWithinNarrowWidth(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	message := store.Message{ID: 1, ChannelID: 1}
+	lines := view.renderComponentControls(&componentRenderContext{}, message, []store.ComponentNode{{
+		Kind: store.ComponentButton, CustomID: "wide", Label: "界界界界界界",
+	}}, 8, screen.Style{}, componentFrame{})
+
+	if len(lines) != 1 {
+		t.Fatalf("control lines = %d, want one truncated line", len(lines))
+	}
+	if got := uitext.Width(lineText(lines[0])); got > 8 {
+		t.Fatalf("control width = %d, want <= 8: %q", got, lineText(lines[0]))
+	}
+	if len(lines[0].actions) != 1 || lines[0].actions[0].end > 8 {
+		t.Fatalf("control hits = %+v, want one visible bounded hit", lines[0].actions)
 	}
 }
 
@@ -819,5 +875,357 @@ func TestChatViewRightClickCapturesMessage(t *testing.T) {
 	}
 	if _, ok := view.TakeContextMessage(); ok {
 		t.Fatal("context message was not cleared after take")
+	}
+}
+
+func TestChatViewComponentShortcutsAreScopedToFocusedMessage(t *testing.T) {
+	st := store.New(0)
+	for id, label := range []string{"older", "newer"} {
+		st.AppendMessage(store.Message{
+			ID: store.MessageID(id + 1), ChannelID: 1, Author: label, Content: label,
+			ComponentTree: []store.ComponentNode{{Kind: store.ComponentButton, CustomID: label, Label: label}},
+		})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(50, 8)
+	view.Draw(buf.Clip(buf.Bounds()))
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := strings.Count(rowsText(buf), "1 newer"); got != 1 || strings.Contains(rowsText(buf), "1 older") {
+		t.Fatalf("shortcuts were not scoped to newest focused message:\n%s", rowsText(buf))
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '1'}) {
+		t.Fatal("focused message shortcut was not handled")
+	}
+	action, ok := view.TakeComponentAction()
+	if !ok || action.Message.ID != 2 || action.CustomID != "newer" {
+		t.Fatalf("action = %+v,%v, want newer message", action, ok)
+	}
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) {
+		t.Fatal("k did not move to the previous stopping point")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if got := rowsText(buf); !strings.Contains(got, "1 older") || strings.Contains(got, "1 newer") {
+		t.Fatalf("shortcut labels did not follow focused message:\n%s", got)
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '1'}) {
+		t.Fatal("older focused message shortcut was not handled")
+	}
+	action, ok = view.TakeComponentAction()
+	if !ok || action.Message.ID != 1 || action.CustomID != "older" {
+		t.Fatalf("action = %+v,%v, want older message", action, ok)
+	}
+}
+
+func TestChatViewEmbedFirstLineIsStopAndAuthorNeverIs(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Embeds: []store.Embed{{Title: "Card", Description: "body"}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(50, 8)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if len(view.focusStops) != 1 {
+		t.Fatalf("focus stops = %+v, want one embed-first-line stop", view.focusStops)
+	}
+	stop := view.focusStops[0]
+	lines := view.render(50)
+	if stop.kind != chatFocusMessage || stop.line < 1 || !lines[stop.line].embedStart {
+		t.Fatalf("stop = %+v, want embed first line and never author", stop)
+	}
+}
+
+func TestChatViewMultipleEmbedStopsHaveStableDistinctKeys(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Content: "intro", Embeds: []store.Embed{{Title: "One"}, {Title: "Two"}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(50, 12)
+	view.Draw(buf.Clip(buf.Bounds()))
+	var embedKeys []string
+	for _, stop := range view.focusStops {
+		if strings.Contains(stop.key, ":embed:") {
+			embedKeys = append(embedKeys, stop.key)
+		}
+	}
+	if len(embedKeys) != 2 || embedKeys[0] == embedKeys[1] {
+		t.Fatalf("embed stop keys = %v, want two stable distinct keys", embedKeys)
+	}
+}
+
+func TestChatViewDashTogglesFocusedHeader(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Content: "# section\ninside"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(40, 5)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	key := input.KeyEvent{Key: input.KeyRune, Rune: '-'}
+	if !view.Handle(key) || !view.collapsedHeaders[view.focusStops[0].headerKey] {
+		t.Fatal("first - did not collapse header")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if !view.Handle(key) || view.collapsedHeaders[view.focusStops[0].headerKey] {
+		t.Fatal("second - did not expand header")
+	}
+}
+
+func TestChatViewCollapsedH1SkipsNestedSectionsUntilNextH1(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	view.headerMessageKey = "m"
+	view.collapsedHeaders = map[string]bool{"m:header:0": true}
+	lines := view.renderContent("# one\nalpha\n## nested\nbeta\n# two\ngamma", 80, screen.Style{})
+	var got strings.Builder
+	for _, line := range lines {
+		for _, segment := range line.segments {
+			got.WriteString(segment.text)
+		}
+		got.WriteByte('\n')
+	}
+	text := got.String()
+	if strings.Contains(text, "alpha") || strings.Contains(text, "nested") || strings.Contains(text, "beta") {
+		t.Fatalf("collapsed h1 leaked nested section: %q", text)
+	}
+	if !strings.Contains(text, "two") || !strings.Contains(text, "gamma") {
+		t.Fatalf("next h1 section missing: %q", text)
+	}
+}
+
+func TestChatViewMouseBreakpointTrackingIsOptIn(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "a", Content: "first"})
+	st.AppendMessage(store.Message{ID: 2, ChannelID: 1, Author: "b", Content: "second"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+	before := view.focusStopKey
+	view.Handle(input.MouseEvent{Kind: input.MouseMotion, X: 0, Y: 1})
+	if view.focusStopKey != before {
+		t.Fatalf("default mouse tracking moved focus from %q to %q", before, view.focusStopKey)
+	}
+	view.SetMouseBreakpointTracking(true)
+	view.Handle(input.MouseEvent{Kind: input.MouseMotion, X: 0, Y: 0})
+	if view.focusStopKey != before {
+		t.Fatal("author line was treated as a breakpoint")
+	}
+	view.Handle(input.MouseEvent{Kind: input.MouseMotion, X: 0, Y: 1})
+	if view.focusStopKey == before {
+		t.Fatal("enabled mouse tracking did not move breakpoint focus")
+	}
+}
+
+func TestChatViewVimKeysAreOptIn(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Content: "one"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) {
+		t.Fatal("j was handled while Vim navigation was disabled")
+	}
+	view.SetVimNavigation(true)
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) {
+		t.Fatal("j was not handled after enabling Vim navigation")
+	}
+}
+
+func TestChatViewUDispatchesFocusedAuthorProfileAction(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, AuthorID: 42, Author: "alice", Content: "hello"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+	var action rune
+	var author store.UserID
+	view.OnMessageAction(func(got rune, msg store.Message) { action, author = got, msg.AuthorID })
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'U'}) {
+		t.Fatal("U was not handled")
+	}
+	if action != 'u' || author != 42 {
+		t.Fatalf("profile action = %q for %d, want u for 42", action, author)
+	}
+}
+
+func TestChatViewWholeBlockHighlightIsOptIn(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "anchor\ncontinued\n## next\noutside"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if buf.Cell(0, 2).Style.Attrs&screen.Reverse != 0 {
+		t.Fatal("continuation line highlighted while block highlighting was disabled")
+	}
+
+	view.SetHighlightFocusBlock(true)
+	buf = screen.NewBuffer(30, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if buf.Cell(0, 2).Style.Attrs&screen.Reverse == 0 {
+		t.Fatal("continuation line was not included in focused block")
+	}
+	if buf.Cell(20, 1).Style.Attrs&screen.Reverse == 0 {
+		t.Fatal("focused line padding was not highlighted")
+	}
+	if buf.Cell(0, 3).Style.Attrs&screen.Reverse != 0 {
+		t.Fatal("next stopping point leaked into focused block")
+	}
+}
+
+func TestChatViewBlockHighlightDoesNotIncludeEmbedBorders(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Embeds: []store.Embed{{Title: "Release", Description: "Ready"}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	view.SetHighlightFocusBlock(true)
+	buf := screen.NewBuffer(30, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	var border, content *screen.Cell
+	for y := 0; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			cell := buf.Cell(x, y)
+			if cell.Content == "╭" {
+				copy := cell
+				border = &copy
+			}
+			if cell.Content == "R" {
+				copy := cell
+				content = &copy
+			}
+		}
+	}
+	if border == nil || content == nil {
+		t.Fatalf("embed cells not rendered:\n%s", rowsText(buf))
+	}
+	if border.Style.Attrs&screen.Reverse != 0 {
+		t.Fatal("embed border was included in the focus highlight")
+	}
+	if content.Style.Attrs&screen.Reverse == 0 {
+		t.Fatal("embed contents were not included in the focus highlight")
+	}
+}
+
+func TestFocusedStyleSwapsByDefaultAndHonorsExplicitColors(t *testing.T) {
+	base := screen.Style{Fg: screen.RGB(1, 2, 3), Bg: screen.RGB(4, 5, 6)}
+	if got := (Styles{}).focusedStyle(base); got.Attrs&screen.Reverse == 0 {
+		t.Fatalf("default focused style = %+v, want reverse video", got)
+	}
+	styles := Styles{Cells: map[string]screen.Style{
+		"messages.focused": {Fg: screen.RGB(7, 8, 9), Bg: screen.RGB(10, 11, 12), Attrs: screen.Reverse},
+	}}
+	if got := styles.focusedStyle(base); got.Fg != screen.RGB(7, 8, 9) || got.Bg != screen.RGB(10, 11, 12) || got.Attrs&screen.Reverse != 0 {
+		t.Fatalf("explicit focused style = %+v, want un-reversed configured colors", got)
+	}
+}
+
+func TestChatViewVimMultiSelectCopiesSelectedMessages(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "first"})
+	st.AppendMessage(store.Message{ID: 2, ChannelID: 1, Author: "bob", Content: "second"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	var copied []store.Message
+	view.OnMessageCopy(func(messages []store.Message) { copied = append([]store.Message(nil), messages...) })
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'V', Mods: input.Shift}) {
+		t.Fatal("V did not select the focused message")
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) {
+		t.Fatal("k did not move to the previous message")
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'Y', Mods: input.Shift}) {
+		t.Fatal("Y did not copy selected messages")
+	}
+	if len(copied) != 2 || copied[0].Content != "first" || copied[1].Content != "second" {
+		t.Fatalf("copied = %#v, want messages in chronological order", copied)
+	}
+}
+
+func TestChatViewVimYCopiesFocusedMessageWithoutSelection(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "only"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	var copied []store.Message
+	view.OnMessageCopy(func(messages []store.Message) { copied = append([]store.Message(nil), messages...) })
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'Y', Mods: input.Shift}) {
+		t.Fatal("Y did not copy the focused message")
+	}
+	if len(copied) != 1 || copied[0].Content != "only" {
+		t.Fatalf("copied = %#v, want focused message", copied)
+	}
+}
+
+func TestChatViewUnfocusedHidesAndRejectsComponentShortcuts(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", ComponentTree: []store.ComponentNode{{
+		Kind: store.ComponentButton, CustomID: "go", Label: "Go",
+	}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(false)
+	buf := screen.NewBuffer(40, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if strings.Contains(rowsText(buf), "1 Go") {
+		t.Fatalf("unfocused shortcut was rendered:\n%s", rowsText(buf))
+	}
+	if view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '1'}) {
+		t.Fatal("unfocused shortcut was handled")
+	}
+}
+
+func TestChatViewVimStopsIncludeFirstLineHeadersAndEveryControl(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID: 1, ChannelID: 1, Author: "bot", Content: "# first\nbody\n## second\nmore",
+		ComponentTree: []store.ComponentNode{{Kind: store.ComponentActionRow, Children: []store.ComponentNode{
+			{Kind: store.ComponentButton, CustomID: "a", Label: "A"},
+			{Kind: store.ComponentButton, CustomID: "b", Label: "B"},
+		}}},
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(50, 9)
+	view.Draw(buf.Clip(buf.Bounds()))
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := len(view.focusStops); got != 4 {
+		t.Fatalf("focus stops = %d, want first/header + second header + two controls: %+v", got, view.focusStops)
+	}
+	if view.focusStops[0].kind != chatFocusHeader || view.focusStops[1].kind != chatFocusHeader ||
+		view.focusStops[2].kind != chatFocusControl || view.focusStops[3].kind != chatFocusControl {
+		t.Fatalf("focus stop kinds = %+v", view.focusStops)
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || view.focusStops[view.focusStopIndex].headerKey == "" {
+		t.Fatal("j did not move from first header to second header")
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '-'}) {
+		t.Fatal("- did not fold the focused header")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if strings.Contains(rowsText(buf), "more") {
+		t.Fatalf("focused header body remained visible after fold:\n%s", rowsText(buf))
+	}
+	if !view.HandleVimFocus(true) {
+		t.Fatal("l-style focus traversal did not unfold the collapsed header")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if !strings.Contains(rowsText(buf), "more") {
+		t.Fatalf("collapsed header did not unfold:\n%s", rowsText(buf))
 	}
 }

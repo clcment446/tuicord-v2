@@ -207,6 +207,9 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"guilds.header": bold(muted), "guilds.selected": accent, "guilds.badge": colors.Error,
 		"guilds.separators.*": colors.Border, "guilds.separators.right": colors.Border,
 		"messages.content": colors.Text, "messages.author": accent, "messages.pending": muted,
+		// Focus is universally rendered by swapping a cell's foreground and
+		// background. colors.conf may still override messages.focused.fg/bg.
+		"messages.focused":    {Attrs: screen.Reverse},
 		"messages.attachment": muted, "messages.reaction": muted,
 		"messages.failed": colors.Error, "messages.thread": muted, "messages.quote": muted,
 		"messages.code": muted, "messages.bold": screen.Style{Attrs: screen.Bold},
