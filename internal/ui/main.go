@@ -7,6 +7,7 @@
 package ui
 
 import (
+	"image"
 	"os"
 	"strconv"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
+	"awesomeProject/internal/tui/term"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
@@ -105,8 +107,9 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
-	if fetcher := newChatMediaFetcher(); fetcher != nil {
-		mv.chat.SetMedia(fetcher, media.DefaultConfig(), a.Post)
+	mediaCfg := chatMediaConfig()
+	if fetcher := newChatMediaFetcher(mediaCfg); fetcher != nil {
+		mv.chat.SetMedia(fetcher, mediaCfg, a.Post)
 	}
 
 	mv.composerStatus = widget.NewText("")
@@ -174,12 +177,42 @@ func (mv *MainView) termWidthMinusMembers() int {
 	return 200
 }
 
-func newChatMediaFetcher() *media.Fetcher {
+func newChatMediaFetcher(cfg media.Config) *media.Fetcher {
 	cache, err := media.NewCache(0, "")
 	if err != nil {
 		return nil
 	}
-	return &media.Fetcher{Cache: cache}
+	return &media.Fetcher{Cache: cache, MaxPixels: chatMediaPixelBudget(cfg)}
+}
+
+// chatMediaConfig resolves the media settings for this terminal, filling in the
+// cell pixel size when the terminal reports one. A terminal that reports
+// nothing (tmux, some emulators) leaves the zero values, and media.Config
+// substitutes conventional defaults.
+func chatMediaConfig() media.Config {
+	cfg := media.DefaultConfig()
+	if sz, err := term.ProbeSize(); err == nil {
+		if w, h, ok := sz.CellPixels(); ok {
+			cfg.CellPixelWidth, cfg.CellPixelHeight = w, h
+		}
+	}
+	return cfg
+}
+
+// chatMediaPixelBudget is the largest pixel size an inline media block can
+// occupy: the full terminal width, and MaxHeightCells tall. Fetched images are
+// downscaled to this once, rather than pushing full-resolution pixels through
+// the Kitty encoder on every cache miss.
+func chatMediaPixelBudget(cfg media.Config) image.Point {
+	cellW, cellH := cfg.CellPixels()
+	rows := cfg.MaxHeightCells
+	if rows <= 0 {
+		rows = media.DefaultConfig().MaxHeightCells
+	}
+	// A generous column budget: the height cap is the binding constraint for
+	// inline media, and over-wide sources are rare.
+	const maxCols = 200
+	return image.Point{X: maxCols * cellW, Y: rows * cellH}
 }
 
 // Refresh repopulates the guild and channel lists from the store. Call on the

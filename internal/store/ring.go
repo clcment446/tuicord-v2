@@ -43,10 +43,11 @@ func (r *ring) replaceByNonce(nonce string, confirmed Message) bool {
 	return false
 }
 
-func (r *ring) markFailed(nonce string) bool {
+func (r *ring) markFailed(nonce string, rev uint64) bool {
 	if i, ok := r.indexByNonce(nonce); ok {
 		r.buf[i].Failed = true
 		r.buf[i].Pending = false
+		r.buf[i].rev = rev
 		return true
 	}
 	return false
@@ -74,11 +75,12 @@ func (r *ring) indexByID(id MessageID) (int, bool) {
 	return 0, false
 }
 
-// updateByID applies patch to the message with id. It follows the same
-// in-place mutation style as markFailed.
-func (r *ring) updateByID(id MessageID, patch func(*Message)) bool {
+// updateByID applies patch to the message with id and stamps it with rev. It
+// follows the same in-place mutation style as markFailed.
+func (r *ring) updateByID(id MessageID, patch func(*Message), rev uint64) bool {
 	if i, ok := r.indexByID(id); ok {
 		patch(&r.buf[i])
+		r.buf[i].rev = rev
 		return true
 	}
 	return false
@@ -106,12 +108,13 @@ func (r *ring) removeByID(id MessageID) bool {
 // addReaction merges react into the message with id. If a matching entry
 // (same EmojiName and EmojiID) already exists its Count is incremented and Me
 // is set when react.Me is true; otherwise react is appended as a new entry.
-func (r *ring) addReaction(id MessageID, react Reaction) bool {
+func (r *ring) addReaction(id MessageID, react Reaction, rev uint64) bool {
 	i, ok := r.indexByID(id)
 	if !ok {
 		return false
 	}
 	msg := &r.buf[i]
+	msg.rev = rev
 	for j := range msg.Reactions {
 		rx := &msg.Reactions[j]
 		if rx.EmojiName == react.EmojiName && rx.EmojiID == react.EmojiID {
@@ -128,7 +131,7 @@ func (r *ring) addReaction(id MessageID, react Reaction) bool {
 
 // removeReaction decrements the matching reaction on message id. When me is
 // true, the Me flag is cleared. The entry is removed once Count reaches zero.
-func (r *ring) removeReaction(id MessageID, emojiName string, emojiID uint64, me bool) bool {
+func (r *ring) removeReaction(id MessageID, emojiName string, emojiID uint64, me bool, rev uint64) bool {
 	i, ok := r.indexByID(id)
 	if !ok {
 		return false
@@ -146,6 +149,7 @@ func (r *ring) removeReaction(id MessageID, emojiName string, emojiID uint64, me
 		if rx.Count <= 0 {
 			msg.Reactions = append(msg.Reactions[:j], msg.Reactions[j+1:]...)
 		}
+		msg.rev = rev
 		return true
 	}
 	return false

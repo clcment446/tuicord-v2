@@ -134,6 +134,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 	segs := []chatSegment{{text: "⤷ ", style: base}}
 	used := uitext.Width("⤷ ")
 	var inline []positionedInlineMedia
+	spinner := false
 	for i, r := range reactions {
 		if i > 0 {
 			segs = append(segs, chatSegment{text: " · ", style: base})
@@ -150,6 +151,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 			placeholder := "  "
 			if state != nil && state.loading {
 				placeholder = mediaSpinner(w.spinner) + " "
+				spinner = true
 			}
 			segs = append(segs, chatSegment{text: placeholder, style: style})
 			if state != nil && state.err == nil && state.img != nil {
@@ -183,7 +185,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 		segs = append(segs, chatSegment{text: label, style: style})
 		used += uitext.Width(label)
 	}
-	return chatLine{segments: segs, inlineMedia: inline}, true
+	return chatLine{segments: segs, inlineMedia: inline, spinner: spinner}, true
 }
 
 // reactionLabel formats one reaction as "<emoji> <count>". Custom emoji use

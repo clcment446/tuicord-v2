@@ -31,6 +31,28 @@ func Downscale(img image.Image, maxCols, maxRows int) image.Image {
 	if maxRows <= 0 {
 		maxRows = 1
 	}
+	// Each column maps to 1 px wide; each row maps to cellAspect px tall.
+	return DownscaleToPixels(img, maxCols, maxRows*cellAspect)
+}
+
+// DownscaleToPixels returns a new image scaled to fit within maxW×maxH pixels
+// while preserving the original aspect ratio, using the CatmullRom resampler.
+//
+// Unlike Downscale it makes no assumption about terminal cell geometry, so it
+// is the right entry point for pixel-addressed protocols such as Kitty
+// graphics, where a cell covers real pixels rather than the two rows a
+// half-block cell implies. Callers there should derive the pixel budget from
+// the terminal's reported cell size.
+//
+// If img already fits within the budget it is returned unchanged. Zero or
+// negative bounds produce a 1×1 placeholder budget.
+func DownscaleToPixels(img image.Image, maxW, maxH int) image.Image {
+	if maxW <= 0 {
+		maxW = 1
+	}
+	if maxH <= 0 {
+		maxH = 1
+	}
 
 	b := img.Bounds()
 	srcW := b.Dx()
@@ -39,10 +61,8 @@ func Downscale(img image.Image, maxCols, maxRows int) image.Image {
 		return img
 	}
 
-	// Convert the cell budget to pixel budget.
-	// Each column maps to 1 px wide; each row maps to cellAspect px tall.
-	budgetW := maxCols
-	budgetH := maxRows * cellAspect
+	budgetW := maxW
+	budgetH := maxH
 
 	if srcW <= budgetW && srcH <= budgetH {
 		return img

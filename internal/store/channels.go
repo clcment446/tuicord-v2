@@ -40,6 +40,7 @@ func (s *Store) removeChannel(id ChannelID) {
 	delete(s.channels, id)
 	delete(s.messages, id)
 	delete(s.unread, id)
+	s.touchMeta()
 }
 
 // SetArchived flips a thread's archived state, returning true when the channel
@@ -54,6 +55,7 @@ func (s *Store) SetArchived(id ChannelID, archived bool) bool {
 	meta.Archived = archived
 	c.Thread = &meta
 	s.channels[id] = c
+	s.touchMeta()
 	return true
 }
 
@@ -69,6 +71,7 @@ func (s *Store) SetThreadJoined(id ChannelID, joined bool) bool {
 	meta.Joined = joined
 	c.Thread = &meta
 	s.channels[id] = c
+	s.touchMeta()
 	return true
 }
 

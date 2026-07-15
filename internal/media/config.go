@@ -27,6 +27,34 @@ type Config struct {
 	// activates an inline video block (e.g. by clicking it). The full URL is
 	// appended as the last argument. Common values: "xdg-open", "mpv", "vlc".
 	VideoPlayer string
+
+	// CellPixelWidth and CellPixelHeight are the pixel dimensions of one
+	// terminal cell, used to convert a cell budget into the pixel budget that
+	// Kitty graphics needs. Zero means the terminal did not report a size; use
+	// CellPixels for the defaulted values rather than reading these directly.
+	CellPixelWidth  int
+	CellPixelHeight int
+}
+
+// Default cell pixel size, used when the terminal does not report one. Chosen
+// to match a typical monospace cell at common font sizes; being slightly off
+// costs a little image quality, never correctness.
+const (
+	defaultCellPixelWidth  = 10
+	defaultCellPixelHeight = 20
+)
+
+// CellPixels returns the configured cell size in pixels, substituting
+// conventional defaults for unreported (zero) values.
+func (c Config) CellPixels() (w, h int) {
+	w, h = c.CellPixelWidth, c.CellPixelHeight
+	if w <= 0 {
+		w = defaultCellPixelWidth
+	}
+	if h <= 0 {
+		h = defaultCellPixelHeight
+	}
+	return w, h
 }
 
 // DefaultConfig returns a Config with sensible defaults for a first-run

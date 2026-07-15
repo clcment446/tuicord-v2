@@ -5,12 +5,14 @@ package store
 //
 // The primary use-case is MESSAGE_UPDATE events, which Discord sends after
 // MESSAGE_CREATE once link embeds are unfurled.
+// It is the single chokepoint through which SetMessagePinned and
+// SetComponentState also mutate, so stamping a fresh revision here covers them.
 func (s *Store) UpdateMessage(channel ChannelID, id MessageID, patch func(*Message)) bool {
 	r := s.messages[channel]
 	if r == nil {
 		return false
 	}
-	return r.updateByID(id, patch)
+	return r.updateByID(id, patch, s.nextRevision())
 }
 
 // RemoveMessage deletes message id from channel's ring. It returns true when a
@@ -66,7 +68,7 @@ func (s *Store) AddReaction(channel ChannelID, id MessageID, r Reaction) bool {
 	if ring == nil {
 		return false
 	}
-	return ring.addReaction(id, r)
+	return ring.addReaction(id, r, s.nextRevision())
 }
 
 // RemoveReaction decrements the reaction identified by emojiName and emojiID
@@ -78,7 +80,7 @@ func (s *Store) RemoveReaction(channel ChannelID, id MessageID, emojiName string
 	if ring == nil {
 		return false
 	}
-	return ring.removeReaction(id, emojiName, emojiID, me)
+	return ring.removeReaction(id, emojiName, emojiID, me, s.nextRevision())
 }
 
 // MemberColor returns the effective display color for user in guild following

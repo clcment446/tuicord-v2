@@ -52,6 +52,27 @@ type ChatView struct {
 	media        map[string]*chatMediaState
 	mediaSlots   chan struct{}
 	spinner      int
+	// mediaLoadingCount tracks in-flight fetches so mediaLoading stays O(1)
+	// as w.media grows.
+	mediaLoadingCount int
+	// spinnerVisible reports whether the last Draw put a spinner on screen.
+	// Animating one that is scrolled out of view, or in another channel, would
+	// invalidate the frame twice a second for nothing.
+	spinnerVisible bool
+
+	// bodyCache memoizes rendered message bodies. Without it every frame
+	// re-parses markup and re-lays out embeds and components for the whole
+	// channel history. See chatCacheEntry for the invalidation inputs.
+	bodyCache map[string]*chatCacheEntry
+	// componentEpoch versions the component presentation state this widget
+	// owns (expansion, selection, flashes). Anything that changes what a
+	// component renders as must bump it.
+	componentEpoch uint64
+	// renderGen counts renders, so unused cache entries can be swept.
+	renderGen uint64
+	// bodyDeps collects the media a body touched while collectDeps is set.
+	bodyDeps    []mediaDep
+	collectDeps bool
 	// renderedLineCount lets a scrolled viewport compensate for lines appended
 	// below it without changing the user's reading position.
 	renderedLineCount int
@@ -143,7 +164,7 @@ func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style
 	case state.err != nil:
 		return []chatLine{{segments: []chatSegment{{text: label + " (failed)", style: muted}}}}
 	case state.img == nil:
-		return []chatLine{{segments: []chatSegment{{text: label + " " + mediaSpinner(w.spinner), style: muted}}}}
+		return []chatLine{{segments: []chatSegment{{text: label + " " + mediaSpinner(w.spinner), style: muted}}, spinner: true}}
 	default:
 		variant := w.mediaVariant(state, spec)
 		if placementKey == "" {
@@ -167,15 +188,33 @@ func (w *ChatView) ensureMedia(url string) *chatMediaState {
 	}
 	state := w.media[url]
 	if state != nil {
+		state.touched = w.renderGen
+		w.recordMediaDep(url, state)
 		return state
 	}
 	if w.mediaFetcher == nil || w.post == nil {
 		return nil
 	}
-	state = &chatMediaState{loading: true}
+	state = &chatMediaState{loading: true, touched: w.renderGen}
 	w.media[url] = state
+	w.mediaLoadingCount++
+	w.recordMediaDep(url, state)
 	go w.fetchMedia(url)
 	return state
+}
+
+// recordMediaDep notes that the body currently being rendered read state, so
+// the cache entry can be invalidated when that media changes.
+func (w *ChatView) recordMediaDep(url string, state *chatMediaState) {
+	if !w.collectDeps {
+		return
+	}
+	for _, d := range w.bodyDeps {
+		if d.url == url {
+			return
+		}
+	}
+	w.bodyDeps = append(w.bodyDeps, mediaDep{url: url, rev: state.rev})
 }
 
 func mediaSpinner(step int) string {
@@ -183,13 +222,11 @@ func mediaSpinner(step int) string {
 	return "[" + frames[step%len(frames)] + "]"
 }
 
+// mediaLoading reports whether any fetch is still in flight. It reads a
+// counter maintained by ensureMedia and fetchMedia rather than scanning
+// w.media, which grows for the lifetime of the session.
 func (w *ChatView) mediaLoading() bool {
-	for _, state := range w.media {
-		if state != nil && state.loading {
-			return true
-		}
-	}
-	return false
+	return w.mediaLoadingCount > 0
 }
 
 func (w *ChatView) fetchMedia(url string) {
@@ -199,13 +236,19 @@ func (w *ChatView) fetchMedia(url string) {
 	w.post(func() {
 		state := w.media[url]
 		if state == nil {
+			// The state was dropped while the fetch was in flight; it was not
+			// counted as loading, so resurrect it without decrementing.
 			state = &chatMediaState{}
 			w.media[url] = state
+		} else if state.loading {
+			w.mediaLoadingCount--
 		}
 		state.loading = false
 		state.img = img
 		state.err = err
 		state.variants = nil
+		// Invalidate any cached body that rendered this media as a placeholder.
+		state.rev++
 	})
 }
 
@@ -318,8 +361,12 @@ func (w *ChatView) Draw(r screen.Region) {
 	}
 	w.visibleLines = append(w.visibleLines[:0], displayLines...)
 	y := 0
+	w.spinnerVisible = false
 	drawnMedia := map[*inlineMedia]struct{}{}
 	for _, line := range displayLines {
+		if line.spinner {
+			w.spinnerVisible = true
+		}
 		if line.media != nil {
 			drawChatLine(r, 0, y, line)
 			if _, ok := drawnMedia[line.media]; !ok {
@@ -349,6 +396,10 @@ type chatLine struct {
 	inlineMedia []positionedInlineMedia
 	actions     []componentHit
 	entities    []entityHit
+	// spinner marks a line that drew a media-loading spinner. Only spinners on
+	// screen need the tick to animate them, so Draw tracks whether any visible
+	// line carries this flag.
+	spinner bool
 }
 
 type entityHit struct {
@@ -381,6 +432,39 @@ type chatMediaState struct {
 	img      image.Image
 	err      error
 	variants map[string]chatMediaVariant
+	// rev increments whenever loading, img, or err changes. Cached message
+	// bodies record the rev of every media state they read so they can be
+	// invalidated when an image arrives or a state is evicted and refetched.
+	rev uint32
+	// touched is the render generation that last read this state, for sweeping.
+	touched uint64
+}
+
+// mediaDep records the version of one media state a rendered body depended on.
+type mediaDep struct {
+	url string
+	rev uint32
+}
+
+// chatCacheEntry is a memoized message body: everything render emits for a
+// message except its author line, which depends on the preceding message and is
+// cheap enough to recompute.
+type chatCacheEntry struct {
+	lines []chatLine
+	// rev is the store revision of the message these lines were rendered from.
+	// Comparing Message values instead would be silently wrong: the store hands
+	// out shallow copies whose slices it patches in place.
+	rev     uint64
+	width   int
+	channel store.ChannelID
+	// metaRev and componentEpoch version the state a body reads but does not
+	// own: resolved mentions and roles (store), and component presentation
+	// (this widget).
+	metaRev        uint64
+	componentEpoch uint64
+	deps           []mediaDep
+	// gen is the render generation that last used this entry, for sweeping.
+	gen uint64
 }
 
 type chatMediaVariant struct {
@@ -468,42 +552,174 @@ func (w *ChatView) render(width int) []chatLine {
 	channel := w.active()
 	guild := w.guildOf(channel)
 	msgs := w.store.Messages(channel)
+	w.renderGen++
 	var lines []chatLine
 	var previous store.Message
 	previousSet := false
 	for _, m := range msgs {
-		w.emojiKeyPrefix = messagePlacementPrefix(m)
-		w.emojiSeq = 0
-		style := w.styles.Text
-		switch {
-		case m.Failed:
-			style = w.styles.Error
-		case m.Pending:
-			style = w.styles.Pending
-		}
+		// The author line depends on the preceding message, so it is not a pure
+		// function of m and stays outside the cache. It is one concat and a
+		// color lookup, so recomputing it is cheaper than tracking it.
 		showAuthor := !previousSet || !sameMessageAuthor(previous, m) ||
 			previous.Failed != m.Failed || previous.Pending != m.Pending
 		if showAuthor {
-			line := w.authorLine(m, guild)
-			lines = append(lines, line)
+			lines = append(lines, w.authorLine(m, guild))
 		}
-		if m.Content != "" && !suppressContent(m) {
-			lines = append(lines, stampMessage(w.renderContent(m.Content, width, style), m)...)
+		body, ok := w.cachedBody(m, channel, width)
+		if !ok {
+			body = w.renderBody(m, channel, width)
 		}
-		lines = append(lines, stampMessage(w.renderMedia(m, width, style), m)...)
-		lines = append(lines, stampMessage(w.renderEmbeds(m, width, style), m)...)
-		lines = append(lines, stampMessage(w.renderComponentTree(m, width, style), m)...)
-		if line, ok := w.renderReactions(m.Reactions, messagePlacementPrefix(m)); ok {
-			line.message = m
-			lines = append(lines, line)
-		}
-		if line, ok := w.renderThreadStarter(m, channel); ok {
-			lines = append(lines, line)
-		}
+		lines = append(lines, body...)
 		previous = m
 		previousSet = true
 	}
+	w.sweepBodyCache()
+	w.sweepMedia()
 	return lines
+}
+
+// renderBody renders and caches everything a message contributes below its
+// author line.
+//
+// The emoji placement counters are reset here, in the miss path, rather than
+// once per message in render. Every placement key a body emits is prefixed with
+// that message's own prefix and numbered from zero, so a body's keys depend
+// only on the message — never on which neighbours were cache hits. That is what
+// makes skipping a message safe.
+func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width int) []chatLine {
+	w.emojiKeyPrefix = messagePlacementPrefix(m)
+	w.emojiSeq = 0
+	style := w.styles.Text
+	switch {
+	case m.Failed:
+		style = w.styles.Error
+	case m.Pending:
+		style = w.styles.Pending
+	}
+
+	w.bodyDeps = w.bodyDeps[:0]
+	w.collectDeps = true
+
+	var body []chatLine
+	if m.Content != "" && !suppressContent(m) {
+		body = append(body, stampMessage(w.renderContent(m.Content, width, style), m)...)
+	}
+	body = append(body, stampMessage(w.renderMedia(m, width, style), m)...)
+	body = append(body, stampMessage(w.renderEmbeds(m, width, style), m)...)
+	body = append(body, stampMessage(w.renderComponentTree(m, width, style), m)...)
+	if line, ok := w.renderReactions(m.Reactions, messagePlacementPrefix(m)); ok {
+		line.message = m
+		body = append(body, line)
+	}
+	if line, ok := w.renderThreadStarter(m, channel); ok {
+		body = append(body, line)
+	}
+
+	w.collectDeps = false
+	w.storeBody(m, channel, width, body)
+	return body
+}
+
+// cachedBody returns a previously rendered body when every input it depended on
+// is unchanged.
+func (w *ChatView) cachedBody(m store.Message, channel store.ChannelID, width int) ([]chatLine, bool) {
+	e := w.bodyCache[messagePlacementPrefix(m)]
+	if e == nil {
+		return nil, false
+	}
+	if e.rev != m.Rev() || e.width != width || e.channel != channel ||
+		e.metaRev != w.store.MetaRev() || e.componentEpoch != w.componentEpoch {
+		return nil, false
+	}
+	for _, d := range e.deps {
+		state := w.media[d.url]
+		if state == nil || state.rev != d.rev {
+			return nil, false
+		}
+	}
+	// A hit skips renderBody, so ensureMedia never runs for this body. Mark its
+	// media as still in use here or the sweep would evict it and every
+	// subsequent frame would miss and re-render.
+	for _, d := range e.deps {
+		w.media[d.url].touched = w.renderGen
+	}
+	e.gen = w.renderGen
+	return e.lines, true
+}
+
+// storeBody memoizes a rendered body, unless it drew a spinner. A loading body
+// animates with w.spinner, which is deliberately not part of the cache key:
+// including it would invalidate every entry twice a second and defeat the
+// cache. Not caching the few loading bodies costs little and keeps the spinner
+// moving.
+func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int, body []chatLine) {
+	for _, d := range w.bodyDeps {
+		if state := w.media[d.url]; state != nil && state.loading {
+			return
+		}
+	}
+	if w.bodyCache == nil {
+		w.bodyCache = map[string]*chatCacheEntry{}
+	}
+	deps := append([]mediaDep(nil), w.bodyDeps...)
+	w.bodyCache[messagePlacementPrefix(m)] = &chatCacheEntry{
+		lines:          body,
+		rev:            m.Rev(),
+		width:          width,
+		channel:        channel,
+		metaRev:        w.store.MetaRev(),
+		componentEpoch: w.componentEpoch,
+		deps:           deps,
+		gen:            w.renderGen,
+	}
+}
+
+// maxBodyCache bounds the memoized bodies. It is comfortably above one
+// channel's history so a single view never evicts its own entries, while still
+// bounding a session that visits many channels.
+const maxBodyCache = 600
+
+// sweepBodyCache drops entries no recent render touched. Entries for other
+// channels survive until the budget is reached, so flipping between two
+// channels stays free.
+func (w *ChatView) sweepBodyCache() {
+	if len(w.bodyCache) <= maxBodyCache {
+		return
+	}
+	for key, e := range w.bodyCache {
+		if e.gen != w.renderGen {
+			delete(w.bodyCache, key)
+		}
+	}
+}
+
+// maxMediaStates bounds the decoded images held per view. The media package's
+// own LRU already caches decodes, so evicting here costs at most a cheap refetch
+// that hits that LRU or the disk cache.
+const maxMediaStates = 256
+
+// sweepMedia drops media no recent render read. Without it w.media grows for
+// the lifetime of the session, holding a decoded image for every URL seen in
+// every channel visited.
+//
+// Evicting is safe for the body cache: a cached body whose media disappears
+// fails its dependency check and re-renders. In-flight fetches are kept because
+// their goroutine still expects the state it incremented the loading count for.
+func (w *ChatView) sweepMedia() {
+	if len(w.media) <= maxMediaStates {
+		return
+	}
+	for url, state := range w.media {
+		if state.touched != w.renderGen && !state.loading {
+			delete(w.media, url)
+		}
+	}
+}
+
+// invalidateBodies drops every memoized body. Used when presentation state
+// changes in a way that is not worth versioning precisely.
+func (w *ChatView) invalidateBodies() {
+	w.componentEpoch++
 }
 
 func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
@@ -566,12 +782,14 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 	var line []chatSegment
 	var entities []entityHit
 	var inline []positionedInlineMedia
+	spinner := false
 	used := 0
 	flush := func() {
-		lines = append(lines, chatLine{segments: line, inlineMedia: inline, entities: entities})
+		lines = append(lines, chatLine{segments: line, inlineMedia: inline, entities: entities, spinner: spinner})
 		line = nil
 		entities = nil
 		inline = nil
+		spinner = false
 		used = 0
 	}
 	appendText := func(s string, style screen.Style, action *markup.Action) {
@@ -610,6 +828,7 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 			placeholder := strings.Repeat(" ", emojiCols)
 			if state != nil && state.loading {
 				placeholder = mediaSpinner(w.spinner) + " "
+				spinner = true
 			}
 			line = appendChatSegment(line, chatSegment{text: placeholder, style: style})
 			if state != nil && state.err == nil && state.img != nil {
@@ -757,11 +976,14 @@ func mergeStyle(base, overlay screen.Style) screen.Style {
 func (w *ChatView) Handle(ev tui.Event) bool {
 	switch ev := ev.(type) {
 	case input.TickEvent:
-		loading := w.mediaLoading()
-		if loading {
+		// Only advance the spinner when one is actually on screen. Media
+		// loading elsewhere — scrolled out of view, or in another channel —
+		// must not force a redraw.
+		visible := w.spinnerVisible
+		if visible {
 			w.spinner++
 		}
-		return w.expireComponentFlashes(time.Now()) || loading
+		return w.expireComponentFlashes(time.Now()) || visible
 	case input.KeyEvent:
 		if ev.Release {
 			return false
@@ -905,6 +1127,7 @@ func (w *ChatView) enableComponentMulti(action componentAction) {
 		w.multiPickers = map[string]bool{}
 	}
 	w.multiPickers[action.controlKey()] = true
+	w.invalidateBodies()
 }
 
 func (w *ChatView) componentMultiEnabled(controlKey string) bool {
@@ -915,6 +1138,9 @@ func (w *ChatView) setComponentAction(action componentAction) bool {
 	if action.disabled {
 		return false
 	}
+	// Every path below changes how the component draws: the flash, the
+	// expansion, or the selection.
+	w.invalidateBodies()
 	key := action.key()
 	if w.componentFlashes == nil {
 		w.componentFlashes = map[string]time.Time{}
@@ -962,6 +1188,7 @@ func (w *ChatView) setComponentAction(action componentAction) bool {
 }
 
 func (w *ChatView) setComponentSelection(action componentAction) {
+	w.invalidateBodies()
 	if w.selectedComponents == nil {
 		w.selectedComponents = map[string]map[string]bool{}
 	}
@@ -992,6 +1219,7 @@ func (w *ChatView) submitActiveComponentPicker() bool {
 	}
 	if w.expandedComponents != nil {
 		w.expandedComponents[action.controlKey()] = false
+		w.invalidateBodies()
 	}
 	return w.submitComponentPicker(action)
 }
@@ -1074,6 +1302,9 @@ func (w *ChatView) expireComponentFlashes(now time.Time) bool {
 			delete(w.componentFlashes, key)
 			changed = true
 		}
+	}
+	if changed {
+		w.invalidateBodies()
 	}
 	return changed
 }

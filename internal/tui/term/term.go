@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sys/unix"
 	xterm "golang.org/x/term"
 )
 
@@ -39,6 +40,28 @@ type Size struct {
 	Width int
 	// Height is the number of terminal rows.
 	Height int
+	// XPixel and YPixel are the terminal's total size in pixels, as reported
+	// by the kernel. Many terminals (and tmux) report zero; treat that as
+	// "unknown" rather than as a real size. Dividing by Width and Height gives
+	// the pixel size of one cell, which pixel-addressed protocols such as
+	// Kitty graphics need to size images.
+	XPixel int
+	YPixel int
+}
+
+// CellPixels returns the pixel size of a single terminal cell. ok is false when
+// the terminal does not report pixel dimensions, in which case callers should
+// fall back to a conventional cell size rather than trusting the zero values.
+func (s Size) CellPixels() (w, h int, ok bool) {
+	if s.XPixel <= 0 || s.YPixel <= 0 || s.Width <= 0 || s.Height <= 0 {
+		return 0, 0, false
+	}
+	w = s.XPixel / s.Width
+	h = s.YPixel / s.Height
+	if w <= 0 || h <= 0 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // Capabilities describes terminal features the renderer and input layer can
@@ -163,6 +186,19 @@ func (t *Terminal) Size() (Size, error) {
 	return size(t.fd)
 }
 
+// ProbeSize reports the controlling terminal's size without opening a session.
+// It neither enters raw mode nor touches the alternate screen, so it is safe to
+// call during startup before the event loop runs — for example to learn the
+// cell pixel size that graphics protocols need.
+func ProbeSize() (Size, error) {
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return Size{}, fmt.Errorf("open tty: %w", err)
+	}
+	defer f.Close()
+	return size(int(f.Fd()))
+}
+
 // Close restores the terminal. It is safe to call multiple times.
 func (t *Terminal) Close() error {
 	if t == nil {
@@ -214,12 +250,25 @@ func (t *Terminal) publishSize() {
 	}
 }
 
+// size reports the terminal size in cells and, when the terminal supplies it,
+// in pixels. It uses TIOCGWINSZ directly because x/term's GetSize discards the
+// pixel fields, which pixel-addressed graphics protocols need.
 func size(fd int) (Size, error) {
-	w, h, err := xterm.GetSize(fd)
+	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
 	if err != nil {
-		return Size{}, err
+		// Fall back to x/term so a platform without the ioctl still reports cells.
+		w, h, gerr := xterm.GetSize(fd)
+		if gerr != nil {
+			return Size{}, err
+		}
+		return Size{Width: w, Height: h}, nil
 	}
-	return Size{Width: w, Height: h}, nil
+	return Size{
+		Width:  int(ws.Col),
+		Height: int(ws.Row),
+		XPixel: int(ws.Xpixel),
+		YPixel: int(ws.Ypixel),
+	}, nil
 }
 
 func envMap(environ []string) map[string]string {
