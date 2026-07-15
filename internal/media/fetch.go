@@ -31,6 +31,15 @@ type Fetcher struct {
 	// Cache is the two-level decode cache. When nil, every call performs a
 	// network request and results are not stored.
 	Cache *Cache
+	// MaxPixels bounds the decoded image to at most X×Y pixels, preserving
+	// aspect ratio. A zero X or Y disables downscaling.
+	//
+	// Downscaling here rather than at draw time does the resample once per
+	// fetch instead of once per frame, and bounds what the LRU holds. It also
+	// keeps the image pointer stable for a warm URL, which matters because the
+	// Kitty upload cache keys on that pointer: downscaling after a cache read
+	// would mint a new pointer on every fetch and defeat the cache.
+	MaxPixels image.Point
 }
 
 // Fetch downloads and decodes the image at url. Lookup order:
@@ -57,6 +66,11 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 	img, err := Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("media: decode %s: %w", url, err)
+	}
+	// Downscale before caching so the LRU holds display-sized images and the
+	// cached pointer stays stable across warm hits.
+	if f.MaxPixels.X > 0 && f.MaxPixels.Y > 0 {
+		img = DownscaleToPixels(img, f.MaxPixels.X, f.MaxPixels.Y)
 	}
 
 	if f.Cache != nil && cacheable {

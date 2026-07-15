@@ -513,9 +513,14 @@ func kittyUpload(img image.Image, width, height int, id uint32) ([]byte, error) 
 		height = b.Dy()
 	}
 
-	scaled := scaleNRGBA(img, width, height)
+	// Callers that already sized the source to the target (the common case)
+	// only need the pixels tightened into a contiguous buffer; resampling
+	// would be an expensive no-op.
+	var scaled *image.NRGBA
 	if b.Dx() == width && b.Dy() == height {
 		scaled = tightNRGBA(img)
+	} else {
+		scaled = scaleNRGBA(img, width, height)
 	}
 	payload := base64.StdEncoding.EncodeToString(scaled.Pix)
 	var out strings.Builder

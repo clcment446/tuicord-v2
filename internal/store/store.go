@@ -211,7 +211,21 @@ type Message struct {
 	// ComponentTree preserves Discord's hierarchical Components V2 layout.
 	ComponentTree []ComponentNode
 	Pinned        bool
+
+	// rev is the store revision this version of the message was stamped with.
+	// It is unexported so only the store can issue one, and it is a scalar so
+	// that the shallow copies Messages returns carry it by value. That makes it
+	// a true snapshot: the slice fields above alias the store's backing arrays
+	// and can be patched in place underneath a copy, so comparing Message
+	// values cannot detect a change — comparing revisions can.
+	rev uint64
 }
+
+// Rev reports the store revision stamped on this message. It changes on every
+// mutation the store makes, including in-place patches to the message's slices
+// that a value comparison would miss. Renderers should treat a changed Rev as
+// invalidating anything cached from this message.
+func (m Message) Rev() uint64 { return m.rev }
 
 // Member is a guild member, used to resolve mentions.
 type Member struct {
@@ -286,6 +300,34 @@ type Store struct {
 	// whether custom emoji can be sent inline natively or must fall back to the
 	// fake-nitro CDN URL.
 	hasNitro bool
+
+	// rev is a monotonic counter stamped onto every message the store mutates.
+	// It is never reset and never reused, so a revision identifies one version
+	// of one message for the life of the store.
+	rev uint64
+	// metaRev counts mutations to everything a message render reads but does
+	// not own: members, roles, channels, and guilds. Mention resolution depends
+	// on those, so a render cached before members arrived must be discarded
+	// even though the message itself never changed.
+	metaRev uint64
+}
+
+// nextRevision returns a fresh, never-reused message revision.
+func (s *Store) nextRevision() uint64 {
+	s.rev++
+	return s.rev
+}
+
+// MetaRev reports the current revision of non-message state (members, roles,
+// channels, guilds). Renderers that resolve mentions or channel references
+// should treat a change here as invalidating cached output.
+func (s *Store) MetaRev() uint64 {
+	return s.metaRev
+}
+
+// touchMeta records a mutation to non-message state.
+func (s *Store) touchMeta() {
+	s.metaRev++
 }
 
 // New returns an empty store. A historyLimit <= 0 uses DefaultHistoryLimit.
@@ -336,6 +378,7 @@ func (s *Store) UpsertGuild(g Guild) {
 		s.guildOrder = append(s.guildOrder, g.ID)
 	}
 	s.guilds[g.ID] = g
+	s.touchMeta()
 }
 
 // SetGuildFolders records the guild-folder layout from READY (or a later
@@ -432,6 +475,7 @@ func (s *Store) UpsertChannel(c Channel) {
 		s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
 	}
 	s.channels[c.ID] = c
+	s.touchMeta()
 }
 
 // Channel returns the channel with id, if known.
@@ -459,21 +503,66 @@ func (s *Store) AppendMessage(m Message) {
 		r = newRing(s.historyLimit)
 		s.messages[m.ChannelID] = r
 	}
+	m.rev = s.nextRevision()
 	r.push(m)
 }
 
 // SetMessages replaces a channel's history with messages in oldest-first order.
+//
+// Local echoes still in flight are carried over and re-appended as the newest
+// entries. A history load reflects the server's view from before the send, so
+// replacing the ring wholesale would silently discard a message the user has
+// just sent and is watching for — it would reappear only when the gateway echo
+// arrived, or not at all.
 func (s *Store) SetMessages(channel ChannelID, messages []Message) {
-	if len(messages) == 0 {
+	echoes := s.unconfirmedEchoes(channel, messages)
+	if len(messages) == 0 && len(echoes) == 0 {
 		delete(s.messages, channel)
 		return
 	}
 	r := newRing(s.historyLimit)
 	for _, m := range messages {
 		m.ChannelID = channel
+		m.rev = s.nextRevision()
+		r.push(m)
+	}
+	// Echoes keep their existing revision: they have not changed, so anything
+	// caching a render of them stays valid.
+	for _, m := range echoes {
 		r.push(m)
 	}
 	s.messages[channel] = r
+}
+
+// unconfirmedEchoes returns the channel's pending and failed local echoes that
+// incoming does not already account for. A nonce present in incoming means the
+// server has confirmed that echo, so the incoming copy supersedes it.
+func (s *Store) unconfirmedEchoes(channel ChannelID, incoming []Message) []Message {
+	r := s.messages[channel]
+	if r == nil {
+		return nil
+	}
+	var confirmed map[string]struct{}
+	for _, m := range incoming {
+		if m.Nonce == "" {
+			continue
+		}
+		if confirmed == nil {
+			confirmed = make(map[string]struct{}, len(incoming))
+		}
+		confirmed[m.Nonce] = struct{}{}
+	}
+	var out []Message
+	for _, m := range r.slice() {
+		if !m.Pending && !m.Failed {
+			continue
+		}
+		if _, ok := confirmed[m.Nonce]; ok && m.Nonce != "" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }
 
 // PrependMessages adds older messages before the existing channel history.
@@ -514,6 +603,7 @@ func (s *Store) ReplaceMessage(nonce string, confirmed Message) bool {
 	if r == nil {
 		return false
 	}
+	confirmed.rev = s.nextRevision()
 	return r.replaceByNonce(nonce, confirmed)
 }
 
@@ -523,7 +613,7 @@ func (s *Store) MarkFailed(channel ChannelID, nonce string) bool {
 	if r == nil {
 		return false
 	}
-	return r.markFailed(nonce)
+	return r.markFailed(nonce, s.nextRevision())
 }
 
 // Messages returns a channel's messages oldest-first.
@@ -543,11 +633,13 @@ func (s *Store) UpsertMember(guild GuildID, m Member) {
 		s.members[guild] = byUser
 	}
 	byUser[m.ID] = m
+	s.touchMeta()
 }
 
 // RemoveMember deletes a guild member.
 func (s *Store) RemoveMember(guild GuildID, user UserID) {
 	delete(s.members[guild], user)
+	s.touchMeta()
 }
 
 // Members returns a guild's members in no particular order.
@@ -583,11 +675,13 @@ func (s *Store) UpsertRole(guild GuildID, r Role) {
 		s.roles[guild] = byRole
 	}
 	byRole[r.ID] = r
+	s.touchMeta()
 }
 
 // RemoveRole deletes a guild role.
 func (s *Store) RemoveRole(guild GuildID, role RoleID) {
 	delete(s.roles[guild], role)
+	s.touchMeta()
 }
 
 // Role resolves a guild role by ID.
