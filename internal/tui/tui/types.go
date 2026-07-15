@@ -86,3 +86,18 @@ type FocusOwnerIndicator interface {
 type PreferredFocus interface {
 	PreferredFocus() bool
 }
+
+// VimFocusTraverser opts a focused widget into h/l focus traversal. The widget
+// may consume the key for a local expand/unfold action; returning false asks
+// the runtime to move through the normal focus ring.
+type VimFocusTraverser interface {
+	VimFocusEnabled() bool
+	HandleVimFocus(forward bool) bool
+}
+
+// FocusRequester lets a root widget request an exact focus transfer after the
+// current event has finished routing. Modal input modes use it to move between
+// a navigation surface and an editor without exposing the FocusManager.
+type FocusRequester interface {
+	TakeFocusRequest() Widget
+}

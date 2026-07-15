@@ -215,11 +215,14 @@ func TestDefaultAccessibilityPreservesMouseAndSkipsSplitFocus(t *testing.T) {
 	if cfg.Accessibility.FocusSplits {
 		t.Fatal("split selectors should be skipped by default")
 	}
+	if cfg.Accessibility.VimNavigation || cfg.Accessibility.MouseBreakpointTracking || cfg.Accessibility.HighlightFocusBlock {
+		t.Fatalf("Vim and mouse breakpoint tracking must be opt-in: %+v", cfg.Accessibility)
+	}
 }
 
 func TestLoadFromAccessibilitySection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	contents := "[accessibility]\nmouse_on = false\nfocus_splits = true\n"
+	contents := "[accessibility]\nmouse_on = false\nfocus_splits = true\nvim_navigation = true\nmouse_breakpoint_tracking = true\nhighlight_focus_block = true\n"
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -228,8 +231,8 @@ func TestLoadFromAccessibilitySection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadFrom: %v", err)
 	}
-	if cfg.Accessibility.MouseOn || !cfg.Accessibility.FocusSplits {
-		t.Fatalf("accessibility = %+v, want mouse off and split focus on", cfg.Accessibility)
+	if cfg.Accessibility.MouseOn || !cfg.Accessibility.FocusSplits || !cfg.Accessibility.VimNavigation || !cfg.Accessibility.MouseBreakpointTracking || !cfg.Accessibility.HighlightFocusBlock {
+		t.Fatalf("accessibility = %+v, want explicit accessibility options enabled", cfg.Accessibility)
 	}
 }
 

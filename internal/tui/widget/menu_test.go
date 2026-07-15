@@ -51,6 +51,19 @@ func TestMenuArrowNavigationSkipsSeparatorsAndDisabled(t *testing.T) {
 	}
 }
 
+func TestMenuVimJKNavigation(t *testing.T) {
+	m := NewMenu([]MenuItem{{Label: "reply"}, {Label: "delete"}})
+	m.SetVimNavigation(true)
+	m.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'})
+	if got := m.Selected(); got != 1 {
+		t.Fatalf("after j selection = %d, want 1", got)
+	}
+	m.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'})
+	if got := m.Selected(); got != 0 {
+		t.Fatalf("after k selection = %d, want 0", got)
+	}
+}
+
 func TestMenuEnterActivatesAndDismisses(t *testing.T) {
 	var chosen string
 	dismissed := false

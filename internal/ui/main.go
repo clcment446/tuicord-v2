@@ -7,6 +7,7 @@
 package ui
 
 import (
+	"fmt"
 	"image"
 	"os"
 	"strconv"
@@ -23,6 +24,8 @@ import (
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
+
+	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // Sidebar row glyphs: collapse arrows and the local-pin marker.
@@ -46,11 +49,14 @@ type MainView struct {
 	chatBorder       *widget.Border
 	composerBorder   *widget.Border
 	composerStatus   *widget.Text
+	composerFiles    *widget.Text
 	composer         *widget.TextInput
+	attachments      []queuedAttachment
 	composerMode     composerMode
 	composerTarget   store.Message
 	replyMention     bool
 	composerReadOnly bool
+	inputMode        bool
 	onComposerChange func(string, int)
 	onLocalCommand   func(string) bool
 
@@ -98,6 +104,8 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.guildList.SetSelectedStyle(styles.Cell("guilds.selected"))
 	mv.guildList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.guildList.OnSelect(mv.onGuildSelected)
+	mv.guildList.OnVimFocus(mv.unfoldSelectedGuildFolder)
+	mv.guildList.SetVimNavigation(cfg.Accessibility.VimNavigation)
 
 	mv.channelList = widget.NewItemList(nil)
 	mv.channelList.SetStyle(styles.Cell("guilds.channels"))
@@ -105,11 +113,17 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.channelList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.channelList.OnSelect(mv.onChannelSelected)
 	mv.channelList.OnHover(mv.onChannelHovered)
+	mv.channelList.OnVimFocus(mv.unfoldSelectedChannelCategory)
+	mv.channelList.SetVimNavigation(cfg.Accessibility.VimNavigation)
 
 	mv.memberList = widget.NewItemList(nil)
+	mv.memberList.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.memberList.SetStyle(styles.Cell("guilds.members"))
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
+	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)
 	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
 	mediaCfg := chatMediaConfig()
 	if fetcher := newChatMediaFetcher(mediaCfg); fetcher != nil {
@@ -119,12 +133,19 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.composerStatus = widget.NewText("")
 	mv.composerStatus.SetStyle(styles.Cell("composer.status"))
 	mv.composerStatus.SetWrap(false)
+	mv.composerFiles = widget.NewText("")
+	mv.composerFiles.SetStyle(styles.Cell("messages.attachment"))
+	mv.composerFiles.SetWrap(true)
 
 	mv.composer = widget.NewTextInput("Message")
+	mv.composer.SetPreferredFocus(!cfg.Accessibility.VimNavigation)
+	mv.composer.SetInputFocusEnabled(!cfg.Accessibility.VimNavigation)
 	mv.composer.SetStyle(styles.Cell("composer"))
 	mv.composer.SetPlaceholderStyle(styles.Cell("composer.placeholder"))
 	mv.composer.SetCursorStyle(styles.Cell("composer.cursor"))
+	mv.composer.SetMultiline(4)
 	mv.composer.OnSubmit(mv.onSend)
+	mv.composer.OnPaste(mv.importPastedAttachments)
 	mv.composer.OnChange(func(value string) {
 		if mv.onComposerChange != nil {
 			mv.onComposerChange(value, mv.composer.Cursor())
@@ -140,11 +161,13 @@ func (mv *MainView) compose() tui.Widget {
 	channels := mv.titled("Channels", mv.channelList)
 	members := mv.titled("Members", mv.memberList)
 
-	composerArea := widget.Column(mv.composerStatus, mv.composer)
+	composerArea := widget.Column(mv.composerStatus, mv.composerFiles, mv.composer)
 	composerArea.Children()[0].Layout().Basis = 1
 	composerArea.Children()[0].Layout().Grow = 0
 	composerArea.Children()[1].Layout().Basis = 1
 	composerArea.Children()[1].Layout().Grow = 0
+	composerArea.Children()[2].Layout().Basis = 4
+	composerArea.Children()[2].Layout().Grow = 0
 
 	mv.chatBorder = mv.titled("Messages", mv.chat)
 	mv.composerBorder = mv.titled("Composer", composerArea)
@@ -152,10 +175,11 @@ func (mv *MainView) compose() tui.Widget {
 		mv.chatBorder,
 		mv.composerBorder,
 	)
-	// Chat grows, composer is a fixed 3-row box (border + one line).
+	// Chat grows; the composer reserves room for four wrapped input rows and
+	// a compact attachment-chip line.
 	chatColumn.Children()[0].Layout().Grow = 1
 	composerNode := chatColumn.Children()[1].Layout()
-	composerNode.Basis = 4
+	composerNode.Basis = 8
 	composerNode.Grow = 0
 	mv.cfg.Layout.Element("messages").Apply(mv.chatBorder.Layout(), layout.Column)
 	mv.cfg.Layout.Element("composer").Apply(mv.composerBorder.Layout(), layout.Column)
@@ -364,6 +388,24 @@ func (mv *MainView) onGuildSelected(index int) {
 	mv.refreshMembers(guild)
 }
 
+func (mv *MainView) unfoldSelectedGuildFolder(_ bool) bool {
+	if mv == nil || mv.guildList == nil {
+		return false
+	}
+	index := mv.guildList.Selected()
+	if index < 0 || index >= len(mv.guildRows) {
+		return false
+	}
+	row := mv.guildRows[index]
+	if !row.Folder || !row.Collapsed {
+		return false
+	}
+	mv.state.ToggleCollapsedFolder(row.FolderID)
+	mv.persist()
+	mv.rebuildGuilds()
+	return true
+}
+
 // RefreshChannels rebuilds the channel list (and its unread badges) from the
 // store. Safe to call on the UI goroutine, e.g. from App.OnChange.
 func (mv *MainView) RefreshChannels() {
@@ -490,6 +532,24 @@ func (mv *MainView) onChannelSelected(index int) {
 	mv.updateChannelChrome()
 }
 
+func (mv *MainView) unfoldSelectedChannelCategory(_ bool) bool {
+	if mv == nil || mv.channelList == nil {
+		return false
+	}
+	index := mv.channelList.Selected()
+	if index < 0 || index >= len(mv.channelRows) {
+		return false
+	}
+	row := mv.channelRows[index]
+	if !row.Category || !row.Collapsed {
+		return false
+	}
+	mv.state.ToggleCollapsedCategory(uint64(row.ChannelID))
+	mv.persist()
+	mv.refreshChannels()
+	return true
+}
+
 func (mv *MainView) onChannelHovered(index int) {
 	if mv == nil || index < 0 || index >= len(mv.channelRows) || mv.onForumHover == nil {
 		return
@@ -596,6 +656,7 @@ func (mv *MainView) openForum(id store.ChannelID) {
 	mv.app.LoadArchivedThreads(id)
 	if mv.forumView == nil {
 		mv.forumView = NewForumView(mv.styles, mv.ascii, mv.onOpenPost, mv.app.LoadArchivedThreads)
+		mv.forumView.SetVimNavigation(mv.cfg.Accessibility.VimNavigation)
 		mv.forumView.onFilterCycle = mv.refreshForum
 		mv.forumView.onFilterMenu = mv.onForumFilter
 		mv.forumView.onNavigate = mv.navigateForum
@@ -842,7 +903,18 @@ func (mv *MainView) resolver() markup.Resolver {
 }
 
 func (mv *MainView) onSend(content string) {
-	if content == "" || mv.composerReadOnly {
+	if updated, attachments, err := importDollarPaths(mv.workspaceRoot(), content); err != nil {
+		mv.reportUploadError(err)
+		return
+	} else {
+		content = updated
+		for _, attachment := range attachments {
+			if !mv.hasAttachment(attachment.path) {
+				mv.attachments = append(mv.attachments, attachment)
+			}
+		}
+	}
+	if (content == "" && len(mv.attachments) == 0) || mv.composerReadOnly {
 		return
 	}
 	if mv.composerMode == composerNormal && mv.onLocalCommand != nil && mv.onLocalCommand(content) {
@@ -864,9 +936,103 @@ func (mv *MainView) onSend(content string) {
 		mv.app.EditMessage(mv.composerTarget.ChannelID, mv.composerTarget.ID, content)
 		mv.CancelComposerMode()
 	default:
-		mv.app.Send(content)
+		files, optimistic, cleanup, err := mv.openAttachments()
+		if err != nil {
+			mv.reportUploadError(err)
+			return
+		}
+		mv.app.SendFiles(content, files, optimistic, cleanup)
 	}
 	mv.composer.SetValue("")
+	mv.clearAttachments()
+}
+
+func (mv *MainView) importPastedAttachments(value string) bool {
+	attachments, imported, err := pastedWorkspacePaths(mv.workspaceRoot(), value)
+	if err != nil {
+		mv.reportUploadError(err)
+		return true
+	}
+	if !imported {
+		return false
+	}
+	for _, attachment := range attachments {
+		if !mv.hasAttachment(attachment.path) {
+			mv.attachments = append(mv.attachments, attachment)
+		}
+	}
+	mv.updateAttachmentChips()
+	return true
+}
+
+func (mv *MainView) workspaceRoot() string {
+	root, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return root
+}
+
+func (mv *MainView) hasAttachment(path string) bool {
+	for _, attachment := range mv.attachments {
+		if attachment.path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (mv *MainView) openAttachments() ([]sendpart.File, []store.Attachment, func(), error) {
+	files := make([]sendpart.File, 0, len(mv.attachments))
+	optimistic := make([]store.Attachment, 0, len(mv.attachments))
+	closers := make([]*os.File, 0, len(mv.attachments))
+	for _, attachment := range mv.attachments {
+		file, err := os.Open(attachment.path)
+		if err != nil {
+			for _, open := range closers {
+				_ = open.Close()
+			}
+			return nil, nil, nil, fmt.Errorf("open %q: %w", attachment.meta.Filename, err)
+		}
+		closers = append(closers, file)
+		files = append(files, sendpart.File{Name: attachment.meta.Filename, Reader: file})
+		optimistic = append(optimistic, attachment.meta)
+	}
+	cleanup := func() {
+		for _, file := range closers {
+			_ = file.Close()
+		}
+	}
+	return files, optimistic, cleanup, nil
+}
+
+func (mv *MainView) clearAttachments() {
+	mv.attachments = nil
+	mv.updateAttachmentChips()
+}
+
+func (mv *MainView) updateAttachmentChips() {
+	if mv.composerFiles == nil {
+		return
+	}
+	chips := make([]string, 0, len(mv.attachments))
+	for _, attachment := range mv.attachments {
+		chips = append(chips, attachment.meta.Filename+" ("+formatAttachmentSize(attachment.meta.Size)+")")
+	}
+	mv.composerFiles.SetContent(strings.Join(chips, " · "))
+}
+
+func formatAttachmentSize(size int64) string {
+	if size < 1024 {
+		return strconv.FormatInt(size, 10) + " B"
+	}
+	return strconv.FormatInt((size+1023)/1024, 10) + " KiB"
+}
+
+func (mv *MainView) reportUploadError(err error) {
+	if mv.reportErr != nil {
+		mv.reportErr(err)
+	}
 }
 
 // InsertIntoComposer drops s at the composer cursor. The picker uses it to
@@ -942,18 +1108,40 @@ func (mv *MainView) updateComposerStatus() {
 		mv.composerStatus.SetContent("read-only — you can't send messages here")
 		return
 	}
+	modePrefix := ""
+	if mv.inputMode {
+		modePrefix = "INPUT"
+	}
+	withMode := func(detail string) string {
+		if modePrefix == "" {
+			return detail
+		}
+		return modePrefix + " · " + detail
+	}
 	switch mv.composerMode {
 	case composerReply:
 		mode := "on"
 		if !mv.replyMention {
 			mode = "off"
 		}
-		mv.composerStatus.SetContent("replying to " + mv.composerTarget.Author + " [mention: " + mode + "]")
+		mv.composerStatus.SetContent(withMode("replying to " + mv.composerTarget.Author + " [mention: " + mode + "]"))
 	case composerEdit:
-		mv.composerStatus.SetContent("editing")
+		mv.composerStatus.SetContent(withMode("editing"))
 	default:
-		mv.composerStatus.SetContent("")
+		mv.composerStatus.SetContent(modePrefix)
 	}
+}
+
+// SetInputMode updates the composer mode indicator used by Vim navigation.
+func (mv *MainView) SetInputMode(enabled bool) {
+	if mv == nil {
+		return
+	}
+	mv.inputMode = enabled
+	if mv.composer != nil && mv.cfg.Accessibility.VimNavigation {
+		mv.composer.SetInputFocusEnabled(enabled)
+	}
+	mv.updateComposerStatus()
 }
 
 func titled(title string, child tui.Widget) *widget.Border {

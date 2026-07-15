@@ -34,14 +34,15 @@ type forumTarget struct {
 // (not an overlay). Selecting a post opens it as the active channel; the footer
 // paginates archived posts.
 type ForumView struct {
-	header  *widget.Text
-	list    *widget.ItemList
-	body    tui.Widget
-	node    layout.Node
-	styles  Styles
-	ascii   bool
-	forum   store.Channel
-	targets []forumTarget
+	header        *widget.Text
+	list          *widget.ItemList
+	body          tui.Widget
+	node          layout.Node
+	styles        Styles
+	ascii         bool
+	vimNavigation bool
+	forum         store.Channel
+	targets       []forumTarget
 
 	// filterIdx is 0 for "all", else 1+index into forum.Forum.Tags.
 	filterIdx int
@@ -257,6 +258,19 @@ func (fv *ForumView) Draw(screen.Region) {}
 // CanFocus lets the forum view take keyboard focus for list navigation.
 func (fv *ForumView) CanFocus() bool { return true }
 
+// VimFocusEnabled is false until the containing MainView opts this view in.
+func (fv *ForumView) VimFocusEnabled() bool { return fv != nil && fv.vimNavigation }
+
+func (fv *ForumView) SetVimNavigation(enabled bool) {
+	if fv != nil {
+		fv.vimNavigation = enabled
+		fv.list.SetVimNavigation(enabled)
+	}
+}
+
+// HandleVimFocus lets h/l traverse the surrounding panel focus ring.
+func (fv *ForumView) HandleVimFocus(bool) bool { return false }
+
 // filterChanged is set by Handle so the container can rebuild the list.
 func (fv *ForumView) Handle(ev tui.Event) bool {
 	if key, ok := ev.(input.KeyEvent); ok && !key.Release {
@@ -267,17 +281,26 @@ func (fv *ForumView) Handle(ev tui.Event) bool {
 			return true
 		}
 		if fv.onNavigate != nil {
+			direction := 0
 			switch key.Key {
 			case input.KeyUp:
-				if fv.list.Selected() <= 0 {
-					fv.onNavigate(-1)
-					return true
-				}
+				direction = -1
 			case input.KeyDown:
-				if fv.list.Selected() >= len(fv.list.Items())-1 {
-					fv.onNavigate(1)
-					return true
+				direction = 1
+			case input.KeyRune:
+				if fv.vimNavigation && key.Mods == 0 && key.Rune == 'k' {
+					direction = -1
+				} else if fv.vimNavigation && key.Mods == 0 && key.Rune == 'j' {
+					direction = 1
 				}
+			}
+			if direction < 0 && fv.list.Selected() <= 0 {
+				fv.onNavigate(-1)
+				return true
+			}
+			if direction > 0 && fv.list.Selected() >= len(fv.list.Items())-1 {
+				fv.onNavigate(1)
+				return true
 			}
 		}
 	}

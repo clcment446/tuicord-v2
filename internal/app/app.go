@@ -28,6 +28,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/session"
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/json/option"
+	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // poster is the slice of tui.App the orchestrator depends on. It exists so the
@@ -939,21 +940,41 @@ func (a *App) handleRoleUpsert(guild discord.GuildID, role discord.Role) {
 // style). On success the reconciliation happens when the gateway echoes the
 // message back (matched by nonce), so no duplicate appears.
 func (a *App) Send(content string) {
-	if content == "" || a.activeChannel == 0 {
+	a.SendFiles(content, nil, nil, nil)
+}
+
+// SendFiles posts message content and/or uploaded files to the active channel
+// with an optimistic local echo. cleanup runs after the multipart request has
+// completed (whether it succeeds or fails), and also runs immediately when a
+// send cannot be started. It is intended for closing opened files and removing
+// managed temporary clipboard uploads.
+func (a *App) SendFiles(content string, files []sendpart.File, optimistic []store.Attachment, cleanup func()) {
+	if a == nil || (content == "" && len(files) == 0) || a.activeChannel == 0 {
+		if cleanup != nil {
+			cleanup()
+		}
 		return
 	}
+
 	channel := a.activeChannel
 	nonce := newNonce()
-
+	fileCopy := append([]sendpart.File(nil), files...)
+	attachmentCopy := append([]store.Attachment(nil), optimistic...)
 	a.store.AppendMessage(store.Message{
-		ChannelID: channel,
-		Author:    "you",
-		Content:   content,
-		Nonce:     nonce,
-		Pending:   true,
+		ChannelID:   channel,
+		Author:      "you",
+		Content:     content,
+		Nonce:       nonce,
+		Pending:     true,
+		Attachments: attachmentCopy,
 	})
 
-	go a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce}, nonce)
+	go func() {
+		if cleanup != nil {
+			defer cleanup()
+		}
+		a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce, Files: fileCopy}, nonce)
+	}()
 }
 
 // SendSticker posts a native Discord sticker to the active channel.
@@ -1084,12 +1105,10 @@ func (a *App) EditMessage(channel store.ChannelID, id store.MessageID, content s
 	if channel == 0 || id == 0 {
 		return
 	}
-	go func() {
+	a.runInBackground(func() error {
 		_, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content)
-		if err != nil {
-			a.reportError(err)
-		}
-	}()
+		return err
+	})
 }
 
 // DeleteMessage deletes a message. Local removal waits for MESSAGE_DELETE.
@@ -1097,11 +1116,9 @@ func (a *App) DeleteMessage(channel store.ChannelID, id store.MessageID) {
 	if channel == 0 || id == 0 {
 		return
 	}
-	go func() {
-		if err := a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), ""); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), "")
+	})
 }
 
 // AddReaction applies the current user's reaction and lets the gateway update
@@ -1110,11 +1127,9 @@ func (a *App) AddReaction(channel store.ChannelID, id store.MessageID, emoji str
 	if channel == 0 || id == 0 || emoji == "" {
 		return
 	}
-	go func() {
-		if err := a.send.React(discord.ChannelID(channel), discord.MessageID(id), discord.APIEmoji(emoji)); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.send.React(discord.ChannelID(channel), discord.MessageID(id), discord.APIEmoji(emoji))
+	})
 }
 
 // SetPinned pins or unpins a message. Discord's pin event omits the message ID,
