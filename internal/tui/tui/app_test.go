@@ -105,6 +105,34 @@ func TestNonEscapeResetsEscapeExitCount(t *testing.T) {
 	}
 }
 
+func TestMouseEventsAreIgnoredWhenMouseModeIsOff(t *testing.T) {
+	app := New(WithMouse(false))
+	widget := &handlingWidget{testWidget: *newTestWidget("mouse", true)}
+	app.Render(widget, Size{W: 5, H: 1})
+
+	if app.Handle(input.MouseEvent{X: 1, Y: 0, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("mouse event should be ignored when mouse mode is off")
+	}
+	if widget.handled != 0 {
+		t.Fatalf("widget handled %d mouse events, want 0", widget.handled)
+	}
+}
+
+func TestFocusableSplitsCanBeEnabledByAppOption(t *testing.T) {
+	app := New(WithFocusableSplits(true))
+	first := &handlingWidget{testWidget: *newTestWidget("first", true)}
+	second := &handlingWidget{testWidget: *newTestWidget("second", true)}
+	root := &splitLikeWidget{children: []Widget{first, second}}
+	app.Render(root, Size{W: 10, H: 1})
+
+	if got := app.Focus.Len(); got != 3 {
+		t.Fatalf("focus ring length = %d, want split and two children", got)
+	}
+	if got := app.Focus.Focused(); got != root {
+		t.Fatal("focusable split should receive initial focus")
+	}
+}
+
 func TestOverlayDrawsAfterChildren(t *testing.T) {
 	child := &drawWidget{
 		testWidget: *newTestWidget("child", false),
@@ -156,6 +184,16 @@ func (w *handlingWidget) Handle(Event) bool {
 	w.handled++
 	return true
 }
+
+type splitLikeWidget struct {
+	testWidget
+	children []Widget
+	focused  bool
+}
+
+func (w *splitLikeWidget) SetFocusEnabled(enabled bool) { w.focus = enabled }
+func (w *splitLikeWidget) CanFocus() bool               { return w.focus }
+func (w *splitLikeWidget) Children() []Widget           { return w.children }
 
 type drawWidget struct {
 	testWidget

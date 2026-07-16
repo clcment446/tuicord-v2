@@ -118,6 +118,49 @@ func TestDefaultColorsUseVivianPalette(t *testing.T) {
 	}
 }
 
+func TestDefaultAccessibilityPreservesMouseAndSkipsSplitFocus(t *testing.T) {
+	cfg := Default()
+	if !cfg.Accessibility.MouseOn {
+		t.Fatal("mouse should be enabled by default")
+	}
+	if cfg.Accessibility.FocusSplits {
+		t.Fatal("split selectors should be skipped by default")
+	}
+}
+
+func TestLoadFromAccessibilitySection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[accessibility]\nmouse_on = false\nfocus_splits = true\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Accessibility.MouseOn || !cfg.Accessibility.FocusSplits {
+		t.Fatalf("accessibility = %+v, want mouse off and split focus on", cfg.Accessibility)
+	}
+}
+
+func TestSlashCommandIntegrationIsOptIn(t *testing.T) {
+	if Default().Integrations.SlashCommands.Enabled {
+		t.Fatal("slash commands must be disabled by default")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[integrations.slash_commands]\nenabled = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Integrations.SlashCommands.Enabled {
+		t.Fatal("slash_commands.enabled was not loaded")
+	}
+}
+
 func TestColorsStylesUseConfiguredColors(t *testing.T) {
 	styles := (Colors{
 		Text:      "#dcddde",

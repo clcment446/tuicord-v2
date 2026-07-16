@@ -3,11 +3,13 @@ package ui
 import (
 	"testing"
 
+	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
+	"github.com/diamondburned/arikawa/v3/session"
 )
 
 func TestChannelPrefixBadge(t *testing.T) {
@@ -42,6 +44,41 @@ func TestGuildItemFormatting(t *testing.T) {
 	}
 }
 
+func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	a := app.New(&session.Session{}, st, tui.New())
+	a.SetActive(1, 10)
+	st.IncrementPing(10)
+	st.IncrementPing(10)
+	mv := &MainView{app: a, state: &uistate.State{}, guildList: widget.NewItemList(nil), channelList: widget.NewItemList(nil)}
+	mv.rebuildGuilds()
+	mv.refreshChannels()
+	if got := mv.guildList.Items()[0].Badge; got != "2" {
+		t.Fatalf("server badge = %q, want 2", got)
+	}
+	if got := mv.channelList.Items()[0].Badge; got != "2" {
+		t.Fatalf("channel badge = %q, want 2", got)
+	}
+}
+
+func TestRefreshChannelsPreservesBrowsedSelection(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "active", Position: 1})
+	st.UpsertChannel(store.Channel{ID: 20, GuildID: 1, Name: "browsing", Position: 2})
+	a := app.New(&session.Session{}, st, tui.New())
+	a.SetActive(1, 10)
+	mv := &MainView{app: a, state: &uistate.State{}, channelList: widget.NewItemList(nil)}
+	mv.refreshChannels()
+	mv.channelList.SetSelectedSilent(1)
+	mv.refreshChannels()
+	if got := mv.channelRows[mv.channelList.Selected()].ChannelID; got != 20 {
+		t.Fatalf("selected channel after refresh = %d, want 20", got)
+	}
+}
+
 func TestOpenChannelMenuLabels(t *testing.T) {
 	st := &uistate.State{}
 	st.TogglePinnedChannel(5)
@@ -69,6 +106,21 @@ func TestOpenChannelMenuLabels(t *testing.T) {
 	buf = tui.New().Render(sh, tui.Size{W: 40, H: 8})
 	if !bufferContains(buf, "Expand") {
 		t.Fatal("collapsed category menu should offer Expand")
+	}
+}
+
+func TestOpenThreadMenuLabels(t *testing.T) {
+	st := &uistate.State{}
+	data := store.New(0)
+	data.UpsertChannel(store.Channel{ID: 8, Kind: store.ChannelThread, Thread: &store.ThreadMeta{}})
+	a := app.New(&session.Session{}, data, tui.New())
+	mv := &MainView{app: a, state: st, Root: widget.NewText("main")}
+	sh := &Shell{app: a, cfg: config.Default(), mv: mv}
+
+	sh.openThreadMenu(store.ChannelRow{ChannelID: 8, Kind: store.ChannelThread, Thread: true}, 2, 1)
+	buf := tui.New().Render(sh, tui.Size{W: 40, H: 10})
+	if !bufferContains(buf, "Pin thread") {
+		t.Fatal("unpinned thread menu should offer Pin thread")
 	}
 }
 

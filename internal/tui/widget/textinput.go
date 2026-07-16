@@ -376,6 +376,61 @@ func (w *TextInput) Insert(s string) {
 	w.changed()
 }
 
+// Replace replaces the byte range [start, end) with s. Both offsets are
+// normalized to grapheme boundaries so callers cannot split a user-perceived
+// character. The cursor is placed immediately after the replacement.
+func (w *TextInput) Replace(start, end int, s string) {
+	if w == nil || w.readOnly {
+		return
+	}
+	start = replaceStartBoundary(w.value, start)
+	end = replaceEndBoundary(w.value, end)
+	if end < start {
+		start, end = end, start
+	}
+	w.value = w.value[:start] + s + w.value[end:]
+	w.cursor = start + len(s)
+	w.scroll = 0
+	w.showCursor()
+	w.changed()
+}
+
+func replaceStartBoundary(value string, offset int) int {
+	if offset <= 0 {
+		return 0
+	}
+	if offset >= len(value) {
+		return len(value)
+	}
+	for cluster := range tuitext.Clusters(value) {
+		if offset <= cluster.Offset {
+			return cluster.Offset
+		}
+		if offset < cluster.Offset+len(cluster.Text) {
+			return cluster.Offset
+		}
+	}
+	return len(value)
+}
+
+func replaceEndBoundary(value string, offset int) int {
+	if offset <= 0 {
+		return 0
+	}
+	if offset >= len(value) {
+		return len(value)
+	}
+	for cluster := range tuitext.Clusters(value) {
+		if offset <= cluster.Offset {
+			return cluster.Offset
+		}
+		if offset < cluster.Offset+len(cluster.Text) {
+			return cluster.Offset + len(cluster.Text)
+		}
+	}
+	return len(value)
+}
+
 func (w *TextInput) insert(s string) {
 	w.value = w.value[:w.cursor] + s + w.value[w.cursor:]
 	w.cursor += len(s)

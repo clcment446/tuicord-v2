@@ -19,15 +19,17 @@ type Option func(*App)
 
 // App is the runtime coordinator for a retained widget tree.
 type App struct {
-	mu       sync.Mutex
-	root     Widget
-	size     Size
-	hits     HitIndex
-	dirty    bool
-	posts    []func()
-	wake     chan struct{}
-	theme    Theme
-	escExits int
+	mu          sync.Mutex
+	root        Widget
+	size        Size
+	hits        HitIndex
+	dirty       bool
+	posts       []func()
+	wake        chan struct{}
+	theme       Theme
+	escExits    int
+	mouseOn     bool
+	focusSplits bool
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -41,11 +43,23 @@ func New(opts ...Option) *App {
 		dirty:    true,
 		wake:     make(chan struct{}, 1),
 		escExits: 5,
+		mouseOn:  true,
 	}
 	for _, opt := range opts {
 		opt(a)
 	}
 	return a
+}
+
+// WithMouse controls whether the app dispatches mouse events and asks the
+// terminal runtime to enable mouse reporting.
+func WithMouse(enabled bool) Option {
+	return func(a *App) { a.mouseOn = enabled }
+}
+
+// WithFocusableSplits controls whether split selectors enter the focus ring.
+func WithFocusableSplits(enabled bool) Option {
+	return func(a *App) { a.focusSplits = enabled }
 }
 
 // Post schedules fn to run on the App event loop.
@@ -111,6 +125,7 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	measureHits(hits)
 	hits = BuildHitIndex(root, size)
 	widgets := collectWidgets(root)
+	applyFocusPolicy(widgets, a.focusSplits)
 	a.Focus.Replace(widgets)
 	applyFocusIndicators(widgets, a.Focus.Focused())
 	drawTree(buf, root, hits)
@@ -131,6 +146,9 @@ func (a *App) Handle(ev Event) bool {
 	}
 	switch ev := ev.(type) {
 	case input.MouseEvent:
+		if !a.mouseOn {
+			return false
+		}
 		return a.handleMouse(ev)
 	case input.KeyEvent:
 		return a.handleKey(ev)
@@ -150,7 +168,7 @@ func (a *App) RunContext(ctx context.Context, root Widget) error {
 	if a == nil {
 		a = New()
 	}
-	return term.Run(func(t *term.Terminal) error {
+	return term.RunWithOptions(term.Options{Mouse: a.mouseOn}, func(t *term.Terminal) error {
 		reader := input.NewReader(ctx, t)
 		sz, err := t.Size()
 		if err != nil {
@@ -421,11 +439,23 @@ func collectWidgets(root Widget) []Widget {
 
 func applyFocusIndicators(widgets []Widget, focused Widget) {
 	for _, w := range widgets {
+		if owner, ok := w.(FocusOwnerIndicator); ok {
+			owner.SetFocusOwner(sameWidget(w, focused))
+			continue
+		}
 		indicator, ok := w.(FocusIndicator)
 		if !ok {
 			continue
 		}
 		indicator.SetFocused(focused != nil && containsWidget(w, focused))
+	}
+}
+
+func applyFocusPolicy(widgets []Widget, focusSplits bool) {
+	for _, w := range widgets {
+		if configurable, ok := w.(FocusConfigurable); ok {
+			configurable.SetFocusEnabled(focusSplits)
+		}
 	}
 }
 

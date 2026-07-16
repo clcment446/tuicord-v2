@@ -57,10 +57,22 @@ type Focusable interface {
 	CanFocus() bool
 }
 
+// FocusConfigurable lets the runtime enable or disable optional focus targets
+// such as split selectors without coupling the core to a concrete widget.
+type FocusConfigurable interface {
+	SetFocusEnabled(bool)
+}
+
 // FocusIndicator is implemented by widgets that visually react when keyboard
 // focus is inside their retained subtree.
 type FocusIndicator interface {
 	SetFocused(bool)
+}
+
+// FocusOwnerIndicator is implemented by widgets whose visual state should
+// reflect exact focus ownership rather than focus anywhere in their subtree.
+type FocusOwnerIndicator interface {
+	SetFocusOwner(bool)
 }
 
 // PreferredFocus is implemented by widgets that should receive initial focus

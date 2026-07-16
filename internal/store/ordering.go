@@ -153,6 +153,14 @@ func (r ChannelRow) Navigable() bool {
 // points at an unknown category are treated as uncategorized. Category headers
 // with no surviving children are omitted.
 func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[ChannelID]bool) []ChannelRow {
+	return GroupChannelsWithPriority(channels, pinned, collapsed, nil)
+}
+
+// GroupChannelsWithPriority promotes local favorites first, then unread direct
+// messages with pings, then other pinged channels and threads. Promoted rows
+// are removed from their ordinary parent/category position so they never
+// appear twice. The remaining rows preserve Discord's position/activity order.
+func GroupChannelsWithPriority(channels []Channel, pinned []ChannelID, collapsed map[ChannelID]bool, priority map[ChannelID]bool) []ChannelRow {
 	pinnedSet := make(map[ChannelID]bool, len(pinned))
 	for _, id := range pinned {
 		pinnedSet[id] = true
@@ -186,30 +194,61 @@ func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[Channel
 	}
 
 	rows := make([]ChannelRow, 0, len(channels))
-	emit := func(c Channel, depth int, pinnedRow bool) {
-		rows = append(rows, channelContentRow(c, depth, pinnedRow))
-		for _, t := range threadsByParent[c.ID] {
-			rows = append(rows, threadRow(t, depth+1))
+	promoted := make(map[ChannelID]bool, len(pinned)+len(priority))
+	for _, id := range pinned {
+		promoted[id] = true
+	}
+	for id := range priority {
+		if !pinnedSet[id] {
+			promoted[id] = true
 		}
 	}
+	emitPromoted := func(c Channel, pinnedRow bool) {
+		if c.Kind == ChannelThread {
+			rows = append(rows, threadRow(c, 0, pinnedRow))
+			return
+		}
+		rows = append(rows, channelContentRow(c, 0, pinnedRow))
+	}
 
-	// Pinned section, in Position order, only content channels.
+	// Favorite rows, in Discord position order.
 	for _, c := range channels {
-		if c.Kind == ChannelCategory || c.Kind == ChannelThread || !pinnedSet[c.ID] {
+		if c.Kind == ChannelCategory || !pinnedSet[c.ID] {
 			continue
 		}
-		emit(c, 0, true)
+		emitPromoted(c, true)
+	}
+	// Pinged DMs are the first attention tier, immediately after favorites.
+	for _, c := range channels {
+		if c.Kind == ChannelDM && priority[c.ID] && !pinnedSet[c.ID] {
+			emitPromoted(c, false)
+		}
+	}
+	// Other pinged channels and threads follow, still ahead of ordinary rows.
+	for _, c := range channels {
+		if c.Kind == ChannelCategory || c.Kind == ChannelDM || !priority[c.ID] || pinnedSet[c.ID] {
+			continue
+		}
+		emitPromoted(c, false)
+	}
+	emit := func(c Channel, depth int) {
+		rows = append(rows, channelContentRow(c, depth, false))
+		for _, t := range threadsByParent[c.ID] {
+			if !promoted[t.ID] {
+				rows = append(rows, threadRow(t, depth+1, false))
+			}
+		}
 	}
 
 	// Uncategorized content channels (no parent, or an unknown parent).
 	for _, c := range channels {
-		if c.Kind == ChannelCategory || c.Kind == ChannelThread || pinnedSet[c.ID] {
+		if c.Kind == ChannelCategory || c.Kind == ChannelThread || promoted[c.ID] {
 			continue
 		}
 		if c.ParentID != 0 && categories[c.ParentID] {
 			continue
 		}
-		emit(c, 0, false)
+		emit(c, 0)
 	}
 
 	// Categories with their children.
@@ -221,12 +260,14 @@ func GroupChannels(channels []Channel, pinned []ChannelID, collapsed map[Channel
 		var children []ChannelRow
 		if !isCollapsed {
 			for _, c := range channels {
-				if c.Kind == ChannelCategory || c.Kind == ChannelThread || pinnedSet[c.ID] || c.ParentID != cat.ID {
+				if c.Kind == ChannelCategory || c.Kind == ChannelThread || promoted[c.ID] || c.ParentID != cat.ID {
 					continue
 				}
 				children = append(children, channelContentRow(c, 1, false))
 				for _, t := range threadsByParent[c.ID] {
-					children = append(children, threadRow(t, 2))
+					if !promoted[t.ID] {
+						children = append(children, threadRow(t, 2, false))
+					}
 				}
 			}
 		}
@@ -244,6 +285,6 @@ func channelContentRow(c Channel, depth int, pinned bool) ChannelRow {
 	return ChannelRow{Name: c.Name, Kind: c.Kind, Depth: depth, Indent: depth > 0, Pinned: pinned, ChannelID: c.ID}
 }
 
-func threadRow(c Channel, depth int) ChannelRow {
-	return ChannelRow{Name: c.Name, Kind: ChannelThread, Depth: depth, Indent: depth > 0, Thread: true, ChannelID: c.ID}
+func threadRow(c Channel, depth int, pinned bool) ChannelRow {
+	return ChannelRow{Name: c.Name, Kind: ChannelThread, Depth: depth, Indent: depth > 0, Thread: true, Pinned: pinned, ChannelID: c.ID}
 }

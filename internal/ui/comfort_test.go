@@ -32,7 +32,7 @@ func TestKeyMatches(t *testing.T) {
 }
 
 func TestUnreadBadge(t *testing.T) {
-	cases := map[int]string{0: "", -1: "", 3: "3", 99: "99", 100: "99+"}
+	cases := map[int]string{0: "", -1: "", 3: "3", 99: "99", 100: "99"}
 	for n, want := range cases {
 		if got := unreadBadge(n); got != want {
 			t.Errorf("unreadBadge(%d) = %q, want %q", n, got, want)

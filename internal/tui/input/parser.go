@@ -265,6 +265,11 @@ func (p *Parser) parseKittyKey(seq string) {
 }
 
 func (p *Parser) parseLegacyCSI(seq string, final byte) {
+	if final == 'Z' {
+		// CSI Z is the terminal-standard back-tab (Shift+Tab) sequence.
+		p.emit(KeyEvent{Key: KeyTab, Mods: Shift})
+		return
+	}
 	if key, ok := csiFinalKey(final); ok {
 		parts := splitParams(seq)
 		mods := Mod(0)

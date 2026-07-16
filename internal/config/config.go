@@ -84,14 +84,35 @@ type Auth struct {
 	PreferredMode string `toml:"preferred_mode"`
 }
 
+// Accessibility controls alternate input paths for users who prefer or need
+// keyboard-first navigation.
+type Accessibility struct {
+	MouseOn     bool `toml:"mouse_on"`
+	FocusSplits bool `toml:"focus_splits"`
+}
+
+// SlashCommands controls experimental user-client application-command support.
+// It is disabled by default because Discord does not document this client-side
+// protocol as a supported public integration surface.
+type SlashCommands struct {
+	Enabled bool `toml:"enabled"`
+}
+
+// Integrations groups optional external-service features.
+type Integrations struct {
+	SlashCommands SlashCommands `toml:"slash_commands"`
+}
+
 // Config is the full user configuration.
 type Config struct {
-	Layout  Layout  `toml:"layout"`
-	Keys    Keys    `toml:"keys"`
-	Colors  Colors  `toml:"colors"`
-	Nitro   Nitro   `toml:"nitro"`
-	Display Display `toml:"display"`
-	Auth    Auth    `toml:"auth"`
+	Layout        Layout        `toml:"layout"`
+	Keys          Keys          `toml:"keys"`
+	Colors        Colors        `toml:"colors"`
+	Nitro         Nitro         `toml:"nitro"`
+	Display       Display       `toml:"display"`
+	Auth          Auth          `toml:"auth"`
+	Accessibility Accessibility `toml:"accessibility"`
+	Integrations  Integrations  `toml:"integrations"`
 }
 
 const (
@@ -117,7 +138,8 @@ func Default() Config {
 			FocusComposer: "esc",
 			Picker:        "ctrl+e",
 		},
-		Nitro: Nitro{Fake: true},
+		Nitro:         Nitro{Fake: true},
+		Accessibility: Accessibility{MouseOn: true},
 		// The "miyabi" palette — Terafox teal dark theme.
 		Colors: Colors{
 			Background: "#152528",

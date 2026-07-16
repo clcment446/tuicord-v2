@@ -22,11 +22,15 @@ var ErrLoginAborted = errors.New("login aborted")
 //
 // It satisfies auth.PromptFunc when wrapped: the returned token is persisted by
 // auth.ResolveToken.
-func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode string, onModeSelected func(string)) (string, error) {
+func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode string, accessibility config.Accessibility, onModeSelected func(string)) (string, error) {
 	loginCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	app := tui.New(tui.WithTheme(theme))
+	app := tui.New(
+		tui.WithTheme(theme),
+		tui.WithMouse(accessibility.MouseOn),
+		tui.WithFocusableSplits(accessibility.FocusSplits),
+	)
 
 	var token string
 	setToken := func(t string) {

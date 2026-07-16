@@ -54,8 +54,9 @@ func TestPickerCustomTabNativeAndFakeNitro(t *testing.T) {
 		t.Fatalf("same-guild static insert = %q, want native mention", home.insert)
 	}
 	other := byName[":otherspin:"]
-	if !strings.HasPrefix(other.insert, "https://cdn.discordapp.com/emojis/20.gif") {
-		t.Fatalf("other-guild animated insert = %q, want fake-nitro url", other.insert)
+	want := "[emoji_otherspin](https://cdn.discordapp.com/emojis/20.gif?size=48&name=otherspin)"
+	if other.insert != want {
+		t.Fatalf("other-guild animated insert = %q, want %q", other.insert, want)
 	}
 	if !strings.Contains(other.label, "fake-nitro") {
 		t.Fatalf("fake-nitro entry not labelled: %q", other.label)
@@ -149,14 +150,14 @@ func TestPickerNativeStickerSelectionAndRecentOrder(t *testing.T) {
 	}
 }
 
-func TestPickerOtherGuildStickerUsesFakeNitroURL(t *testing.T) {
+func TestPickerOtherGuildStickerUsesFakeNitroLink(t *testing.T) {
 	st := newTestPickerStore()
 	st.SetGuildStickers(2, []store.GuildSticker{{ID: 200, Name: "other"}})
 	p := NewPicker(st, Styles{}, 1, false, true, func(string) {}, func() {})
 	p.setTab(tabSticker)
 	typeRunes(p, "other")
-	if len(p.filtered) != 1 || p.filtered[0].stickerID != 0 ||
-		!strings.Contains(p.filtered[0].insert, "/stickers/200.png") {
+	want := "[sticker_other](https://media.discordapp.net/stickers/200.png)"
+	if len(p.filtered) != 1 || p.filtered[0].stickerID != 0 || p.filtered[0].insert != want {
 		t.Fatalf("other-guild sticker = %+v", p.filtered)
 	}
 }
@@ -190,6 +191,16 @@ func TestPickerBackspace(t *testing.T) {
 	p.Handle(input.KeyEvent{Key: input.KeyBackspace})
 	if p.query != "fir" {
 		t.Fatalf("query after backspace = %q, want 'fir'", p.query)
+	}
+}
+
+func TestPickerRefreshPreservesSelection(t *testing.T) {
+	p := NewPicker(newTestPickerStore(), Styles{}, 1, false, true, func(string) {}, func() {})
+	p.setTab(tabCustom)
+	p.list.SetSelectedSilent(1)
+	p.refilter()
+	if got := p.list.Selected(); got != 1 {
+		t.Fatalf("selected after refresh = %d, want 1", got)
 	}
 }
 

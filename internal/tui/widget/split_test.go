@@ -109,6 +109,81 @@ func TestSplitCollapsesFirstPaneAndExpandsFromToggle(t *testing.T) {
 	}
 }
 
+func TestSplitIsNotKeyboardFocusable(t *testing.T) {
+	split := NewSplit(NewText("left"), NewText("right"))
+	if split.CanFocus() {
+		t.Fatal("split divider should not be selectable by Tab")
+	}
+
+	split.Basis(0)
+	if split.CanFocus() {
+		t.Fatal("collapsed split toggle should not be selectable by Tab")
+	}
+}
+
+func TestTabAndShiftTabTraverseInputsWithoutSelectingSplitSeparators(t *testing.T) {
+	first := NewTextInput("first")
+	second := NewTextInput("second")
+	root := NewSplit(first, second).Basis(10)
+	app := tui.New()
+	app.Render(root, tui.Size{W: 30, H: 1})
+
+	if got := app.Focus.Len(); got != 2 {
+		t.Fatalf("focus ring length = %d, want 2 inputs only", got)
+	}
+	if got := app.Focus.Focused(); got != first {
+		t.Fatal("first input should receive initial focus")
+	}
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyTab}) {
+		t.Fatal("Tab should be handled while an input is focused")
+	}
+	if got := app.Focus.Focused(); got != second {
+		t.Fatal("Tab should move focus to the second input")
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}) {
+		t.Fatal("Shift+Tab should be handled while an input is focused")
+	}
+	if got := app.Focus.Focused(); got != first {
+		t.Fatal("Shift+Tab should move focus back to the first input")
+	}
+}
+
+func TestFocusableSplitCanBeActivatedWithEnterAndSpace(t *testing.T) {
+	split := NewSplit(NewText("left"), NewText("right")).Basis(5).CollapsibleFirst()
+	app := tui.New(tui.WithFocusableSplits(true))
+	app.Render(split, tui.Size{W: 12, H: 2})
+
+	if got := app.Focus.Focused(); got != split {
+		t.Fatal("focusable split should receive focus")
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: ' '}) {
+		t.Fatal("Space should collapse a focused split")
+	}
+	if len(split.Children()) != 1 {
+		t.Fatal("Space did not collapse the split")
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyEnter}) {
+		t.Fatal("Enter should expand a focused split")
+	}
+	if len(split.Children()) != 2 {
+		t.Fatal("Enter did not expand the split")
+	}
+}
+
+func TestFocusableSecondSplitCanBeCollapsedWithSpace(t *testing.T) {
+	split := NewSplit(NewText("left"), NewText("right")).Basis(5).CollapsibleSecond()
+	app := tui.New(tui.WithFocusableSplits(true))
+	app.Render(split, tui.Size{W: 12, H: 2})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: ' '}) {
+		t.Fatal("Space should collapse a focused second split")
+	}
+	if len(split.Children()) != 1 {
+		t.Fatal("Space did not collapse the second split")
+	}
+}
+
 func TestSplitCollapsesSecondPaneAndExpandsFromToggle(t *testing.T) {
 	split := NewSplit(NewText("left"), NewText("right")).Basis(5).CollapsibleSecond()
 	split.main = 10

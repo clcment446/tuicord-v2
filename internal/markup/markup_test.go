@@ -136,6 +136,37 @@ func TestParseLink(t *testing.T) {
 	}
 }
 
+func TestParseMarkedFakeNitroLinks(t *testing.T) {
+	emojiURL := "https://cdn.discordapp.com/emojis/7.gif?size=48&name=spin"
+	stickerURL := "https://media.discordapp.net/stickers/42.png"
+	spans := Parse("[emoji_spin]("+emojiURL+") [sticker_hello]("+stickerURL+")", Resolver{})
+	want := []Span{
+		{Kind: Kind_FakeEmoji, Text: "spin", URL: emojiURL},
+		{Kind: Kind_Text, Text: " "},
+		{Kind: Kind_FakeSticker, Text: "hello", URL: stickerURL},
+	}
+	assertSpans(t, spans, want)
+}
+
+func TestParseMarkerLookingOrdinaryLinks(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		label string
+		url   string
+	}{
+		{"empty emoji name", "[emoji_](https://example.com)", "emoji_", "https://example.com"},
+		{"emoji label with non-CDN URL", "[emoji_release-notes](https://example.com/docs)", "emoji_release-notes", "https://example.com/docs"},
+		{"sticker label with emoji URL", "[sticker_wave](https://cdn.discordapp.com/emojis/7.png)", "sticker_wave", "https://cdn.discordapp.com/emojis/7.png"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spans := Parse(tt.input, Resolver{})
+			assertSpans(t, spans, []Span{{Kind: Kind_Link, Text: tt.label, URL: tt.url}})
+		})
+	}
+}
+
 func TestParseMalformedDegradesToText(t *testing.T) {
 	// Unterminated constructs stay literal.
 	for _, in := range []string{"**bold", "`code", "[label](url", "<@notanumber>", "<broken"} {

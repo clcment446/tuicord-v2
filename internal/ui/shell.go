@@ -6,6 +6,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
@@ -26,26 +29,66 @@ import (
 // Children returns whichever subtree is active, so focus, hit-testing, and
 // drawing all follow.
 type Shell struct {
-	mv           *MainView
-	app          *app.App
-	cfg          config.Config
-	styles       Styles
-	overlay      tui.Widget // nil = show the main view
-	popup        tui.Widget // small interactive layer drawn over current()
-	toast        *Toast
-	forumPreview *forumPreview
-	cancel       context.CancelFunc
-	node         layout.Node
+	mv             *MainView
+	app            *app.App
+	cfg            config.Config
+	styles         Styles
+	overlay        tui.Widget // nil = show the main view
+	popup          tui.Widget // small interactive layer drawn over current()
+	toast          *Toast
+	forumPreview   *forumPreview
+	completionSync bool
+	commandLoading bool
+	prefetch       *idleMediaPrefetcher
+	prefetchIdle   bool
+	lastActivity   time.Time
+	cancel         context.CancelFunc
+	node           layout.Node
 }
 
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), node: layout.Node{Grow: 1}}
+	mediaCfg := chatMediaConfig()
+	s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	mv.onNewForumPost = s.openForumPostPrompt
 	mv.onForumFilter = s.openForumFilterMenu
 	mv.onForumHover = s.setForumHover
+	mv.SetComposerChange(s.composerChanged)
+	mv.SetLocalCommandHandler(s.runLocalCommand)
 	// ForumView is created lazily; MainView invokes this hook when it exists.
 	return s
+}
+
+func (s *Shell) runLocalCommand(input string) bool {
+	command, ok := parseLocalCommand(input)
+	if !ok {
+		return false
+	}
+	switch command.name {
+	case "help":
+		s.ShowNotice("Local commands", ";help [command] · ;quit · ;switch <query> · ;settings")
+	case "quit":
+		s.prefetch.Stop()
+		if s.cancel != nil {
+			s.cancel()
+		}
+	case "switch":
+		s.openQuickSwitcher()
+		if qs, ok := s.overlay.(*QuickSwitcher); ok && len(command.args) > 0 {
+			qs.input.SetValue(strings.Join(command.args, " "))
+		}
+	case "settings":
+		guild := s.app.ActiveGuild()
+		if guild == 0 || guild == app.DirectMessagesGuildID {
+			s.ShowNotice("Settings unavailable", "Server settings are not available in direct messages")
+		} else {
+			s.openServerSettings(guild)
+		}
+	default:
+		s.ShowNotice("Unknown local command", "Use ;help to list local commands")
+	}
+	return true
 }
 
 func (s *Shell) openForumPostPrompt(title string) {
@@ -111,6 +154,16 @@ func (s *Shell) DrawOverlay(r screen.Region) {
 // Handle routes global shortcuts and overlay dismissal, delegating everything
 // else to the active subtree.
 func (s *Shell) Handle(ev tui.Event) bool {
+	if _, idle := ev.(input.TickEvent); idle {
+		if !s.prefetchIdle && prefetchEligible(s.lastActivity, time.Now()) {
+			s.prefetchIdle = true
+			s.prefetch.Start(mediaPrefetchURLs(s.app.Store(), s.app.ActiveGuild()))
+		}
+	} else if userActivity(ev) {
+		s.prefetchIdle = false
+		s.lastActivity = time.Now()
+		s.prefetch.Stop()
+	}
 	key, isKey := ev.(input.KeyEvent)
 
 	if s.toast != nil && s.toast.Handle(ev) {
@@ -154,6 +207,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
+		case key.Key == input.KeyRune && key.Rune == '+' && key.Mods == 0:
+			s.openHotSwitch()
+			return true
 		case key.Key == input.KeyEsc && s.mv.CancelComposerMode():
 			return true
 		case keyMatches(key, s.cfg.Keys.QuickSwitcher):
@@ -177,6 +233,25 @@ func (s *Shell) Handle(ev tui.Event) bool {
 		return true
 	}
 	return handled
+}
+
+const idlePrefetchDelay = 2 * time.Second
+
+func prefetchEligible(lastActivity, now time.Time) bool {
+	return !lastActivity.IsZero() && !now.Before(lastActivity) && now.Sub(lastActivity) >= idlePrefetchDelay
+}
+
+func userActivity(ev tui.Event) bool {
+	switch ev := ev.(type) {
+	case input.KeyEvent:
+		return !ev.Release
+	case input.MouseEvent:
+		return ev.Kind == input.MousePress
+	case input.PasteEvent:
+		return ev.Text != ""
+	default:
+		return false
+	}
 }
 
 func (s *Shell) setForumHover(id store.ChannelID, isForum bool) {
@@ -335,6 +410,20 @@ func (s *Shell) openQuickSwitcher() {
 	)
 }
 
+// openHotSwitch opens the lightweight + picker from any focused panel.
+func (s *Shell) openHotSwitch() {
+	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
+		'+', "", func(string) {}, nil, s.closeOverlay)
+	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
+		s.app.SetActive(guild, channel)
+		s.mv.Refresh()
+		if c, ok := s.app.Store().Channel(channel); ok && c.Kind != store.ChannelForum {
+			s.app.LoadHistory(channel, 50)
+		}
+	})
+	s.overlay = p
+}
+
 // openPicker opens the emoji/sticker picker overlay over the composer. Chosen
 // entries are inserted at the composer cursor.
 func (s *Shell) openPicker() {
@@ -345,11 +434,143 @@ func (s *Shell) openPicker() {
 	)
 	p.SetGIFSearch(s.app.SearchGIFs)
 	p.SetRecentStickers(s.mv.recentStickers())
+	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers(), s.mv.toggleFavorite)
+	p.SetMedia(newChatMediaFetcher(chatMediaConfig()), chatMediaConfig(), s.app.Post)
 	p.SetStickerSelect(func(id uint64) {
 		s.app.SendSticker(id)
 	})
 	p.SetStickerRecent(s.mv.recordRecentSticker)
 	s.overlay = p
+}
+
+// composerChanged opens or refreshes the relevant autocomplete menu when the
+// token immediately before the cursor starts with a supported trigger.
+func (s *Shell) composerChanged(value string, cursor int) {
+	if s.completionSync {
+		return
+	}
+	trigger, start, query, ok := completionToken(value, cursor)
+	if !ok {
+		if _, inline := s.overlay.(*InlinePicker); inline {
+			s.closeOverlay()
+		}
+		return
+	}
+	if trigger == '/' {
+		if !s.cfg.Integrations.SlashCommands.Enabled {
+			if _, picker := s.overlay.(*CommandPicker); picker {
+				s.closeOverlay()
+			}
+			return
+		}
+		if _, picker := s.overlay.(*CommandPicker); picker {
+			return
+		}
+		s.openCommandPicker(query)
+		return
+	}
+	if _, inline := s.overlay.(*InlinePicker); inline {
+		return
+	}
+	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
+		trigger, query,
+		func(insert string) {
+			s.replaceCompletion(start, insert)
+		},
+		func(stickerID uint64) {
+			s.app.SendSticker(stickerID)
+		},
+		s.closeOverlay,
+	)
+	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers())
+	p.SetQueryChange(func(next string) {
+		s.completionSync = true
+		s.mv.ReplaceComposerRange(start, start+len(query)+1, string(trigger)+next)
+		s.completionSync = false
+		query = next
+	})
+	p.SetTriggerDelete(func() {
+		s.completionSync = true
+		s.mv.ReplaceComposerRange(start, start+1, "")
+		s.completionSync = false
+	})
+	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
+		s.replaceCompletion(start, "")
+		s.app.SetActive(guild, channel)
+		s.mv.Refresh()
+		if c, ok := s.app.Store().Channel(channel); ok && c.Kind != store.ChannelForum {
+			s.app.LoadHistory(channel, 50)
+		}
+	})
+	p.SetMedia(newChatMediaFetcher(chatMediaConfig()), chatMediaConfig(), s.app.Post)
+	s.overlay = p
+}
+
+func (s *Shell) openCommandPicker(query string) {
+	if s.commandLoading || s.app.ActiveChannel() == 0 {
+		return
+	}
+	s.commandLoading = true
+	ctx := app.CommandContext{GuildID: s.app.ActiveGuild(), ChannelID: s.app.ActiveChannel()}
+	go func() {
+		commands, err := s.app.LoadCommands(ctx)
+		s.app.Post(func() {
+			s.commandLoading = false
+			if err != nil {
+				s.ShowNotice("Slash commands unavailable", "Could not load Discord application commands")
+				return
+			}
+			if s.overlay != nil || !strings.HasPrefix(s.mv.composer.Value(), "/") {
+				return
+			}
+			s.overlay = NewCommandPicker(commands, s.styles, query, func(command app.ApplicationCommand) {
+				if len(command.Options) != 0 {
+					s.ShowNotice("Command options", "Guided command forms are not available yet")
+					return
+				}
+				s.mv.composer.SetValue("")
+				s.closeOverlay()
+				s.app.SubmitCommand(command, nil)
+			}, s.closeOverlay)
+		})
+	}()
+}
+
+func (s *Shell) replaceCompletion(start int, insert string) {
+	if p, ok := s.overlay.(*InlinePicker); ok {
+		startEnd := start + len(p.query) + 1
+		s.completionSync = true
+		s.mv.ReplaceComposerRange(start, startEnd, insert)
+		s.completionSync = false
+	}
+}
+
+// completionToken returns the current non-whitespace composer token when its
+// first rune is one of the autocomplete triggers.
+func completionToken(value string, cursor int) (rune, int, string, bool) {
+	if cursor < 0 || cursor > len(value) {
+		return 0, 0, "", false
+	}
+	start := cursor
+	for start > 0 {
+		prev := start - 1
+		for prev > 0 && (value[prev]&0xc0) == 0x80 {
+			prev--
+		}
+		r, _ := utf8.DecodeRuneInString(value[prev:start])
+		if unicode.IsSpace(r) {
+			break
+		}
+		start = prev
+	}
+	if start == cursor {
+		return 0, 0, "", false
+	}
+	trigger, size := utf8.DecodeRuneInString(value[start:])
+	if !strings.ContainsRune("/:%#@&+", trigger) {
+		return 0, 0, "", false
+	}
+	return trigger, start, value[start+size : cursor], true
 }
 
 func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
@@ -545,6 +766,10 @@ func (s *Shell) openThreadMenu(row store.ChannelRow, x, y int) {
 		archiveLabel = "Unarchive thread"
 	}
 	canManage := s.canManageThread(c)
+	pinLabel := "Pin thread"
+	if s.mv.IsChannelPinned(row.ChannelID) {
+		pinLabel = "Unpin thread"
+	}
 	items := []widget.MenuItem{
 		{Label: joinLabel, OnSelect: func() {
 			s.closePopup()
@@ -557,6 +782,11 @@ func (s *Shell) openThreadMenu(row store.ChannelRow, x, y int) {
 		{Label: archiveLabel, Disabled: !canManage, OnSelect: func() {
 			s.closePopup()
 			s.app.SetThreadArchived(row.ChannelID, !archived)
+		}},
+		{Separator: true},
+		{Label: pinLabel, OnSelect: func() {
+			s.closePopup()
+			s.mv.TogglePinChannel(row.ChannelID)
 		}},
 		{Separator: true},
 		{Label: "Copy channel ID", OnSelect: func() {

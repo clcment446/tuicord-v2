@@ -1,6 +1,7 @@
 package store
 
 import (
+	"reflect"
 	"testing"
 	"time"
 )
@@ -195,6 +196,26 @@ func TestGroupChannelsPinnedSectionNoDuplicate(t *testing.T) {
 	want := []string{"*dev", "[TEXT]", "  general"}
 	if !eqStrings(got, want) {
 		t.Fatalf("rows = %v, want %v", got, want)
+	}
+}
+
+func TestGroupChannelsPriorityPlacesDMsImmediatelyAfterPins(t *testing.T) {
+	channels := []Channel{
+		{ID: 1, Name: "pinned", Kind: ChannelText, Position: 0},
+		{ID: 2, Name: "dm", Kind: ChannelDM, Position: 1},
+		{ID: 3, Name: "pinged", Kind: ChannelText, Position: 2},
+		{ID: 4, Name: "ordinary", Kind: ChannelText, Position: 3},
+	}
+	rows := GroupChannelsWithPriority(channels, []ChannelID{1}, nil, map[ChannelID]bool{2: true, 3: true})
+	got := make([]ChannelID, 0, len(rows))
+	for _, row := range rows {
+		if !row.Category {
+			got = append(got, row.ChannelID)
+		}
+	}
+	want := []ChannelID{1, 2, 3, 4}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("priority rows = %v, want %v", got, want)
 	}
 }
 

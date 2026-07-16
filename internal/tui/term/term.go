@@ -64,6 +64,24 @@ func (s Size) CellPixels() (w, h int, ok bool) {
 	return w, h, true
 }
 
+// Options controls terminal capabilities enabled for a session.
+type Options struct {
+	// Mouse controls SGR mouse reporting. It defaults to true when using Run.
+	Mouse bool
+}
+
+type mouseSequences struct {
+	enable  string
+	disable string
+}
+
+func terminalMouseSequences(opts Options) mouseSequences {
+	if !opts.Mouse {
+		return mouseSequences{}
+	}
+	return mouseSequences{enable: enableSGRMouse, disable: disableSGRMouse}
+}
+
 // Capabilities describes terminal features the renderer and input layer can
 // choose to use. Values are conservative: false means "do not rely on it".
 type Capabilities struct {
@@ -79,22 +97,27 @@ type Capabilities struct {
 
 // Terminal is an open raw-mode terminal session.
 type Terminal struct {
-	file   *os.File
-	fd     int
-	state  *xterm.State
-	caps   Capabilities
-	resize chan Size
-	sig    chan os.Signal
-	done   chan struct{}
-	wg     sync.WaitGroup
-	once   sync.Once
-	err    error
+	file         *os.File
+	fd           int
+	state        *xterm.State
+	caps         Capabilities
+	resize       chan Size
+	sig          chan os.Signal
+	done         chan struct{}
+	wg           sync.WaitGroup
+	once         sync.Once
+	err          error
+	mouseEnabled bool
 }
 
 // Open switches the controlling terminal into raw mode, enters the alternate
 // screen, enables modern input reporting, probes capabilities, and starts a
 // coalesced SIGWINCH resize channel.
 func Open() (*Terminal, error) {
+	return open(Options{Mouse: true})
+}
+
+func open(opts Options) (*Terminal, error) {
 	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open tty: %w", err)
@@ -107,15 +130,17 @@ func Open() (*Terminal, error) {
 	}
 
 	t := &Terminal{
-		file:   f,
-		fd:     fd,
-		state:  state,
-		caps:   probeCapabilities(fd, os.Environ(), 30*time.Millisecond),
-		resize: make(chan Size, 1),
-		sig:    make(chan os.Signal, 1),
-		done:   make(chan struct{}),
+		file:         f,
+		fd:           fd,
+		state:        state,
+		caps:         probeCapabilities(fd, os.Environ(), 30*time.Millisecond),
+		resize:       make(chan Size, 1),
+		sig:          make(chan os.Signal, 1),
+		done:         make(chan struct{}),
+		mouseEnabled: opts.Mouse,
 	}
-	if _, err := f.WriteString(enterAltScreen + hideCursor + enableBracketedPaste + enableFocusEvents + enableSGRMouse); err != nil {
+	mouse := terminalMouseSequences(opts).enable
+	if _, err := f.WriteString(enterAltScreen + hideCursor + enableBracketedPaste + enableFocusEvents + mouse); err != nil {
 		t.Close()
 		return nil, fmt.Errorf("initialize terminal: %w", err)
 	}
@@ -130,7 +155,12 @@ func Open() (*Terminal, error) {
 // returning or repanicking. It is the safest entry point for programs whose main
 // loop owns the terminal for its whole lifetime.
 func Run(fn func(*Terminal) error) (err error) {
-	t, err := Open()
+	return RunWithOptions(Options{Mouse: true}, fn)
+}
+
+// RunWithOptions opens a configured terminal session and always restores it.
+func RunWithOptions(opts Options, fn func(*Terminal) error) (err error) {
+	t, err := open(opts)
 	if err != nil {
 		return err
 	}
@@ -209,7 +239,8 @@ func (t *Terminal) Close() error {
 		signal.Stop(t.sig)
 		t.wg.Wait()
 		if t.file != nil {
-			_, writeErr := t.file.WriteString(disableSGRMouse + disableFocusEvents + disableBracketedPaste + showCursor + leaveAltScreen)
+			mouse := terminalMouseSequences(Options{Mouse: t.mouseEnabled}).disable
+			_, writeErr := t.file.WriteString(mouse + disableFocusEvents + disableBracketedPaste + showCursor + leaveAltScreen)
 			restoreErr := xterm.Restore(t.fd, t.state)
 			closeErr := t.file.Close()
 			t.err = errors.Join(writeErr, restoreErr, closeErr)

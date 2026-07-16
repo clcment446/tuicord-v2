@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"awesomeProject/internal/markup"
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
@@ -113,6 +114,21 @@ func TestChatViewMarkupPreservesBackgroundForQuoteAndEmoji(t *testing.T) {
 	emojiStyle := view.markupStyle(markup.Span{Kind: markup.Kind_Emoji, Quoted: true}, base)
 	if emojiStyle.Bg != base.Bg {
 		t.Fatalf("quoted emoji background = %+v, want %+v", emojiStyle.Bg, base.Bg)
+	}
+}
+
+func TestChatViewRendersMarkedFakeNitroMedia(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+
+	emoji := view.renderContent("[emoji_spin](https://cdn.discordapp.com/emojis/7.gif?size=48&name=spin)", 80, screen.Style{})
+	if len(emoji) != 1 || len(emoji[0].segments) != 1 || emoji[0].segments[0].text != "  " {
+		t.Fatalf("fake emoji render = %+v, want a two-column inline-media placeholder", emoji)
+	}
+
+	sticker := view.renderContent("[sticker_hello](https://media.discordapp.net/stickers/42.png)", 80, screen.Style{})
+	if len(sticker) != 1 || len(sticker[0].segments) != 1 || sticker[0].segments[0].text != "[sticker: hello]" {
+		t.Fatalf("fake sticker render = %+v, want a sticker media fallback", sticker)
 	}
 }
 
@@ -591,14 +607,14 @@ func TestChatViewMouseWheelScrollsMessages(t *testing.T) {
 	if !view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelUp}) {
 		t.Fatal("wheel up was not handled")
 	}
-	if view.scroll != 1 {
-		t.Fatalf("scroll = %d, want 1", view.scroll)
+	if got := view.bottomScroll.Offset(); got != 1 {
+		t.Fatalf("scroll = %d, want 1", got)
 	}
 	if !view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelDown}) {
 		t.Fatal("wheel down was not handled")
 	}
-	if view.scroll != 0 {
-		t.Fatalf("scroll = %d, want 0", view.scroll)
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("scroll = %d, want 0", got)
 	}
 }
 
@@ -607,15 +623,67 @@ func TestChatViewEscapeReturnsToNewestMessages(t *testing.T) {
 
 	view.Handle(input.KeyEvent{Key: input.KeyUp})
 	view.Handle(input.KeyEvent{Key: input.KeyUp})
-	if view.scroll != 2 {
-		t.Fatalf("scroll = %d, want 2 before escape", view.scroll)
+	if got := view.bottomScroll.Offset(); got != 2 {
+		t.Fatalf("scroll = %d, want 2 before escape", got)
 	}
 
 	if !view.Handle(input.KeyEvent{Key: input.KeyEsc}) {
 		t.Fatal("escape was not handled")
 	}
-	if view.scroll != 0 {
-		t.Fatalf("scroll = %d after escape, want 0", view.scroll)
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("scroll = %d after escape, want 0", got)
+	}
+}
+
+func TestChatViewEscapeKeepsNewestRowVisibleWithStickyAuthor(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general"})
+	st.AppendMessage(store.Message{
+		ID:        1,
+		ChannelID: 1,
+		AuthorID:  42,
+		Author:    "alice",
+		Content:   "one two three four five six seven eight nine ten eleven twelve",
+	})
+	st.AppendMessage(store.Message{
+		ID:        2,
+		ChannelID: 1,
+		AuthorID:  43,
+		Author:    "bob",
+		Content:   "newest-row",
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(20, 4)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+	view.Handle(input.KeyEvent{Key: input.KeyUp})
+	view.Handle(input.KeyEvent{Key: input.KeyEsc})
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 0); got != "alice" {
+		t.Fatalf("sticky author row = %q, want alice", got)
+	}
+	if got := rowsText(buf); !strings.Contains(got, "newest-row") {
+		t.Fatalf("newest row disappeared after returning to bottom:\n%s", got)
+	}
+}
+
+func TestChatViewOneRowViewportPrioritizesNewestContent(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID:        1,
+		ChannelID: 1,
+		AuthorID:  42,
+		Author:    "alice",
+		Content:   "older words wrap across rows newest-row",
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(20, 1)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 0); !strings.Contains(got, "newest-row") {
+		t.Fatalf("one-row viewport = %q, want newest content", got)
 	}
 }
 
@@ -639,6 +707,32 @@ func TestChatViewKeepsReadingPositionWhenNewMessageArrives(t *testing.T) {
 
 	if got := rowsText(buf); got != want {
 		t.Fatalf("reading viewport moved after new message:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestChatViewKeepsReadingPositionWhenOlderMessagesArePrepended(t *testing.T) {
+	st := store.New(0)
+	for i := 0; i < 6; i++ {
+		st.AppendMessage(store.Message{ID: store.MessageID(i + 10), ChannelID: 1, Author: "alice", Content: fmt.Sprintf("message-%d", i)})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(30, 4)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+	if !view.Handle(input.MouseEvent{Kind: input.MouseWheel, Btn: input.ButtonWheelUp}) {
+		t.Fatal("wheel up was not handled")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	want := rowsText(buf)
+
+	st.PrependMessages(1, []store.Message{
+		{ID: 8, ChannelID: 1, Author: "alice", Content: "older-0"},
+		{ID: 9, ChannelID: 1, Author: "alice", Content: "older-1"},
+	})
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowsText(buf); got != want {
+		t.Fatalf("reading viewport moved after older history was prepended:\n got %q\nwant %q", got, want)
 	}
 }
 

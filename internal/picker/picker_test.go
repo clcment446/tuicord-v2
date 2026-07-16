@@ -161,10 +161,11 @@ func TestEmojiInsert(t *testing.T) {
 	if got, ok := EmojiInsert(5, "ok", false, true, false, true); !ok || got != "<:ok:5>" {
 		t.Fatalf("own static insert = %q,%v want native mention", got, ok)
 	}
-	// Not usable, fake nitro on → CDN URL.
+	// Not usable, fake nitro on → a marked link whose label names the emoji.
 	got, ok := EmojiInsert(7, "spin", true, false, false, true)
-	if !ok || media.ClassifyURL(got) != media.ClassEmoji {
-		t.Fatalf("fake-nitro insert = %q,%v want emoji url", got, ok)
+	want := "[emoji_spin](" + EmojiCDNURL(7, "spin", true) + ")"
+	if !ok || got != want {
+		t.Fatalf("fake-nitro insert = %q,%v want %q", got, ok, want)
 	}
 	// Not usable, fake nitro off → cannot insert.
 	if _, ok := EmojiInsert(7, "spin", true, false, false, false); ok {
@@ -173,11 +174,12 @@ func TestEmojiInsert(t *testing.T) {
 }
 
 func TestStickerInsert(t *testing.T) {
-	got, ok := StickerInsert(42, true)
-	if !ok || media.ClassifyURL(got) != media.ClassSticker {
-		t.Fatalf("sticker insert = %q,%v want sticker url", got, ok)
+	got, ok := StickerInsert(42, "hello", true)
+	want := "[sticker_hello](" + StickerCDNURL(42) + ")"
+	if !ok || got != want {
+		t.Fatalf("sticker insert = %q,%v want %q", got, ok, want)
 	}
-	if _, ok := StickerInsert(42, false); ok {
+	if _, ok := StickerInsert(42, "hello", false); ok {
 		t.Fatal("expected no sticker insert when fake-nitro disabled")
 	}
 }
