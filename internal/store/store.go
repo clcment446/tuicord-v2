@@ -292,6 +292,10 @@ type Store struct {
 	roles   map[GuildID]map[RoleID]Role
 
 	unread map[ChannelID]int
+	// pings counts unread messages that require attention (a direct message or
+	// a mention). It stays separate from unread so ordinary traffic never
+	// reorders the sidebar or shows a red notification badge.
+	pings map[ChannelID]int
 
 	guildFolders  []GuildFolder
 	guildEmojis   map[GuildID][]GuildEmoji
@@ -344,6 +348,7 @@ func New(historyLimit int) *Store {
 		members:       map[GuildID]map[UserID]Member{},
 		roles:         map[GuildID]map[RoleID]Role{},
 		unread:        map[ChannelID]int{},
+		pings:         map[ChannelID]int{},
 		guildEmojis:   map[GuildID][]GuildEmoji{},
 		guildStickers: map[GuildID][]GuildSticker{},
 	}
@@ -357,11 +362,40 @@ func (s *Store) IncrementUnread(channel ChannelID) {
 // ClearUnread resets a channel's unread counter to zero.
 func (s *Store) ClearUnread(channel ChannelID) {
 	delete(s.unread, channel)
+	delete(s.pings, channel)
 }
 
 // Unread returns a channel's unread message count.
 func (s *Store) Unread(channel ChannelID) int {
 	return s.unread[channel]
+}
+
+// IncrementPing bumps a channel's attention count. Callers must only use this
+// for an inbound direct message or a message that actually mentions the user.
+func (s *Store) IncrementPing(channel ChannelID) { s.pings[channel]++ }
+
+// Pings returns the unread attention count for one channel.
+func (s *Store) Pings(channel ChannelID) int { return s.pings[channel] }
+
+// GuildPings returns the total attention count across a server's channels.
+func (s *Store) GuildPings(guild GuildID) int {
+	total := 0
+	for _, channel := range s.channelOrder[guild] {
+		total += s.pings[channel]
+	}
+	return total
+}
+
+// PingedChannels returns the channels with at least one attention message.
+// The returned map is a snapshot suitable for sidebar ordering.
+func (s *Store) PingedChannels() map[ChannelID]bool {
+	out := make(map[ChannelID]bool, len(s.pings))
+	for id, count := range s.pings {
+		if count > 0 {
+			out[id] = true
+		}
+	}
+	return out
 }
 
 // UpsertGuild inserts or updates a guild, preserving first-seen order.

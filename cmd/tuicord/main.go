@@ -43,7 +43,7 @@ func run() error {
 			fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
 		},
 		Prompt: func(ctx context.Context) (string, error) {
-			return ui.RunLogin(ctx, styles, theme(cfg), cfg.Auth.PreferredMode, func(mode string) {
+			return ui.RunLogin(ctx, styles, theme(cfg), cfg.Auth.PreferredMode, cfg.Accessibility, func(mode string) {
 				cfg.Auth.PreferredMode = mode
 				if err := config.Save(cfg); err != nil {
 					fmt.Fprintln(os.Stderr, "tuicord: warning: save auth preference:", err)
@@ -60,7 +60,11 @@ func run() error {
 		return fmt.Errorf("create session: %w", err)
 	}
 
-	uiApp := tui.New(tui.WithTheme(theme(cfg)))
+	uiApp := tui.New(
+		tui.WithTheme(theme(cfg)),
+		tui.WithMouse(cfg.Accessibility.MouseOn),
+		tui.WithFocusableSplits(cfg.Accessibility.FocusSplits),
+	)
 	st := store.New(0)
 	orch := app.New(sess, st, uiApp)
 

@@ -22,6 +22,8 @@ type Split struct {
 	maxSecond int
 	main      int
 	style     screen.Style
+	focused   bool
+	focusable bool
 
 	collapsibleFirst  bool
 	collapsibleSecond bool
@@ -180,9 +182,26 @@ func (w *Split) SetStyle(style screen.Style) {
 	w.style = style
 }
 
-// CanFocus reports that the divider can receive keyboard focus.
+// CanFocus reports whether the split itself belongs in keyboard focus order.
 func (w *Split) CanFocus() bool {
-	return w != nil
+	// A split's divider and collapsed toggle are layout affordances, not
+	// interactive keyboard elements. They remain mouse-operable through Handle.
+	return w != nil && w.focusable
+}
+
+// SetFocusEnabled controls whether the split selector enters keyboard focus
+// order. Mouse interaction remains available independently of this setting.
+func (w *Split) SetFocusEnabled(enabled bool) {
+	if w != nil {
+		w.focusable = enabled
+	}
+}
+
+// SetFocusOwner records whether the split selector itself owns keyboard focus.
+func (w *Split) SetFocusOwner(focused bool) {
+	if w != nil {
+		w.focused = focused
+	}
 }
 
 // Measure returns a best-effort preferred size for both panes and divider.
@@ -231,7 +250,7 @@ func (w *Split) Draw(r screen.Region) {
 		y := w.clampDivider(r.Height())
 		if y >= 0 && y < r.Height() {
 			for x := 0; x < r.Width(); x++ {
-				r.Set(x, y, styled("─", w.style))
+				r.Set(x, y, styled("─", w.dividerStyle()))
 			}
 		}
 		return
@@ -244,7 +263,7 @@ func (w *Split) Draw(r screen.Region) {
 	x := w.clampDivider(r.Width())
 	if x >= 0 && x < r.Width() {
 		for y := 0; y < r.Height(); y++ {
-			r.Set(x, y, styled("│", w.style))
+			r.Set(x, y, styled("│", w.dividerStyle()))
 		}
 	}
 }
@@ -263,6 +282,26 @@ func (w *Split) Handle(ev tui.Event) bool {
 		return false
 	}
 	key, ok := ev.(input.KeyEvent)
+	if ok && !key.Release && w.focused {
+		switch key.Key {
+		case input.KeyEnter:
+			if w.collapsedFirst || w.collapsedSecond {
+				w.expand()
+			}
+			return true
+		case input.KeyRune:
+			if key.Rune == ' ' {
+				if w.collapsedFirst || w.collapsedSecond {
+					w.expand()
+				} else if w.collapsibleFirst {
+					w.collapseFirst()
+				} else if w.collapsibleSecond {
+					w.collapseSecond()
+				}
+				return true
+			}
+		}
+	}
 	if ok && !key.Release && key.Mods&input.Alt != 0 {
 		switch key.Key {
 		case input.KeyLeft:
@@ -432,10 +471,10 @@ func (w *Split) drawCollapsed(r screen.Region) {
 			tri = "▲"
 		}
 		for x := 0; x < r.Width(); x++ {
-			r.Set(x, y, styled("─", w.style))
+			r.Set(x, y, styled("─", w.dividerStyle()))
 		}
 		if r.Width() > 0 && r.Height() > 0 {
-			r.Set(r.Width()/2, y, styled(tri, w.style))
+			r.Set(r.Width()/2, y, styled(tri, w.dividerStyle()))
 		}
 		return
 	}
@@ -446,11 +485,20 @@ func (w *Split) drawCollapsed(r screen.Region) {
 		tri = "◀"
 	}
 	for y := 0; y < r.Height(); y++ {
-		r.Set(x, y, styled("│", w.style))
+		r.Set(x, y, styled("│", w.dividerStyle()))
 	}
 	if r.Width() > 0 && r.Height() > 0 {
-		r.Set(x, r.Height()/2, styled(tri, w.style))
+		r.Set(x, r.Height()/2, styled(tri, w.dividerStyle()))
 	}
+}
+
+func (w *Split) dividerStyle() screen.Style {
+	if w != nil && w.focused {
+		style := w.style
+		style.Attrs |= screen.Bold
+		return style
+	}
+	return w.style
 }
 
 type splitDrag struct {

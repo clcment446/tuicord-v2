@@ -99,3 +99,29 @@ func TestItemListEnterSelectsInitiallySelectedRow(t *testing.T) {
 		t.Fatalf("Enter selected row = %d, want 0", selected)
 	}
 }
+
+func TestItemListNavigationDoesNotActivateRows(t *testing.T) {
+	list := NewItemList([]Item{{Label: "first"}, {Label: "second"}})
+	selected := []int{}
+	list.OnSelect(func(index int) { selected = append(selected, index) })
+
+	if !list.Handle(input.KeyEvent{Key: input.KeyDown}) {
+		t.Fatal("Down should be handled")
+	}
+	if got := list.Selected(); got != 1 {
+		t.Fatalf("selected = %d, want 1", got)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("navigation activated rows: %v", selected)
+	}
+
+	if !list.Handle(input.MouseEvent{Btn: input.ButtonWheelUp, Kind: input.MouseWheel}) {
+		t.Fatal("wheel up should be handled")
+	}
+	if got := list.Selected(); got != 0 {
+		t.Fatalf("wheel selected = %d, want 0", got)
+	}
+	if len(selected) != 0 {
+		t.Fatalf("scrolling activated rows: %v", selected)
+	}
+}

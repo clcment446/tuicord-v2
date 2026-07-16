@@ -1,11 +1,32 @@
 package app
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"awesomeProject/internal/store"
+
+	"github.com/diamondburned/arikawa/v3/discord"
 )
+
+func TestInteractionApplicationCommandPreservesCatalogJSON(t *testing.T) {
+	raw := json.RawMessage(`{"id":"900","application_id":"555","name":"weather","type":1,"integration_types":[0],"contexts":[0],"dm_permission":false}`)
+	encoded, err := json.Marshal(interactionApplicationCommand{raw: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(encoded, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got["dm_permission"] != false {
+		t.Fatalf("dm_permission = %#v, want false", got["dm_permission"])
+	}
+	if _, ok := got["contexts"]; !ok {
+		t.Fatalf("contexts was dropped: %s", encoded)
+	}
+}
 
 // fakeInteractionPoster records the interaction payload and signals done. A
 // non-nil release channel blocks completion until the test closes it.
@@ -14,6 +35,31 @@ type fakeInteractionPoster struct {
 	err     error
 	done    chan struct{}
 	release chan struct{}
+}
+
+type fakeCommandInteractionPoster struct {
+	payload commandInteraction
+	done    chan struct{}
+	err     error
+}
+
+type fakeAutocompletePoster struct {
+	payload commandAutocompleteInteraction
+	choices []CommandChoice
+	done    chan struct{}
+	err     error
+}
+
+func (f *fakeAutocompletePoster) postCommandAutocomplete(p commandAutocompleteInteraction) ([]CommandChoice, error) {
+	f.payload = p
+	close(f.done)
+	return append([]CommandChoice(nil), f.choices...), f.err
+}
+
+func (f *fakeCommandInteractionPoster) postCommandInteraction(p commandInteraction) error {
+	f.payload = p
+	close(f.done)
+	return f.err
 }
 
 func (f *fakeInteractionPoster) postComponentInteraction(p componentInteraction) error {
@@ -104,6 +150,82 @@ func TestSubmitComponentFallsBackToAuthorAndButton(t *testing.T) {
 	}
 	if p.Data.ComponentType != 2 {
 		t.Fatalf("component type = %d, want button fallback 2", p.Data.ComponentType)
+	}
+}
+
+func TestSubmitCommandPostsChatInputInteraction(t *testing.T) {
+	fake := &fakeCommandInteractionPoster{done: make(chan struct{})}
+	a := &App{store: store.New(0), ui: syncPoster{}, commandInteract: fake, sessionID: "sess-1"}
+	a.SetActive(7, 42)
+	command := ApplicationCommand{Command: discord.Command{ID: 900, AppID: 555, Version: 123, Name: "weather", Type: discord.ChatInputCommand}}
+
+	a.SubmitCommand(command, nil)
+	<-fake.done
+
+	p := fake.payload
+	if p.Type != 2 || p.ChannelID != "42" || p.GuildID != "7" || p.ApplicationID != "555" || p.SessionID != "sess-1" || p.Nonce == "" {
+		t.Fatalf("payload routing = %+v", p)
+	}
+	if p.Data.ID != "900" || p.Data.Version != "123" || p.Data.Name != "weather" || p.Data.Type != 1 {
+		t.Fatalf("payload data = %+v", p.Data)
+	}
+	if p.Data.Attachments == nil || len(p.Data.Attachments) != 0 {
+		t.Fatalf("attachments = %#v, want an explicit empty array", p.Data.Attachments)
+	}
+	if p.Data.ApplicationCommand.Command.Name != "weather" || len(p.Data.ApplicationCommand.IntegrationTypes) != 1 || p.Data.ApplicationCommand.IntegrationTypes[0] != 0 {
+		t.Fatalf("application command = %+v", p.Data.ApplicationCommand)
+	}
+}
+
+func TestSubmitCommandSerializesNestedOptions(t *testing.T) {
+	fake := &fakeCommandInteractionPoster{done: make(chan struct{})}
+	a := &App{store: store.New(0), ui: syncPoster{}, commandInteract: fake, sessionID: "sess-1"}
+	a.SetActive(7, 42)
+	command := ApplicationCommand{Command: discord.Command{ID: 900, AppID: 555, Version: 123, Name: "remind", Type: discord.ChatInputCommand}}
+
+	a.SubmitCommand(command, []CommandOption{{
+		Name: "create", Type: discord.SubcommandOptionType,
+		Options: []CommandOption{{Name: "text", Type: discord.StringOptionType, Value: "stretch"}},
+	}})
+	<-fake.done
+
+	options := fake.payload.Data.Options
+	if len(options) != 1 || options[0].Name != "create" || options[0].Type != int(discord.SubcommandOptionType) {
+		t.Fatalf("top-level options = %+v", options)
+	}
+	if len(options[0].Options) != 1 || options[0].Options[0].Name != "text" || options[0].Options[0].Value != "stretch" {
+		t.Fatalf("nested options = %+v", options[0].Options)
+	}
+}
+
+func TestAutocompleteCommandPostsFocusedOptionAndReturnsChoices(t *testing.T) {
+	fake := &fakeAutocompletePoster{done: make(chan struct{}), choices: []CommandChoice{{Name: "Paris", Value: "paris"}}}
+	a := &App{store: store.New(0), ui: syncPoster{}, commandAutocomplete: fake, sessionID: "sess-1"}
+	a.SetActive(7, 42)
+	command := ApplicationCommand{Command: discord.Command{ID: 900, AppID: 555, Version: 123, Name: "weather", Type: discord.ChatInputCommand}}
+	result := make(chan []CommandChoice, 1)
+
+	a.AutocompleteCommand(command, []CommandOption{{Name: "city", Type: discord.StringOptionType, Value: "par", Focused: true}}, func(choices []CommandChoice, err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		result <- choices
+	})
+	<-fake.done
+
+	p := fake.payload
+	if p.Type != 4 || p.ChannelID != "42" || p.GuildID != "7" || p.ApplicationID != "555" || p.SessionID != "sess-1" {
+		t.Fatalf("payload routing = %+v", p)
+	}
+	if len(p.Data.Options) != 1 || !p.Data.Options[0].Focused || p.Data.Options[0].Name != "city" || p.Data.Options[0].Value != "par" {
+		t.Fatalf("payload options = %+v", p.Data.Options)
+	}
+	if p.Data.ApplicationCommand.Command.Name != "weather" || len(p.Data.ApplicationCommand.IntegrationTypes) != 1 || p.Data.ApplicationCommand.IntegrationTypes[0] != 0 {
+		t.Fatalf("application command = %+v", p.Data.ApplicationCommand)
+	}
+	choices := <-result
+	if len(choices) != 1 || choices[0].Value != "paris" {
+		t.Fatalf("choices = %+v", choices)
 	}
 }
 

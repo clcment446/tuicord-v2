@@ -456,6 +456,26 @@ func TestReadyEventLoadsDMUserNames(t *testing.T) {
 	}
 }
 
+func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
+	a.store.UpsertChannel(store.Channel{
+		ID:      91,
+		GuildID: DirectMessagesGuildID,
+		Kind:    store.ChannelDM,
+		Name:    "alice",
+	})
+
+	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{{
+		ID:   91,
+		Type: discord.DirectMessage,
+	}}})
+
+	if name, ok := a.store.ChannelName(91); !ok || name != "alice" {
+		t.Fatalf("preserved DM ChannelName = %q,%v, want alice,true", name, ok)
+	}
+}
+
 func TestMessageCreateEventLoadsDiscordMessage(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.SetActive(1, 42)
@@ -486,6 +506,46 @@ func TestMessageCreateEventLoadsDiscordMessage(t *testing.T) {
 	member, ok := a.store.Member(1, 100)
 	if !ok || member.Name != "ali" || len(member.RoleIDs) != 1 || member.RoleIDs[0] != 200 {
 		t.Fatalf("message member = %+v,%v, want ali with role 200", member, ok)
+	}
+}
+
+func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.selfID = 7
+	a.store.UpsertGuild(store.Guild{ID: 1, Name: "guild"})
+	a.store.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	a.store.UpsertChannel(store.Channel{ID: 11, GuildID: DirectMessagesGuildID, Name: "alice", Kind: store.ChannelDM})
+
+	// Ordinary unread messages do not get priority.
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 1, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 8}, Content: "hello"}})
+	if got := a.store.Pings(10); got != 0 {
+		t.Fatalf("ordinary message pings = %d, want 0", got)
+	}
+
+	// A direct mention and a DM both receive priority.
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 2, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 8}, Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}}}})
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 3, ChannelID: 11, Author: discord.User{ID: 8}, Content: "dm"}})
+	if got := a.store.Pings(10); got != 1 {
+		t.Errorf("mention pings = %d, want 1", got)
+	}
+	if got := a.store.Pings(11); got != 1 {
+		t.Errorf("DM pings = %d, want 1", got)
+	}
+	if got := a.store.GuildPings(1); got != 1 {
+		t.Errorf("guild pings = %d, want 1", got)
+	}
+
+	// Gateway echoes without a nonce are still authored by us and must not
+	// create unread or ping state for an inactive channel.
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 4, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 7}, Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}}}})
+	if got := a.store.Pings(10); got != 1 {
+		t.Errorf("self message pings = %d, want 1", got)
+	}
+
+	// Selecting a channel clears both its ordinary unread and ping badge.
+	a.SetActive(1, 10)
+	if got := a.store.Pings(10); got != 0 {
+		t.Errorf("active channel pings = %d, want 0", got)
 	}
 }
 

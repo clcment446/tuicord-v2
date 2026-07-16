@@ -21,6 +21,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"awesomeProject/internal/markup"
 )
 
 // Emoji is one entry in the static unicode emoji table.
@@ -132,26 +134,26 @@ func CanUseEmoji(sameGuild, animated, nitro bool) bool {
 // EmojiInsert returns the string to insert into the composer for a chosen custom
 // emoji, and whether an insert is possible at all. It prefers the native mention
 // form when the account may use the emoji; otherwise it falls back to the
-// fake-nitro CDN URL when fakeNitro is enabled. When neither path is available
-// (no Nitro and fake-nitro disabled) it returns ("", false).
+// marked fake-nitro CDN link when fakeNitro is enabled. When neither path is
+// available (no Nitro and fake-nitro disabled) it returns ("", false).
 func EmojiInsert(id uint64, name string, animated, sameGuild, nitro, fakeNitro bool) (string, bool) {
 	if CanUseEmoji(sameGuild, animated, nitro) {
 		return EmojiMention(id, name, animated), true
 	}
 	if fakeNitro {
-		return EmojiCDNURL(id, name, animated), true
+		return markup.FakeEmojiLink(name, EmojiCDNURL(id, name, animated)), true
 	}
 	return "", false
 }
 
 // StickerInsert returns the string to insert for a chosen sticker, and whether
-// an insert is possible. tuicord sends stickers as their CDN URL (the fake-nitro
-// path), which renders inline for tuicord readers regardless of Nitro. When
-// fakeNitro is disabled it returns ("", false), since native sticker sends are
-// not yet wired.
-func StickerInsert(id uint64, fakeNitro bool) (string, bool) {
+// an insert is possible. tuicord sends stickers as marked CDN links (the
+// fake-nitro path), which render inline for tuicord readers regardless of
+// Nitro. When fakeNitro is disabled it returns ("", false), since native
+// sticker sends are not yet wired.
+func StickerInsert(id uint64, name string, fakeNitro bool) (string, bool) {
 	if !fakeNitro {
 		return "", false
 	}
-	return StickerCDNURL(id), true
+	return markup.FakeStickerLink(name, StickerCDNURL(id)), true
 }

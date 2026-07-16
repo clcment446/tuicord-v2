@@ -16,13 +16,13 @@ func ExampleFilterEmoji() {
 
 func ExampleEmojiInsert_fakeNitro() {
 	// An animated emoji from another guild without Nitro falls back to the CDN
-	// URL, which tuicord renders back as the emoji.
+	// URL in a marked link label, which tuicord renders back as the emoji.
 	text, ok := picker.EmojiInsert(1084, "blobDance", true, false, false, true)
 	fmt.Println(ok)
 	fmt.Println(text)
 	// Output:
 	// true
-	// https://cdn.discordapp.com/emojis/1084.gif?size=48&name=blobDance
+	// [emoji_blobDance](https://cdn.discordapp.com/emojis/1084.gif?size=48&name=blobDance)
 }
 
 func ExampleEmojiInsert_native() {

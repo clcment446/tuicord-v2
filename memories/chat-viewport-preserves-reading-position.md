@@ -33,3 +33,9 @@ so new messages continue to appear immediately. The regression test at
 
 The test uses the existing mouse-wheel scroll path and passes with
 `go test ./internal/ui`.
+
+When distinguishing history prepends from normal appends, compare both ends of
+the message list: a prepend changes the first message while preserving the
+last; an append can also change the first message once the bounded history ring
+evicts old rows. `ChatView.Draw` tracks both IDs so an append still uses
+`BottomScroll.Update`.

@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -163,6 +164,41 @@ func TestSessionLoadsNamesAndHistoryFromDiscordAPI(t *testing.T) {
 	})
 }
 
+func TestSessionFetchesUserDMNamesFromDiscordAPI(t *testing.T) {
+	token := testToken(t)
+	sess, err := NewSession(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dms, err := sess.PrivateChannels()
+	if err != nil {
+		t.Fatalf("load private channels from Discord API: %v", err)
+	}
+
+	for _, dm := range dms {
+		if dm.Type != discord.DirectMessage {
+			continue
+		}
+		full := dm
+		if channelName(full) == "" {
+			fetched, err := sess.Channel(dm.ID)
+			if err != nil {
+				t.Fatalf("fetch user DM %d from Discord API: %v", dm.ID, err)
+			}
+			if fetched == nil {
+				t.Fatalf("fetch user DM %d returned nil channel", dm.ID)
+			}
+			full = *fetched
+		}
+		if name := channelName(full); name != "" {
+			return
+		}
+		t.Fatalf("user DM %d has no recipient name after channel fetch", dm.ID)
+	}
+	t.Skip("token has no one-to-one DM channels")
+}
+
 type namedHistoryClient interface {
 	Guilds(uint) ([]discord.Guild, error)
 	Channels(discord.GuildID) ([]discord.Channel, error)
@@ -217,9 +253,27 @@ func testToken(t *testing.T) string {
 	}
 	token := os.Getenv("TOKEN")
 	if token == "" {
+		token = tokenFromDotEnv()
+	}
+	if token == "" {
 		t.Skip("TOKEN is required with DISCORD_INTEGRATION=1")
 	}
 	return token
+}
+
+func tokenFromDotEnv() string {
+	path := filepath.Join("..", "..", ".env")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok && strings.TrimSpace(key) == "TOKEN" {
+			return strings.Trim(strings.TrimSpace(value), "\"'")
+		}
+	}
+	return ""
 }
 
 func withCachedBuildNumber(t *testing.T, number int) {

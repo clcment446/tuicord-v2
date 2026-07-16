@@ -78,7 +78,30 @@ const (
 	// Kind_Timestamp is a <t:unix> or <t:unix:style> Discord timestamp entity.
 	// Text is the pre-formatted, human-readable time string.
 	Kind_Timestamp
+	// Kind_FakeEmoji is a marked link used to share a custom emoji
+	// when the sender cannot use it natively. URL is the unmarked CDN URL.
+	Kind_FakeEmoji
+	// Kind_FakeSticker is a marked link used to share a sticker
+	// when the sender cannot use it natively. URL is the unmarked CDN URL.
+	Kind_FakeSticker
 )
+
+const (
+	// FakeEmojiMarker prefixes the label inside a Markdown link for a fake-Nitro
+	// emoji. It is intentionally not part of the displayed emoji name.
+	FakeEmojiMarker = "emoji_"
+	// FakeStickerMarker prefixes the label inside a Markdown link for a
+	// fake-Nitro sticker. It is intentionally not part of the displayed name.
+	FakeStickerMarker = "sticker_"
+)
+
+// FakeEmojiLink wraps name and url in the private Markdown form understood by Parse.
+func FakeEmojiLink(name, url string) string { return "[" + FakeEmojiMarker + name + "](" + url + ")" }
+
+// FakeStickerLink wraps name and url in the private Markdown form understood by Parse.
+func FakeStickerLink(name, url string) string {
+	return "[" + FakeStickerMarker + name + "](" + url + ")"
+}
 
 // Format is the set of inline markdown formatting attributes applied to a
 // span. It is used when formatting is stacked, or when formatting applies to a

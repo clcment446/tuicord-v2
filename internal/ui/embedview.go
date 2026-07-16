@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 
+	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
@@ -11,11 +12,52 @@ import (
 
 // renderEmbeds renders a message's embeds as chat blocks.
 func (w *ChatView) renderEmbeds(m store.Message, width int, base screen.Style) []chatLine {
+	markedMedia := markedFakeNitroMediaURLs(m.Content)
 	var lines []chatLine
 	for i, e := range m.Embeds {
+		if markedFakeNitroEmbed(e, markedMedia) {
+			continue
+		}
 		lines = append(lines, w.renderEmbed(m, e, i, width, base)...)
 	}
 	return lines
+}
+
+// markedFakeNitroMediaURLs returns the CDN URLs that content already renders
+// as fake-Nitro media. Matching pure-media embeds must be skipped to avoid
+// drawing the same emoji or sticker twice.
+func markedFakeNitroMediaURLs(content string) map[string]bool {
+	urls := make(map[string]bool)
+	for _, span := range markup.Parse(content, markup.Resolver{}) {
+		switch span.Kind {
+		case markup.Kind_FakeEmoji:
+			if media.ClassifyURL(span.URL) != media.ClassEmoji {
+				continue
+			}
+			urls[span.URL] = true
+		case markup.Kind_FakeSticker:
+			if media.ClassifyURL(span.URL) != media.ClassSticker {
+				continue
+			}
+			urls[span.URL] = true
+		}
+	}
+	return urls
+}
+
+// markedFakeNitroEmbed reports whether a minimal Discord media unfurl belongs
+// to a fake-Nitro link already rendered from message content. Pretty links use
+// EmbedLink and can put the original URL in URL while ImageURL is a proxy.
+func markedFakeNitroEmbed(e store.Embed, markedMedia map[string]bool) bool {
+	if !unadornedEmbed(e) {
+		return false
+	}
+	for _, url := range []string{e.URL, e.ImageURL, e.ThumbURL, e.VideoURL} {
+		if markedMedia[url] {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width int, base screen.Style) []chatLine {
@@ -90,10 +132,14 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 }
 
 func pureMediaEmbed(e store.Embed) bool {
-	if e.AuthorName != "" || e.Title != "" || e.Description != "" || len(e.Fields) > 0 || e.FooterText != "" {
+	if !unadornedEmbed(e) {
 		return false
 	}
 	return e.Kind == store.EmbedGIFV || e.Kind == store.EmbedImage || e.Kind == store.EmbedVideo
+}
+
+func unadornedEmbed(e store.Embed) bool {
+	return e.AuthorName == "" && e.Title == "" && e.Description == "" && len(e.Fields) == 0 && e.FooterText == ""
 }
 
 func (w *ChatView) embedAccent(e store.Embed) screen.Color {
@@ -228,6 +274,12 @@ func embedMediaURL(e store.Embed) (string, bool) {
 }
 
 func embedMediaSpec(e store.Embed, mediaURL string, width, maxRows int) mediaSpec {
+	switch media.ClassifyURL(mediaURL) {
+	case media.ClassEmoji:
+		return mediaSpec{maxCols: 2, maxRows: 1, sourceW: 48, sourceH: 48, square: true}
+	case media.ClassSticker:
+		return stickerMediaSpec(width)
+	}
 	spec := mediaSpec{maxCols: max(width, 1), maxRows: max(maxRows, 1)}
 	if queryW, queryH, ok := mediaQuerySize(mediaURL); ok {
 		spec.sourceW, spec.sourceH = queryW, queryH

@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"awesomeProject/internal/media"
 )
 
 // parser is a single-pass scanner over message content.
@@ -248,6 +250,14 @@ func (p *parser) scanLink(i int) int {
 		return i
 	}
 	url := p.src[urlStart : urlStart+closeURL]
+	switch {
+	case strings.HasPrefix(label, FakeEmojiMarker) && len(label) > len(FakeEmojiMarker) && media.ClassifyURL(url) == media.ClassEmoji:
+		p.emit(Span{Kind: Kind_FakeEmoji, Text: strings.TrimPrefix(label, FakeEmojiMarker), URL: url})
+		return urlStart + closeURL + 1
+	case strings.HasPrefix(label, FakeStickerMarker) && len(label) > len(FakeStickerMarker) && media.ClassifyURL(url) == media.ClassSticker:
+		p.emit(Span{Kind: Kind_FakeSticker, Text: strings.TrimPrefix(label, FakeStickerMarker), URL: url})
+		return urlStart + closeURL + 1
+	}
 	p.emit(Span{Kind: Kind_Link, Text: label, URL: url})
 	return urlStart + closeURL + 1
 }

@@ -696,5 +696,11 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 }
 
 func ingestPrivateChannel(s *store.Store, c discord.Channel) {
-	s.UpsertChannel(convertChannel(c))
+	converted := convertChannel(c)
+	if c.Name == "" && len(c.DMRecipients) == 0 && converted.Kind == store.ChannelDM {
+		if existing, ok := s.Channel(converted.ID); ok && existing.Name != "" {
+			converted.Name = existing.Name
+		}
+	}
+	s.UpsertChannel(converted)
 }

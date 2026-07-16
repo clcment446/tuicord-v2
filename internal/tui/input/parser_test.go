@@ -15,6 +15,7 @@ func TestParserKeys(t *testing.T) {
 		{"enter", []byte("\r"), []Event{KeyEvent{Key: KeyEnter}}},
 		{"ctrl c", []byte{0x03}, []Event{KeyEvent{Key: KeyRune, Mods: Ctrl, Rune: 'c'}}},
 		{"arrow", []byte("\x1b[A"), []Event{KeyEvent{Key: KeyUp}}},
+		{"back-tab", []byte("\x1b[Z"), []Event{KeyEvent{Key: KeyTab, Mods: Shift}}},
 		{"modified arrow", []byte("\x1b[1;6D"), []Event{KeyEvent{Key: KeyLeft, Mods: Shift | Ctrl}}},
 		{"delete", []byte("\x1b[3~"), []Event{KeyEvent{Key: KeyDelete}}},
 		{"ss3 function key", []byte("\x1bOP"), []Event{KeyEvent{Key: KeyF1}}},

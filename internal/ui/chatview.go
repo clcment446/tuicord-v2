@@ -29,7 +29,6 @@ type ChatView struct {
 	resolver   func() markup.Resolver
 	onReachTop func()
 	styles     Styles
-	scroll     int
 	node       layout.Node
 
 	visibleLines       []chatLine
@@ -73,9 +72,13 @@ type ChatView struct {
 	// bodyDeps collects the media a body touched while collectDeps is set.
 	bodyDeps    []mediaDep
 	collectDeps bool
-	// renderedLineCount lets a scrolled viewport compensate for lines appended
-	// below it without changing the user's reading position.
-	renderedLineCount int
+
+	// bottomScroll owns the viewport offset and preserves the reading position
+	// when newly rendered lines are appended below it.
+	bottomScroll       widget.BottomScroll
+	lastMessageChannel store.ChannelID
+	lastFirstMessage   store.MessageID
+	lastLastMessage    store.MessageID
 
 	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
 	// message currently being rendered a viewport-unique placement key.
@@ -342,22 +345,36 @@ func (w *ChatView) Draw(r screen.Region) {
 	if r.Width() <= 0 || r.Height() <= 0 {
 		return
 	}
-	previousLineCount := w.renderedLineCount
 	lines := w.render(r.Width())
-	if w.scroll > 0 && previousLineCount > 0 && len(lines) > previousLineCount {
-		w.scroll += len(lines) - previousLineCount
+	channel := w.active()
+	messages := w.store.Messages(channel)
+	firstMessage := store.MessageID(0)
+	lastMessage := store.MessageID(0)
+	if len(messages) > 0 {
+		firstMessage = messages[0].ID
+		lastMessage = messages[len(messages)-1].ID
 	}
-	w.renderedLineCount = len(lines)
+	prepended := channel == w.lastMessageChannel &&
+		w.lastFirstMessage != 0 && firstMessage != 0 &&
+		firstMessage != w.lastFirstMessage && lastMessage == w.lastLastMessage
+	if prepended {
+		w.bottomScroll.UpdatePrepend(len(lines), r.Height())
+	} else {
+		w.bottomScroll.Update(len(lines), r.Height())
+	}
+	w.lastMessageChannel = channel
+	w.lastFirstMessage = firstMessage
+	w.lastLastMessage = lastMessage
 	// Bottom-align: show the last r.Height() lines, offset by scroll.
-	start := max(len(lines)-r.Height()-w.scroll, 0)
+	start := max(len(lines)-r.Height()-w.bottomScroll.Offset(), 0)
 	end := min(start+r.Height(), len(lines))
 	displayLines := lines[start:end]
-	if len(displayLines) > 0 && !displayLines[0].author && displayLines[0].message.Author != "" {
+	if len(displayLines) > 1 && !displayLines[0].author && displayLines[0].message.Author != "" {
 		// Keep the sender visible when the viewport begins inside a long message.
-		// Replace the last visible content row so the total viewport height stays
-		// stable while the author remains directly beneath the channel title.
+		// Replace the oldest visible content row so pinning the author does not
+		// discard the newest row at the bottom of the viewport.
 		pinned := w.authorLine(displayLines[0].message, w.guildOf(w.active()))
-		displayLines = append([]chatLine{pinned}, displayLines[:len(displayLines)-1]...)
+		displayLines = append([]chatLine{pinned}, displayLines[1:]...)
 	}
 	w.visibleLines = append(w.visibleLines[:0], displayLines...)
 	y := 0
@@ -818,12 +835,37 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 		if span.FG != 0 {
 			style.Fg = rgbColor(span.FG)
 		}
-		if span.Kind == markup.Kind_Emoji && span.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
+		if span.Kind == markup.Kind_FakeSticker {
+			if media.ClassifyURL(span.URL) != media.ClassSticker {
+				appendText(span.Text, style, nil)
+				continue
+			}
+			if len(line) > 0 {
+				flush()
+			}
+			w.emojiSeq++
+			lines = append(lines, w.mediaLines(
+				span.URL,
+				"[sticker: "+span.Text+"]",
+				w.emojiKeyPrefix+":sticker:"+strconv.Itoa(w.emojiSeq)+":"+span.URL,
+				style,
+				stickerMediaSpec(width),
+			)...)
+			continue
+		}
+
+		emojiURL := ""
+		switch {
+		case span.Kind == markup.Kind_Emoji && span.EmojiID != 0:
+			emojiURL = customEmojiURL(span)
+		case span.Kind == markup.Kind_FakeEmoji && media.ClassifyURL(span.URL) == media.ClassEmoji:
+			emojiURL = span.URL
+		}
+		if emojiURL != "" && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
 			const emojiCols = 2
 			if width > 0 && used > 0 && used+emojiCols > width {
 				flush()
 			}
-			emojiURL := customEmojiURL(span)
 			state := w.ensureMedia(emojiURL)
 			placeholder := strings.Repeat(" ", emojiCols)
 			if state != nil && state.loading {
@@ -854,6 +896,10 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 				})
 			}
 			used += emojiCols
+			continue
+		}
+		if span.Kind == markup.Kind_FakeEmoji {
+			appendText(":"+span.Text+":", style, nil)
 			continue
 		}
 		appendText(span.Text, style, span.Action)
@@ -1000,7 +1046,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 		switch ev.Key {
 		case input.KeyEsc:
-			w.scroll = 0
+			w.bottomScroll.SetOffset(0)
 			return true
 		case input.KeyUp:
 			w.scrollUp()
@@ -1334,14 +1380,14 @@ func (w *ChatView) TakeComponentAction() (ComponentAction, bool) {
 }
 
 func (w *ChatView) scrollUp() {
-	w.scroll++
+	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + 1)
 	if w.onReachTop != nil {
 		w.onReachTop()
 	}
 }
 
 func (w *ChatView) scrollDown() {
-	if w.scroll > 0 {
-		w.scroll--
+	if w.bottomScroll.Offset() > 0 {
+		w.bottomScroll.SetOffset(w.bottomScroll.Offset() - 1)
 	}
 }

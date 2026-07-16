@@ -10,9 +10,12 @@ package app
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
@@ -143,6 +146,89 @@ type componentInteractionPoster interface {
 	postComponentInteraction(p componentInteraction) error
 }
 
+const applicationCommandInteractionType = 2
+
+// commandInteraction is the user-client payload for a CHAT_INPUT application
+// command. It is intentionally separate from componentInteraction: commands
+// have no source message and carry the selected command's version.
+type commandInteraction struct {
+	Type          int                    `json:"type"`
+	Nonce         string                 `json:"nonce"`
+	GuildID       string                 `json:"guild_id,omitempty"`
+	ChannelID     string                 `json:"channel_id"`
+	ApplicationID string                 `json:"application_id"`
+	SessionID     string                 `json:"session_id"`
+	Data          commandInteractionData `json:"data"`
+}
+
+type commandInteractionData struct {
+	ID                 string                        `json:"id"`
+	Name               string                        `json:"name"`
+	Type               int                           `json:"type"`
+	Version            string                        `json:"version"`
+	Options            []commandInteractionOption    `json:"options,omitempty"`
+	Attachments        []any                         `json:"attachments"`
+	ApplicationCommand interactionApplicationCommand `json:"application_command"`
+}
+
+// interactionApplicationCommand restores client-only fields that Arikawa's
+// public command model does not retain, notably integration_types.
+type interactionApplicationCommand struct {
+	Command          ApplicationCommand
+	IntegrationTypes []int
+	raw              json.RawMessage
+}
+
+func (c interactionApplicationCommand) MarshalJSON() ([]byte, error) {
+	if len(c.raw) != 0 {
+		return append([]byte(nil), c.raw...), nil
+	}
+	if len(c.Command.raw) != 0 {
+		return append([]byte(nil), c.Command.raw...), nil
+	}
+	encoded, err := json.Marshal(c.Command)
+	if err != nil {
+		return nil, err
+	}
+	var object map[string]any
+	if err := json.Unmarshal(encoded, &object); err != nil {
+		return nil, err
+	}
+	object["integration_types"] = c.IntegrationTypes
+	return json.Marshal(object)
+}
+
+type commandInteractionPoster interface {
+	postCommandInteraction(p commandInteraction) error
+}
+
+const applicationCommandAutocompleteInteractionType = 4
+
+type commandAutocompleteInteraction = commandInteraction
+
+type commandInteractionOption struct {
+	Type    int                        `json:"type"`
+	Name    string                     `json:"name"`
+	Value   any                        `json:"value,omitempty"`
+	Focused bool                       `json:"focused,omitempty"`
+	Options []commandInteractionOption `json:"options,omitempty"`
+}
+
+// CommandChoice is an application-provided autocomplete result. Value retains
+// its JSON scalar type because Discord accepts strings, integers, and numbers.
+type CommandChoice struct {
+	Name  string `json:"name"`
+	Value any    `json:"value"`
+}
+
+type commandAutocompleteResponse struct {
+	Choices []CommandChoice `json:"choices"`
+}
+
+type commandAutocompletePoster interface {
+	postCommandAutocomplete(p commandAutocompleteInteraction) ([]CommandChoice, error)
+}
+
 // restInteractionPoster posts interactions through the session's REST client.
 type restInteractionPoster struct {
 	sess *session.Session
@@ -153,23 +239,45 @@ func (r restInteractionPoster) postComponentInteraction(p componentInteraction) 
 	return r.sess.FastRequest("POST", url, httputil.WithJSONBody(p))
 }
 
+type restCommandInteractionPoster struct{ sess *session.Session }
+
+func (r restCommandInteractionPoster) postCommandInteraction(p commandInteraction) error {
+	url := strings.TrimSuffix(api.EndpointInteractions, "/")
+	return r.sess.FastRequest("POST", url, httputil.WithJSONBody(p))
+}
+
+type restCommandAutocompletePoster struct{ sess *session.Session }
+
+func (r restCommandAutocompletePoster) postCommandAutocomplete(p commandAutocompleteInteraction) ([]CommandChoice, error) {
+	var response commandAutocompleteResponse
+	url := strings.TrimSuffix(api.EndpointInteractions, "/")
+	err := r.sess.RequestJSON(&response, "POST", url, httputil.WithJSONBody(p))
+	return response.Choices, err
+}
+
 // App wires the session, store, and UI together and tracks navigation state.
 type App struct {
-	store         *store.Store
-	ui            poster
-	send          sender
-	history       historyLoader
-	roles         roleLoader
-	roleManage    roleManager
-	dirs          directoryLoader
-	chans         channelLoader
-	channelDetail channelDetailsLoader
-	channelManage channelManager
-	threads       threadClient
-	forum         forumPoster
-	interact      componentInteractionPoster
-	gifs          gifSearcher
-	handle        *session.Session
+	store               *store.Store
+	ui                  poster
+	send                sender
+	history             historyLoader
+	roles               roleLoader
+	roleManage          roleManager
+	dirs                directoryLoader
+	chans               channelLoader
+	channelDetail       channelDetailsLoader
+	channelManage       channelManager
+	threads             threadClient
+	forum               forumPoster
+	interact            componentInteractionPoster
+	commandInteract     commandInteractionPoster
+	commandAutocomplete commandAutocompletePoster
+	commandCatalog      commandCatalogLoader
+	gifs                gifSearcher
+	handle              *session.Session
+	commandMu           sync.Mutex
+	commandCache        map[CommandContext]commandCacheEntry
+	now                 func() time.Time
 
 	resourceMu       sync.Mutex
 	historyLoaded    map[store.ChannelID]struct{}
@@ -203,22 +311,141 @@ type App struct {
 // New returns an orchestrator over the given session, store, and UI runtime.
 func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 	return &App{
-		store:         st,
-		ui:            ui,
-		send:          sess,
-		history:       sess,
-		roles:         sess,
-		roleManage:    sess,
-		dirs:          sess,
-		chans:         sess,
-		channelDetail: sess,
-		channelManage: sess,
-		threads:       sess,
-		forum:         restForumPoster{sess: sess},
-		interact:      restInteractionPoster{sess: sess},
-		gifs:          restGIFSearcher{client: sess.Client},
-		handle:        sess,
+		store:               st,
+		ui:                  ui,
+		send:                sess,
+		history:             sess,
+		roles:               sess,
+		roleManage:          sess,
+		dirs:                sess,
+		chans:               sess,
+		channelDetail:       sess,
+		channelManage:       sess,
+		threads:             sess,
+		forum:               restForumPoster{sess: sess},
+		interact:            restInteractionPoster{sess: sess},
+		commandInteract:     restCommandInteractionPoster{sess: sess},
+		commandAutocomplete: restCommandAutocompletePoster{sess: sess},
+		commandCatalog:      restCommandCatalogLoader{sess: sess},
+		gifs:                restGIFSearcher{client: sess.Client},
+		handle:              sess,
+		commandCache:        make(map[CommandContext]commandCacheEntry),
+		now:                 time.Now,
 	}
+}
+
+// SubmitCommand dispatches a chat-input command in the active channel. The UI
+// supplies typed, validated option values; a focused option is only valid for
+// the separate autocomplete interaction.
+func (a *App) SubmitCommand(command ApplicationCommand, options []CommandOption) {
+	if a == nil || a.commandInteract == nil || command.ID == 0 || command.AppID == 0 || command.Name == "" || a.activeChannel == 0 {
+		return
+	}
+	if command.Type != 0 && command.Type != discord.ChatInputCommand {
+		return
+	}
+	wireOptions, focused := commandOptionsToWire(options)
+	if focused != 0 {
+		a.reportError(fmt.Errorf("slash command %q cannot submit a focused autocomplete option", command.Name))
+		return
+	}
+	payload := commandInteraction{
+		Type:          applicationCommandInteractionType,
+		Nonce:         newInteractionNonce(),
+		ChannelID:     strconv.FormatUint(uint64(a.activeChannel), 10),
+		ApplicationID: strconv.FormatUint(uint64(command.AppID), 10),
+		SessionID:     a.sessionID,
+		Data: commandInteractionData{
+			ID:                 strconv.FormatUint(uint64(command.ID), 10),
+			Name:               command.Name,
+			Type:               int(discord.ChatInputCommand),
+			Version:            strconv.FormatUint(uint64(command.Version), 10),
+			Options:            wireOptions,
+			Attachments:        []any{},
+			ApplicationCommand: interactionApplicationCommand{Command: command, IntegrationTypes: commandIntegrationTypes(a.activeGuild)},
+		},
+	}
+	if a.activeGuild != 0 && a.activeGuild != DirectMessagesGuildID {
+		payload.GuildID = strconv.FormatUint(uint64(a.activeGuild), 10)
+	}
+	go func() {
+		if err := a.commandInteract.postCommandInteraction(payload); err != nil {
+			a.ui.Post(func() { a.reportError(err) })
+		}
+	}()
+}
+
+// CommandOption is a validated form value for a chat-input command. Nested
+// Options represent a selected subcommand or subcommand group.
+type CommandOption struct {
+	Name    string
+	Type    discord.CommandOptionType
+	Value   any
+	Focused bool
+	Options []CommandOption
+}
+
+// AutocompleteCommand asks Discord's application for suggestions for one
+// focused command option. The caller is always completed on the UI goroutine.
+func (a *App) AutocompleteCommand(command ApplicationCommand, options []CommandOption, done func([]CommandChoice, error)) {
+	if a == nil || a.commandAutocomplete == nil || done == nil || command.ID == 0 || command.AppID == 0 || command.Name == "" || a.activeChannel == 0 {
+		return
+	}
+	wireOptions, focused := commandOptionsToWire(options)
+	if focused != 1 {
+		a.ui.Post(func() { done(nil, fmt.Errorf("autocomplete requires exactly one focused option")) })
+		return
+	}
+	payload := commandAutocompleteInteraction(commandInteraction{
+		Type:          applicationCommandAutocompleteInteractionType,
+		Nonce:         newInteractionNonce(),
+		ChannelID:     strconv.FormatUint(uint64(a.activeChannel), 10),
+		ApplicationID: strconv.FormatUint(uint64(command.AppID), 10),
+		SessionID:     a.sessionID,
+		Data: commandInteractionData{
+			ID:                 strconv.FormatUint(uint64(command.ID), 10),
+			Name:               command.Name,
+			Type:               int(discord.ChatInputCommand),
+			Version:            strconv.FormatUint(uint64(command.Version), 10),
+			Options:            wireOptions,
+			Attachments:        []any{},
+			ApplicationCommand: interactionApplicationCommand{Command: command, IntegrationTypes: commandIntegrationTypes(a.activeGuild)},
+		},
+	})
+	if a.activeGuild != 0 && a.activeGuild != DirectMessagesGuildID {
+		payload.GuildID = strconv.FormatUint(uint64(a.activeGuild), 10)
+	}
+	go func() {
+		choices, err := a.commandAutocomplete.postCommandAutocomplete(payload)
+		a.ui.Post(func() { done(append([]CommandChoice(nil), choices...), err) })
+	}()
+}
+
+func commandIntegrationTypes(guild store.GuildID) []int {
+	if guild == 0 || guild == DirectMessagesGuildID {
+		return []int{1}
+	}
+	return []int{0}
+}
+
+func commandOptionsToWire(options []CommandOption) ([]commandInteractionOption, int) {
+	wire := make([]commandInteractionOption, 0, len(options))
+	focused := 0
+	for _, option := range options {
+		nested, nestedFocused := commandOptionsToWire(option.Options)
+		if option.Focused {
+			focused++
+		}
+		focused += nestedFocused
+		wire = append(wire, commandInteractionOption{
+			Type:    int(option.Type),
+			Name:    option.Name,
+			Value:   option.Value,
+			Focused: option.Focused,
+			Options: nested,
+		})
+	}
+	return wire, focused
 }
 
 // SearchGIFs searches Discord's Tenor proxy away from the UI thread and posts
@@ -405,6 +632,7 @@ func (a *App) handleThreadMembersUpdate(e *gateway.ThreadMembersUpdateEvent) {
 }
 
 func (a *App) handleReady(e *gateway.ReadyEvent) {
+	a.InvalidateCommandCache()
 	guilds := e.Guilds
 	privateChannels := e.PrivateChannels
 	selfID := store.UserID(e.User.ID)
@@ -465,14 +693,50 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		// Reconcile an optimistic local echo when possible; otherwise append.
 		if !a.store.ReplaceMessage(msg.Nonce, msg) {
 			a.store.AppendMessage(msg)
-			if msg.ChannelID != a.activeChannel {
+			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID {
 				a.store.IncrementUnread(msg.ChannelID)
+				if a.messagePingsSelf(e.Message) {
+					a.store.IncrementPing(msg.ChannelID)
+				}
 			}
 		}
 		if a.onChange != nil {
 			a.onChange()
 		}
 	})
+}
+
+// messagePingsSelf classifies a gateway message using Discord's structured
+// mention fields. This deliberately runs before the optimistic-message swap is
+// counted, so local echoes cannot produce false sidebar notifications.
+func (a *App) messagePingsSelf(message discord.Message) bool {
+	channel, knownChannel := a.store.Channel(store.ChannelID(message.ChannelID))
+	if knownChannel && channel.Kind == store.ChannelDM {
+		return true
+	}
+	if message.MentionEveryone {
+		return true
+	}
+	for _, mentioned := range message.Mentions {
+		if store.UserID(mentioned.ID) == a.selfID && a.selfID != 0 {
+			return true
+		}
+	}
+	if message.GuildID == 0 || a.selfID == 0 {
+		return false
+	}
+	self, ok := a.store.Member(store.GuildID(message.GuildID), a.selfID)
+	if !ok {
+		return false
+	}
+	for _, mentionedRole := range message.MentionRoleIDs {
+		for _, role := range self.RoleIDs {
+			if store.RoleID(mentionedRole) == role {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handleMessageUpdate patches an existing message in place. Discord unfurls link

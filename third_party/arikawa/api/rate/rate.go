@@ -208,12 +208,12 @@ func (l *Limiter) Release(path string, headers http.Header) error {
 
 	switch {
 	case retryAfter != "":
-		i, err := strconv.Atoi(retryAfter)
+		seconds, err := strconv.ParseFloat(retryAfter, 64)
 		if err != nil {
 			return fmt.Errorf("invalid retryAfter %q: %w", retryAfter, err)
 		}
 
-		at := time.Now().Add(time.Duration(i) * time.Second)
+		at := time.Now().Add(time.Duration(seconds * float64(time.Second)))
 
 		if global != "" { // probably "true"
 			atomic.StoreInt64(l.global, at.UnixNano())

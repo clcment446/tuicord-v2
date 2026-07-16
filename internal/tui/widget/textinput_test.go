@@ -36,6 +36,27 @@ func TestTextInputPasteCombiningClusterDeletesAsUnit(t *testing.T) {
 	}
 }
 
+func TestTextInputReplaceReplacesGraphemeBoundedRange(t *testing.T) {
+	w := NewTextInput("")
+	w.SetValue("hi 👩‍💻 there")
+	w.Replace(len("hi "), len("hi 👩‍💻"), "team")
+	if got, want := w.Value(), "hi team there"; got != want {
+		t.Fatalf("value = %q, want %q", got, want)
+	}
+	if got, want := w.Cursor(), len("hi team"); got != want {
+		t.Fatalf("cursor = %d, want %d", got, want)
+	}
+}
+
+func TestTextInputReplaceExpandsOffsetsInsideAGrapheme(t *testing.T) {
+	w := NewTextInput("")
+	w.SetValue("a👩‍💻b")
+	w.Replace(2, 4, "x") // Both offsets fall within the emoji's UTF-8 bytes.
+	if got, want := w.Value(), "axb"; got != want {
+		t.Fatalf("value = %q, want %q", got, want)
+	}
+}
+
 func TestTextInputCtrlNavigationAndBackspace(t *testing.T) {
 	tests := []struct {
 		name       string

@@ -78,3 +78,15 @@ func TestRatelimitGlobal(t *testing.T) {
 		t.Error("did not ratelimit correctly, got:", time.Since(sent))
 	}
 }
+
+func TestReleaseAcceptsFractionalRetryAfter(t *testing.T) {
+	l := NewLimiter("")
+	if err := l.Acquire(context.Background(), "/interactions"); err != nil {
+		t.Fatal(err)
+	}
+	headers := http.Header{}
+	headers.Set("Retry-After", "1.226")
+	if err := l.Release("/interactions", headers); err != nil {
+		t.Fatalf("Release rejected Discord's fractional retry-after: %v", err)
+	}
+}

@@ -64,6 +64,19 @@ func TestRecordRecentStickerIsUniqueAndBounded(t *testing.T) {
 	}
 }
 
+func TestToggleFavorite(t *testing.T) {
+	st := &State{}
+	if !st.ToggleFavoriteEmoji("u:🔥") || !st.IsFavoriteEmoji("u:🔥") {
+		t.Fatal("emoji favorite was not enabled")
+	}
+	if st.ToggleFavoriteEmoji("u:🔥") || st.IsFavoriteEmoji("u:🔥") {
+		t.Fatal("emoji favorite was not disabled")
+	}
+	if !st.ToggleFavoriteSticker(42) || !st.IsFavoriteSticker(42) {
+		t.Fatal("sticker favorite was not enabled")
+	}
+}
+
 func TestToggleCollapsedFolderOffAndQuery(t *testing.T) {
 	st := &State{}
 	if st.IsFolderCollapsed(7) {

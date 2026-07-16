@@ -50,6 +50,8 @@ type MainView struct {
 	composerTarget   store.Message
 	replyMention     bool
 	composerReadOnly bool
+	onComposerChange func(string, int)
+	onLocalCommand   func(string) bool
 
 	forumView       *ForumView
 	forumPreviewID  store.ChannelID
@@ -93,12 +95,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.guildList = widget.NewItemList(nil)
 	mv.guildList.SetStyle(styles.Text)
 	mv.guildList.SetSelectedStyle(styles.Accent)
+	mv.guildList.SetBadgeStyle(styles.Error)
 	mv.guildList.OnSelect(mv.onGuildSelected)
 
 	mv.channelList = widget.NewItemList(nil)
 	mv.channelList.SetStyle(styles.Text)
 	mv.channelList.SetSelectedStyle(styles.Accent)
-	mv.channelList.SetBadgeStyle(styles.Accent)
+	mv.channelList.SetBadgeStyle(styles.Error)
 	mv.channelList.OnSelect(mv.onChannelSelected)
 	mv.channelList.OnHover(mv.onChannelHovered)
 
@@ -119,6 +122,11 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.composer = widget.NewTextInput("Message")
 	mv.composer.SetStyle(styles.Text)
 	mv.composer.OnSubmit(mv.onSend)
+	mv.composer.OnChange(func(value string) {
+		if mv.onComposerChange != nil {
+			mv.onComposerChange(value, mv.composer.Cursor())
+		}
+	})
 
 	mv.Root = mv.compose()
 	return mv
@@ -236,13 +244,19 @@ func (mv *MainView) Refresh() {
 // the selection on the active guild.
 func (mv *MainView) rebuildGuilds() {
 	st := mv.app.Store()
+	selectedGuild := store.GuildID(0)
+	if i := mv.guildList.Selected(); i >= 0 && i < len(mv.guildRows) {
+		selectedGuild = mv.guildRows[i].GuildID
+	}
 	mv.guildRows = store.OrderGuilds(st.GuildFolders(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
 	items := make([]widget.Item, len(mv.guildRows))
 	for i, row := range mv.guildRows {
 		items[i] = mv.guildItem(row)
 	}
 	mv.guildList.SetItems(items)
-	if i := mv.guildRowIndex(mv.app.ActiveGuild()); i >= 0 {
+	if i := mv.guildRowIndex(selectedGuild); i >= 0 {
+		mv.guildList.SetSelectedSilent(i)
+	} else if i := mv.guildRowIndex(mv.app.ActiveGuild()); i >= 0 {
 		mv.guildList.SetSelectedSilent(i)
 	}
 }
@@ -262,7 +276,11 @@ func (mv *MainView) guildItem(row store.GuildRow) widget.Item {
 	case row.Indent:
 		label = "  " + row.Name
 	}
-	return widget.Item{Label: label}
+	badge := ""
+	if mv.app != nil {
+		badge = unreadBadge(mv.app.Store().GuildPings(row.GuildID))
+	}
+	return widget.Item{Label: label, Badge: badge}
 }
 
 func (mv *MainView) guildRowIndex(id store.GuildID) int {
@@ -321,14 +339,20 @@ func (mv *MainView) RefreshChannels() {
 func (mv *MainView) refreshChannels() {
 	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()
+	selectedChannel := store.ChannelID(0)
+	if i := mv.channelList.Selected(); i >= 0 && i < len(mv.channelRows) {
+		selectedChannel = mv.channelRows[i].ChannelID
+	}
 	channels := st.Channels(guild)
-	mv.channelRows = store.GroupChannels(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet())
+	mv.channelRows = store.GroupChannelsWithPriority(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet(), st.PingedChannels())
 	items := make([]widget.Item, len(mv.channelRows))
 	for i, row := range mv.channelRows {
 		items[i] = mv.channelItem(row)
 	}
 	mv.channelList.SetItems(items)
 	switch {
+	case mv.channelListRowIndex(selectedChannel) >= 0:
+		mv.channelList.SetSelectedSilent(mv.channelListRowIndex(selectedChannel))
 	case mv.channelRowIndex(mv.app.ActiveChannel()) >= 0:
 		mv.channelList.SetSelectedSilent(mv.channelRowIndex(mv.app.ActiveChannel()))
 	case mv.app.ActiveChannel() == 0 && mv.firstNavigableChannel() >= 0:
@@ -337,6 +361,20 @@ func (mv *MainView) refreshChannels() {
 		mv.onChannelSelected(i)
 	}
 	mv.updateChannelChrome()
+}
+
+// channelListRowIndex finds every rendered row, including categories, so a
+// background refresh cannot snap a user browsing the sidebar back to active.
+func (mv *MainView) channelListRowIndex(id store.ChannelID) int {
+	if id == 0 {
+		return -1
+	}
+	for i, row := range mv.channelRows {
+		if row.ChannelID == id {
+			return i
+		}
+	}
+	return -1
 }
 
 func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
@@ -356,7 +394,7 @@ func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
 	}
 	badge := ""
 	if row.Navigable() {
-		badge = unreadBadge(mv.app.Store().Unread(row.ChannelID))
+		badge = unreadBadge(mv.app.Store().Pings(row.ChannelID))
 	}
 	return widget.Item{Label: label, Badge: badge}
 }
@@ -657,6 +695,21 @@ func (mv *MainView) recordRecentSticker(id uint64) {
 	}
 }
 
+func (mv *MainView) favoriteEmojis() []string {
+	return append([]string(nil), mv.state.FavoriteEmojis...)
+}
+func (mv *MainView) favoriteStickers() []uint64 {
+	return append([]uint64(nil), mv.state.FavoriteStickers...)
+}
+func (mv *MainView) toggleFavorite(emoji string, sticker uint64) {
+	if sticker != 0 {
+		mv.state.ToggleFavoriteSticker(sticker)
+	} else {
+		mv.state.ToggleFavoriteEmoji(emoji)
+	}
+	mv.persist()
+}
+
 // GuildContext returns the guild row a pending right-click landed on, if any.
 func (mv *MainView) GuildContext() (store.GuildRow, bool) {
 	idx, ok := mv.guildList.TakeContext()
@@ -717,7 +770,7 @@ func unreadBadge(n int) string {
 	case n <= 0:
 		return ""
 	case n > 99:
-		return "99+"
+		return "99"
 	default:
 		return strconv.Itoa(n)
 	}
@@ -761,6 +814,10 @@ func (mv *MainView) onSend(content string) {
 	if content == "" || mv.composerReadOnly {
 		return
 	}
+	if mv.composerMode == composerNormal && mv.onLocalCommand != nil && mv.onLocalCommand(content) {
+		mv.composer.SetValue("")
+		return
+	}
 	if mv.forumActive {
 		if mv.onNewForumPost != nil {
 			mv.onNewForumPost(content)
@@ -782,13 +839,30 @@ func (mv *MainView) onSend(content string) {
 }
 
 // InsertIntoComposer drops s at the composer cursor. The picker uses it to
-// insert a chosen emoji, custom-emoji mention, or fake-nitro URL.
+// insert a chosen emoji, custom-emoji mention, or marked fake-Nitro link.
 func (mv *MainView) InsertIntoComposer(s string) {
 	if mv == nil || mv.composer == nil {
 		return
 	}
 	mv.composer.Insert(s)
 }
+
+// ReplaceComposerRange replaces a completion token in the composer. TextInput
+// normalizes offsets to grapheme boundaries before applying the replacement.
+func (mv *MainView) ReplaceComposerRange(start, end int, s string) {
+	if mv == nil || mv.composer == nil {
+		return
+	}
+	mv.composer.Replace(start, end, s)
+}
+
+// SetComposerChange registers a callback for user and programmatic composer
+// edits. Shell uses it to detect inline autocomplete triggers.
+func (mv *MainView) SetComposerChange(fn func(string, int)) { mv.onComposerChange = fn }
+
+// SetLocalCommandHandler installs the local ';' command dispatcher. A true
+// result consumes the composer text instead of sending it to Discord.
+func (mv *MainView) SetLocalCommandHandler(fn func(string) bool) { mv.onLocalCommand = fn }
 
 // BeginReply puts the composer into inline-reply mode.
 func (mv *MainView) BeginReply(msg store.Message, mention bool) {

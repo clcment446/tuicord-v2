@@ -34,6 +34,54 @@ type State struct {
 	CollapsedFolders    []int64  `toml:"collapsed_folders"`
 	CollapsedCategories []uint64 `toml:"collapsed_categories"`
 	RecentStickers      []uint64 `toml:"recent_stickers"`
+	FavoriteEmojis      []string `toml:"favorite_emojis"`
+	FavoriteStickers    []uint64 `toml:"favorite_stickers"`
+}
+
+func (s *State) ToggleFavoriteEmoji(key string) bool {
+	if s == nil || key == "" {
+		return false
+	}
+	for i, existing := range s.FavoriteEmojis {
+		if existing == key {
+			s.FavoriteEmojis = append(s.FavoriteEmojis[:i], s.FavoriteEmojis[i+1:]...)
+			return false
+		}
+	}
+	s.FavoriteEmojis = append(s.FavoriteEmojis, key)
+	return true
+}
+
+func (s *State) IsFavoriteEmoji(key string) bool {
+	for _, existing := range s.FavoriteEmojis {
+		if existing == key {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *State) ToggleFavoriteSticker(id uint64) bool {
+	if s == nil || id == 0 {
+		return false
+	}
+	for i, existing := range s.FavoriteStickers {
+		if existing == id {
+			s.FavoriteStickers = append(s.FavoriteStickers[:i], s.FavoriteStickers[i+1:]...)
+			return false
+		}
+	}
+	s.FavoriteStickers = append(s.FavoriteStickers, id)
+	return true
+}
+
+func (s *State) IsFavoriteSticker(id uint64) bool {
+	for _, existing := range s.FavoriteStickers {
+		if existing == id {
+			return true
+		}
+	}
+	return false
 }
 
 const recentStickerLimit = 20

@@ -6,15 +6,24 @@ import (
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
+	"image"
 )
 
 // Item is one row in an ItemList. Label is the primary text; Badge is optional
 // trailing text (an unread count, a mention marker) drawn right-aligned. A zero
 // Style falls back to the list's default row or selected style.
 type Item struct {
-	Label string
-	Badge string
-	Style screen.Style
+	Label   string
+	Badge   string
+	Style   screen.Style
+	Graphic *ItemGraphic
+}
+
+// ItemGraphic is an optional 2-cell Kitty graphic drawn over the start of a row.
+type ItemGraphic struct {
+	Image                         image.Image
+	ImageID, PlacementID          uint32
+	PixelWidth, PixelHeight, Cols int
 }
 
 // ItemList draws and navigates a virtualized list of styled rows. Unlike List,
@@ -216,6 +225,14 @@ func (w *ItemList) drawRow(r screen.Region, y, index int) {
 		labelWidth = r.Width()
 	}
 	drawText(r, 0, y, text.Truncate(item.Label, labelWidth, text.Ellipsis), rowStyle)
+	if g := item.Graphic; g != nil && g.Image != nil {
+		cols := g.Cols
+		if cols <= 0 {
+			cols = 2
+		}
+		img := NewKittyImageFrom(g.Image).SetID(g.ImageID).SetPlacementID(g.PlacementID).SetPixelSize(g.PixelWidth, g.PixelHeight).SetStyle(rowStyle)
+		img.Draw(r.Clip(screen.Rect{X: 0, Y: y, W: cols, H: 1}))
+	}
 	if badgeW > 0 && badgeW < r.Width() {
 		badgeStyle := w.badgeStyle
 		if selected {
@@ -225,7 +242,8 @@ func (w *ItemList) drawRow(r screen.Region, y, index int) {
 	}
 }
 
-// Handle changes selection for keyboard and wheel events.
+// Handle changes selection for keyboard and wheel events. Navigation only
+// moves the highlight; Enter or a mouse click activates the selected row.
 func (w *ItemList) Handle(ev tui.Event) bool {
 	if w == nil {
 		return false
@@ -245,22 +263,22 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 			}
 			return true
 		case input.KeyUp:
-			w.SetSelected(w.selected - 1)
+			w.SetSelectedSilent(w.selected - 1)
 			return true
 		case input.KeyDown:
-			w.SetSelected(w.selected + 1)
+			w.SetSelectedSilent(w.selected + 1)
 			return true
 		case input.KeyHome:
-			w.SetSelected(0)
+			w.SetSelectedSilent(0)
 			return true
 		case input.KeyEnd:
-			w.SetSelected(len(w.items) - 1)
+			w.SetSelectedSilent(len(w.items) - 1)
 			return true
 		case input.KeyPageUp:
-			w.SetSelected(w.selected - 10)
+			w.SetSelectedSilent(w.selected - 10)
 			return true
 		case input.KeyPageDown:
-			w.SetSelected(w.selected + 10)
+			w.SetSelectedSilent(w.selected + 10)
 			return true
 		}
 	case input.MouseEvent:
@@ -300,10 +318,10 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		case input.MouseWheel:
 			switch ev.Btn {
 			case input.ButtonWheelUp:
-				w.SetSelected(w.selected - 1)
+				w.SetSelectedSilent(w.selected - 1)
 				return true
 			case input.ButtonWheelDown:
-				w.SetSelected(w.selected + 1)
+				w.SetSelectedSilent(w.selected + 1)
 				return true
 			}
 		}
