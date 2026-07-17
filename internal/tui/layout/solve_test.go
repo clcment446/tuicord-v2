@@ -66,6 +66,17 @@ func TestSolveHideBelow(t *testing.T) {
 	assertRect(t, wide[main], Rect{X: 21, W: 99, H: 20})
 }
 
+func TestSolveHiddenNode(t *testing.T) {
+	hidden := &Node{Basis: 20, Hidden: true}
+	main := &Node{Grow: 1}
+	root := &Node{Dir: Row, Gap: 1, Children: []*Node{hidden, main}}
+	rects := Solve(root, 40, 5)
+	if _, ok := rects[hidden]; ok {
+		t.Fatal("explicitly hidden node has a rect")
+	}
+	assertRect(t, rects[main], Rect{W: 40, H: 5})
+}
+
 func TestChildrenNeverExceedParent(t *testing.T) {
 	a := &Node{Basis: 100, Min: 20}
 	b := &Node{Grow: 1, Min: 20}

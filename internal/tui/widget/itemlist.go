@@ -39,6 +39,8 @@ type ItemList struct {
 	badgeStyle    screen.Style
 	onSelect      func(int)
 	onHover       func(int)
+	onVimFocus    func(bool) bool
+	vimNavigation bool
 	node          layout.Node
 	viewH         int
 
@@ -151,6 +153,29 @@ func (w *ItemList) OnHover(fn func(int)) {
 	w.onHover = fn
 }
 
+// OnVimFocus installs a local h/l action. Returning true keeps focus on the
+// list (for example after unfolding a selected category); false lets the TUI
+// runtime traverse the normal focus ring like Shift+Tab/Tab.
+func (w *ItemList) OnVimFocus(fn func(forward bool) bool) {
+	if w != nil {
+		w.onVimFocus = fn
+	}
+}
+
+// SetVimNavigation opts this list into j/k and h/l navigation.
+func (w *ItemList) SetVimNavigation(enabled bool) {
+	if w != nil {
+		w.vimNavigation = enabled
+	}
+}
+
+func (w *ItemList) VimFocusEnabled() bool { return w != nil && w.vimNavigation }
+
+// HandleVimFocus implements tui.VimFocusTraverser.
+func (w *ItemList) HandleVimFocus(forward bool) bool {
+	return w != nil && w.onVimFocus != nil && w.onVimFocus(forward)
+}
+
 // CanFocus reports that the list can receive keyboard focus.
 func (w *ItemList) CanFocus() bool {
 	return w != nil
@@ -254,6 +279,21 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 			return false
 		}
 		switch ev.Key {
+		case input.KeyRune:
+			if ev.Mods != 0 {
+				return false
+			}
+			if !w.vimNavigation {
+				return false
+			}
+			switch ev.Rune {
+			case 'j':
+				w.SetSelectedSilent(w.selected + 1)
+				return true
+			case 'k':
+				w.SetSelectedSilent(w.selected - 1)
+				return true
+			}
 		case input.KeyEnter:
 			if len(w.items) == 0 {
 				return false

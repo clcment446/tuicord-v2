@@ -53,6 +53,43 @@ func TestDiffStyle(t *testing.T) {
 	}
 }
 
+func TestDiffTTYColorsUsesANSI16Palette(t *testing.T) {
+	next := NewBuffer(1, 1)
+	next.Set(0, 0, Cell{
+		Content: "x",
+		Style:   Style{Fg: RGB(220, 40, 40), Bg: RGB(20, 20, 180), Attrs: Bold},
+	})
+
+	got := string(DiffWithColorMode(nil, next, ColorModeTTY16))
+	want := "\x1b[1;1H\x1b[0;1;91;44mx\x1b[0m"
+	if got != want {
+		t.Fatalf("DiffWithColorMode() = %q, want %q", got, want)
+	}
+}
+
+func TestDiffTTYColorsUsesProvidedPalette(t *testing.T) {
+	next := NewBuffer(1, 1)
+	next.Set(0, 0, Cell{Content: "x", Style: Style{Fg: RGB(1, 2, 3)}})
+	palette := DefaultANSI16Palette()
+	palette[1] = RGB(1, 2, 3)
+
+	got := string(DiffWithPalette(nil, next, palette))
+	want := "\x1b[1;1H\x1b[0;31mx\x1b[0m"
+	if got != want {
+		t.Fatalf("DiffWithPalette() = %q, want %q", got, want)
+	}
+}
+
+func TestDiffTTYColorsUsesDefaultWhenColorIsUnset(t *testing.T) {
+	next := NewBuffer(1, 1)
+	next.Set(0, 0, Cell{Content: "x", Style: Style{Fg: RGB(255, 255, 255)}})
+
+	got := string(DiffWithColorMode(nil, next, ColorModeTTY16))
+	if got != "\x1b[1;1H\x1b[0;97mx\x1b[0m" {
+		t.Fatalf("DiffWithColorMode() = %q, want ANSI 16-color foreground", got)
+	}
+}
+
 func TestFrameSync(t *testing.T) {
 	next := NewBuffer(1, 1)
 	next.Set(0, 0, Cell{Content: "x"})

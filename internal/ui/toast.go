@@ -96,9 +96,12 @@ func (t *Toast) Draw(r screen.Region) {
 	x0 := max(r.Width()-width-1, 0)
 	y0 := max(r.Height()-height-1, 0)
 
-	style := screen.Style{Fg: t.styles.Text.Fg, Bg: screen.RGB(32, 35, 40)}
-	titleStyle := screen.Style{Fg: t.styles.Error.Fg, Bg: style.Bg, Attrs: screen.Bold}
-	mutedStyle := screen.Style{Fg: t.styles.Muted.Fg, Bg: style.Bg}
+	style := t.styles.Cell("toast")
+	if !style.Bg.Set() {
+		style.Bg = t.styles.Cell("background").Bg
+	}
+	titleStyle := mergeStyle(style, t.styles.Cell("toast.title"))
+	mutedStyle := mergeStyle(style, t.styles.Cell("toast.detail"))
 
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {

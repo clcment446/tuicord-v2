@@ -29,6 +29,8 @@ type Rect struct {
 
 // Node describes one layout box.
 type Node struct {
+	// Hidden omits this node and its descendants from layout and drawing.
+	Hidden bool
 	// Dir controls the child layout axis.
 	Dir Direction
 	// Grow receives a share of positive free space on the parent's main axis.
