@@ -90,6 +90,13 @@ func emitDiff(out *bytes.Buffer, prev, next *Buffer) {
 	if next == nil {
 		return
 	}
+	// A terminal is allowed to reflow its existing cells when its dimensions
+	// change. The old buffer therefore no longer describes what is physically
+	// on screen after a resize, even where its coordinates overlap next. Treat
+	// every cell as changed so wrapping and borders are repainted in place.
+	if prev != nil && (prev.w != next.w || prev.h != next.h) {
+		prev = nil
+	}
 	var style Style
 	styleSet := false
 	for y := 0; y < next.h; y++ {

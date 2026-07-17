@@ -34,6 +34,19 @@ func TestConvertChannelKind(t *testing.T) {
 	}
 }
 
+func TestConvertDMChannelCarriesMentionRecipients(t *testing.T) {
+	got := convertChannel(discord.Channel{
+		ID:   91,
+		Type: discord.DirectMessage,
+		DMRecipients: []discord.User{{
+			ID: 100, Username: "alice", DisplayName: "Alice A.",
+		}},
+	})
+	if len(got.Recipients) != 1 || got.Recipients[0].ID != 100 || got.Recipients[0].Name != "Alice A." {
+		t.Fatalf("DM recipients = %+v, want Alice A. (100)", got.Recipients)
+	}
+}
+
 func TestConvertChannelThreadMeta(t *testing.T) {
 	ch := discord.Channel{
 		ID:           555,

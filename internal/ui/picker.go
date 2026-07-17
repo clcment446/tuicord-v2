@@ -65,8 +65,10 @@ type pickerEntry struct {
 
 // searchEntry pairs a precomputed lowercase search key with its entry.
 type searchEntry struct {
-	key   string
-	entry pickerEntry
+	key        string
+	guildKey   string
+	channelKey string
+	entry      pickerEntry
 }
 
 // Picker is the emoji/sticker overlay opened over the composer (Ctrl+E). It owns

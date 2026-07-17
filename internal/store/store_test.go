@@ -141,6 +141,20 @@ func TestMemberAndChannelResolution(t *testing.T) {
 	}
 }
 
+func TestChannelRecipientResolution(t *testing.T) {
+	s := New(0)
+	s.UpsertChannel(Channel{ID: 90, GuildID: ^GuildID(0), Name: "alice", Kind: ChannelDM,
+		Recipients: []Member{{ID: 42, Name: "Alice"}}})
+
+	member, ok := s.ChannelRecipient(90, 42)
+	if !ok || member.Name != "Alice" {
+		t.Fatalf("ChannelRecipient = %+v,%v; want Alice,true", member, ok)
+	}
+	if _, ok := s.ChannelRecipient(90, 99); ok {
+		t.Fatal("ChannelRecipient resolved an unknown user")
+	}
+}
+
 func TestMessagesUnknownChannelIsNil(t *testing.T) {
 	s := New(0)
 	if got := s.Messages(123); got != nil {
