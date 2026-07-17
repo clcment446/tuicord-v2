@@ -29,6 +29,12 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	// Ensure a non-nil override set so plugins can add color rules at runtime.
+	// The Styles built below and the plugin Host share this same pointer, so a
+	// tuicord.style call is visible to widgets on the next render.
+	if cfg.ColorOverrides == nil {
+		cfg.ColorOverrides = &config.ColorOverrides{Rules: map[string]config.ColorRule{}}
+	}
 	styles := uiStyles(cfg)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

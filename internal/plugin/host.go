@@ -27,4 +27,10 @@ type Host struct {
 	SelfID func() uint64
 	// Notify surfaces a transient message to the user (a toast/notice).
 	Notify func(title, body string)
+	// Style applies color-override properties to a semantic selector at runtime
+	// (e.g. selector "messages.author", props {"fg": "#ff0000"}). Keys are
+	// fg/bg/attrs or boolean attribute names; values are strings.
+	Style func(selector string, props map[string]string)
+	// OpenOverlay shows a read-only panel of text lines with the given title.
+	OpenOverlay func(title string, lines []string)
 }

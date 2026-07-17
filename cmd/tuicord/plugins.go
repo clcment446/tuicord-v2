@@ -37,7 +37,7 @@ func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Con
 		logW = f
 	}
 
-	host := newPluginHost(orch, uiApp, shell)
+	host := newPluginHost(orch, uiApp, shell, cfg.ColorOverrides)
 
 	var grants map[string][]string
 	var disabled []string
@@ -71,7 +71,7 @@ func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Con
 // against. Every function marshals its work onto the UI goroutine via Post; the
 // synchronous accessors round-trip a value back so they never read App's
 // UI-goroutine-owned fields from the plugin goroutine.
-func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell) *plugin.Host {
+func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides) *plugin.Host {
 	get := func(read func() uint64) uint64 {
 		ch := make(chan uint64, 1)
 		uiApp.Post(func() { ch <- read() })
@@ -79,6 +79,25 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell) *plugin.Host 
 	}
 
 	return &plugin.Host{
+		Style: func(selector string, props map[string]string) {
+			uiApp.Post(func() {
+				changed := false
+				for property, value := range props {
+					if err := overrides.SetProperty(selector, property, value); err == nil {
+						changed = true
+					}
+				}
+				if changed {
+					uiApp.Invalidate()
+				}
+			})
+		},
+		OpenOverlay: func(title string, lines []string) {
+			uiApp.Post(func() {
+				shell.OpenPluginOverlay(title, lines)
+				uiApp.Invalidate()
+			})
+		},
 		Send: func(content string) {
 			uiApp.Post(func() { orch.Send(content) })
 		},

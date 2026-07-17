@@ -31,3 +31,21 @@ end)
 tuicord.on("channel.switch", function(ev)
   tuicord.log("switched to channel " .. ev.channel_id)
 end)
+
+-- Recolor a semantic surface at runtime. Selectors mirror colors.conf; the
+-- change takes effect on the next render.
+tuicord.command("red-authors", function()
+  tuicord.style("messages.author", { fg = "#ff0000", bold = true })
+  tuicord.notify("theme", "message authors are now red")
+end, "make author names red")
+
+-- Open a custom read-only overlay (dismiss with Esc). Plugins supply the text
+-- lines; the client renders them.
+tuicord.command("about", function()
+  tuicord.overlay("About hello.lua", {
+    "This panel is drawn by a plugin.",
+    "",
+    "active channel: " .. tuicord.active_channel(),
+    "your user id:   " .. tuicord.self_id(),
+  })
+end, "show the sample plugin overlay")

@@ -37,8 +37,23 @@ goroutine.**
   `Disabled` slice / `Grants` map would otherwise break the `cfg != Default()`
   comparisons used across config tests. Nil pointer = enabled, none disabled.
 
+## Runtime theming & custom UI
+
+- `tuicord.style(selector, {fg=,bg=,attrs=,bold=,...})` mutates the shared
+  `*config.ColorOverrides` (via new exported `SetProperty`) and calls
+  `uiApp.Invalidate()`. It works live because `Styles.Cell(name)` resolves
+  overrides at draw time through `Overrides.Resolve` and every widget shares the
+  same `Overrides` pointer — no style rebuild needed. main.go allocates a
+  non-nil `ColorOverrides` before building Styles so plugins have somewhere to
+  write. Best-effort/additive: startup-baked `Cells` still apply, runtime rule
+  overlays per-field.
+- Custom UI is a **content-model overlay** (`tuicord.overlay(title, lines)`),
+  not immediate-mode Lua drawing — Draw runs on the UI goroutine and cannot call
+  the plugin-goroutine LState. `Shell.OpenPluginOverlay` renders plugin-supplied
+  text lines; Esc dismisses via the existing overlay handling.
+
 ## Status
 
-Phase 1 (events/actions/commands) + keybindings wired and tested (race-clean).
-Theming (`tuicord.style`) and custom Lua widgets are planned but not yet built —
-see the plan at ~/.claude/plans/plan-the-lua-based-glowing-brooks.md.
+All four approved surfaces are built, wired, and tested (race-clean): events,
+actions, `;`-commands, keybindings, runtime theming, and custom overlays.
+Branch: devstyly. Plan: ~/.claude/plans/plan-the-lua-based-glowing-brooks.md.

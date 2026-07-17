@@ -45,6 +45,52 @@ func toLua(L *lua.LState, v any) lua.LValue {
 	}
 }
 
+// tableToStringMap reads a Lua table of string keys into a Go map, coercing
+// each value to a string (booleans become "true"/"false"). Non-string keys and
+// nested tables are skipped. It backs tuicord.style option tables.
+func tableToStringMap(tbl *lua.LTable) map[string]string {
+	out := make(map[string]string)
+	if tbl == nil {
+		return out
+	}
+	tbl.ForEach(func(k, v lua.LValue) {
+		key, ok := k.(lua.LString)
+		if !ok {
+			return
+		}
+		switch val := v.(type) {
+		case lua.LString:
+			out[string(key)] = string(val)
+		case lua.LBool:
+			out[string(key)] = boolString(bool(val))
+		case lua.LNumber:
+			out[string(key)] = val.String()
+		}
+	})
+	return out
+}
+
+// tableToStringSlice reads a Lua array table into a Go string slice, coercing
+// each element to a string. It backs tuicord.overlay line lists.
+func tableToStringSlice(tbl *lua.LTable) []string {
+	if tbl == nil {
+		return nil
+	}
+	n := tbl.Len()
+	out := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		out = append(out, tbl.RawGetInt(i).String())
+	}
+	return out
+}
+
+func boolString(b bool) string {
+	if b {
+		return "true"
+	}
+	return "false"
+}
+
 // parseID reads a snowflake from a Lua value, accepting either the decimal
 // string form plugins normally use or a Lua number. It returns 0 for anything
 // unparseable, which the Host functions treat as a no-op.

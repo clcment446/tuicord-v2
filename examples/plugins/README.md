@@ -31,6 +31,8 @@ A global `tuicord` table is available to every plugin.
 | `tuicord.reply(channel_id, message_id, content, mention)` | Reply to a message. |
 | `tuicord.react(channel_id, message_id, emoji)` | Add a reaction. |
 | `tuicord.notify(title, body)` | Show a transient notice. |
+| `tuicord.style(selector, opts)` | Recolor a semantic surface at runtime; `opts` is `{fg=, bg=, attrs=, bold=true, ...}`. Selectors mirror `colors.conf`. |
+| `tuicord.overlay(title, lines)` | Open a read-only panel of text `lines` (dismiss with Esc). |
 | `tuicord.active_channel()` / `active_guild()` / `self_id()` | Current IDs (as strings). |
 | `tuicord.log(...)` | Write to `~/.config/tuicord-v2/plugin.log`. `print` is redirected here too. |
 

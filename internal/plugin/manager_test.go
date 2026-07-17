@@ -20,29 +20,57 @@ func writePlugin(t *testing.T, name, body string) string {
 // captureHost records side effects on buffered channels so tests can await the
 // asynchronous plugin goroutine without sleeping.
 type captureHost struct {
-	sent   chan string
-	sentTo chan [2]string
-	react  chan [3]string
-	notify chan [2]string
+	sent    chan string
+	sentTo  chan [2]string
+	react   chan [3]string
+	notify  chan [2]string
+	style   chan styleCall
+	overlay chan overlayCall
+}
+
+type styleCall struct {
+	selector string
+	props    map[string]string
+}
+
+type overlayCall struct {
+	title string
+	lines []string
 }
 
 func newCaptureHost() (*captureHost, *Host) {
 	c := &captureHost{
-		sent:   make(chan string, 8),
-		sentTo: make(chan [2]string, 8),
-		react:  make(chan [3]string, 8),
-		notify: make(chan [2]string, 8),
+		sent:    make(chan string, 8),
+		sentTo:  make(chan [2]string, 8),
+		react:   make(chan [3]string, 8),
+		notify:  make(chan [2]string, 8),
+		style:   make(chan styleCall, 8),
+		overlay: make(chan overlayCall, 8),
 	}
 	h := &Host{
 		Send:          func(content string) { c.sent <- content },
 		SendTo:        func(ch uint64, content string) { c.sentTo <- [2]string{u(ch), content} },
 		React:         func(ch, msg uint64, emoji string) { c.react <- [3]string{u(ch), u(msg), emoji} },
 		Notify:        func(title, body string) { c.notify <- [2]string{title, body} },
+		Style:         func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
+		OpenOverlay:   func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
 		ActiveChannel: func() uint64 { return 111 },
 		ActiveGuild:   func() uint64 { return 222 },
 		SelfID:        func() uint64 { return 333 },
 	}
 	return c, h
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func u(v uint64) string {
@@ -248,11 +276,55 @@ func TestExamplePluginLoads(t *testing.T) {
 	if errs := m.Load(); len(errs) != 0 {
 		t.Fatalf("example plugin failed to load: %v", errs)
 	}
-	if names := m.CommandNames(); len(names) != 1 || names[0] != "hi" {
-		t.Fatalf("example command not registered: %v", names)
+	if got, want := m.CommandNames(), []string{"about", "hi", "red-authors"}; !equalStrings(got, want) {
+		t.Fatalf("example commands = %v, want %v", got, want)
 	}
 	if specs := m.KeySpecs(); len(specs) != 1 || specs[0] != "ctrl+g" {
 		t.Fatalf("example keymap not registered: %v", specs)
+	}
+}
+
+func TestStyleBinding(t *testing.T) {
+	dir := writePlugin(t, "theme", `
+		tuicord.on("ready", function()
+			tuicord.style("messages.author", { fg = "#ff0000", bold = true })
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{Dir: dir, Host: h})
+	defer m.Close()
+	m.Load()
+
+	m.Emit(EventReady, nil)
+	select {
+	case got := <-c.style:
+		if got.selector != "messages.author" || got.props["fg"] != "#ff0000" || got.props["bold"] != "true" {
+			t.Fatalf("style call = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for style call")
+	}
+}
+
+func TestOverlayBinding(t *testing.T) {
+	dir := writePlugin(t, "panel", `
+		tuicord.command("show", function()
+			tuicord.overlay("My Panel", {"line one", "line two"})
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{Dir: dir, Host: h})
+	defer m.Close()
+	m.Load()
+
+	m.RunCommand("show", nil)
+	select {
+	case got := <-c.overlay:
+		if got.title != "My Panel" || len(got.lines) != 2 || got.lines[0] != "line one" {
+			t.Fatalf("overlay call = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for overlay call")
 	}
 }
 

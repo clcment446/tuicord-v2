@@ -94,6 +94,24 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		return 0
 	})
 
+	// --- theming & custom UI -------------------------------------------------
+	reg("style", func(L *lua.LState) int {
+		selector := L.CheckString(1)
+		props := tableToStringMap(L.CheckTable(2))
+		if pctx.host.Style != nil {
+			pctx.host.Style(selector, props)
+		}
+		return 0
+	})
+	reg("overlay", func(L *lua.LState) int {
+		title := L.CheckString(1)
+		lines := tableToStringSlice(L.CheckTable(2))
+		if pctx.host.OpenOverlay != nil {
+			pctx.host.OpenOverlay(title, lines)
+		}
+		return 0
+	})
+
 	// --- state accessors -----------------------------------------------------
 	reg("active_channel", func(L *lua.LState) int {
 		L.Push(idValue(pctx.host.ActiveChannel))

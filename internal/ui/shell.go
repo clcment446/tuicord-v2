@@ -66,6 +66,20 @@ type Shell struct {
 // SetPluginHost registers the Lua plugin manager for command and key dispatch.
 func (s *Shell) SetPluginHost(host PluginHost) { s.plugins = host }
 
+// OpenPluginOverlay shows a read-only panel of plugin-supplied text lines. It
+// swaps in a full-screen overlay dismissed with Esc, like the help panel. Call
+// on the UI goroutine.
+func (s *Shell) OpenPluginOverlay(title string, lines []string) {
+	rows := make([]tui.Widget, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, widget.NewText(line))
+	}
+	if len(rows) == 0 {
+		rows = append(rows, widget.NewText(""))
+	}
+	s.overlay = titled(title, widget.Column(rows...))
+}
+
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
 	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), node: layout.Node{Grow: 1}}
