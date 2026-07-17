@@ -14,11 +14,10 @@ func (a *App) CreateRole(guild store.GuildID, name string) {
 	if a == nil || a.roleManage == nil || guild == 0 || strings.TrimSpace(name) == "" {
 		return
 	}
-	go func() {
-		if _, err := a.roleManage.CreateRole(discord.GuildID(guild), api.CreateRoleData{Name: strings.TrimSpace(name)}); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		_, err := a.roleManage.CreateRole(discord.GuildID(guild), api.CreateRoleData{Name: strings.TrimSpace(name)})
+		return err
+	})
 }
 
 // RenameRole changes a role name off-thread.
@@ -50,31 +49,26 @@ func (a *App) modifyRole(guild store.GuildID, role store.RoleID, data api.Modify
 	if a == nil || a.roleManage == nil || guild == 0 || role == 0 {
 		return
 	}
-	go func() {
-		if _, err := a.roleManage.ModifyRole(discord.GuildID(guild), discord.RoleID(role), data); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		_, err := a.roleManage.ModifyRole(discord.GuildID(guild), discord.RoleID(role), data)
+		return err
+	})
 }
 func (a *App) DeleteRole(guild store.GuildID, role store.RoleID) {
 	if a == nil || a.roleManage == nil || guild == 0 || role == 0 {
 		return
 	}
-	go func() {
-		if err := a.roleManage.DeleteRole(discord.GuildID(guild), discord.RoleID(role), api.AuditLogReason("")); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.roleManage.DeleteRole(discord.GuildID(guild), discord.RoleID(role), api.AuditLogReason(""))
+	})
 }
 
 func (a *App) MoveRole(guild store.GuildID, role store.RoleID, position int) {
 	if a == nil || a.roleManage == nil || role == 0 {
 		return
 	}
-	go func() {
+	a.runInBackground(func() error {
 		_, err := a.roleManage.MoveRoles(discord.GuildID(guild), api.MoveRolesData{Roles: []api.MoveRoleData{{ID: discord.RoleID(role), Position: option.NewNullableInt(position)}}})
-		if err != nil {
-			a.reportError(err)
-		}
-	}()
+		return err
+	})
 }

@@ -16,7 +16,7 @@ What's missing is the **client itself** — everything that turns "a token" and 
 toolkit" into a usable Discord app: session orchestration, a normalized state store,
 Discord-markup rendering, a 4-panel UI, a composer, and login (including QR/remote-auth).
 
-App name is **tuicord**: `cmd/tuicord/`, config at `~/.config/tuicord/config.toml`,
+App name is **tuicord-v2**: `cmd/tuicord/`, config at `~/.config/tuicord-v2/config.toml`,
 keyring service `tuicord` (already set).
 
 ## Reference implementations (on disk, not in this repo)
@@ -69,7 +69,7 @@ Each ships with a package/doc comment + `example_test` (text pkg is the DoD temp
 - TDD 80%+ (nesting, code fences suppress inner parsing, unknown ids degrade).
 
 ### `internal/config/` — TOML config
-- `~/.config/tuicord/config.toml`; `[layout]` (guilds_width, channels_width, members=auto),
+- `~/.config/tuicord-v2/config.toml`; `[layout]` (guilds_width, channels_width, members=auto),
   `[keys]`, `[theme]`. `Load() (Config, error)` with defaults; write default on first run.
 - Add dep `github.com/BurntSushi/toml`.
 

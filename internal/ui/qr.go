@@ -74,18 +74,18 @@ func (p *QRPanel) Layout() *layout.Node { return &p.node }
 // Draw renders the QR code (two modules per character cell using half blocks)
 // with the status line beneath it.
 func (p *QRPanel) Draw(r screen.Region) {
-	fill(r, p.styles.Text)
+	fill(r, p.styles.Cell("auth.qr"))
 	if r.Width() <= 0 || r.Height() <= 0 {
 		return
 	}
 	if p.modePrompt {
-		fill(r, p.styles.Text)
-		drawText(r, 1, 1, "CAPTCHA required after QR approval", p.styles.Accent)
-		drawText(r, 1, 3, "Choose how to complete it:", p.styles.Text)
+		fill(r, p.styles.Cell("auth.qr"))
+		drawText(r, 1, 1, "CAPTCHA required after QR approval", p.styles.Cell("auth.title"))
+		drawText(r, 1, 3, "Choose how to complete it:", p.styles.Cell("auth.qr"))
 		first, second := modeChoices(p.preferredMode)
 		drawModeChoice(r, 1, 5, loginModeLabel(first), p.modeSelection == 0, first == config.AuthModeTUI, p.styles)
 		drawModeChoice(r, 1, 6, loginModeLabel(second), p.modeSelection == 1, second == config.AuthModeTUI, p.styles)
-		drawText(r, 1, min(8, r.Height()-1), "Enter select • ↑/↓ choose • Esc cancel", p.styles.Muted)
+		drawText(r, 1, min(8, r.Height()-1), "Enter select • ↑/↓ choose • Esc cancel", p.styles.Cell("auth.hint"))
 		return
 	}
 	if p.captchaImage != nil {
@@ -95,20 +95,20 @@ func (p *QRPanel) Draw(r screen.Region) {
 			BrowserWidth: p.captchaImageWidth(), BrowserHeight: p.captchaImageHeight(),
 		}
 		p.captchaImage.Draw(r.Clip(screen.Rect{W: r.Width(), H: imageHeight}))
-		drawText(r, 0, r.Height()-1, p.captchaStatus, p.styles.Muted)
+		drawText(r, 0, r.Height()-1, p.captchaStatus, p.styles.Cell("auth.status"))
 		return
 	}
 	y := 0
 	if p.matrix != nil {
 		var ok bool
-		y, ok = drawQR(r, p.matrix)
+		y, ok = drawQRStyled(r, p.matrix, p.styles.Cell("auth.qr.dark"), p.styles.Cell("auth.qr.light"))
 		if !ok {
-			drawText(r, 0, 0, "Terminal too small for QR code.", p.styles.Muted)
-			drawText(r, 0, min(1, r.Height()-1), "Make this pane wider or taller.", p.styles.Muted)
+			drawText(r, 0, 0, "Terminal too small for QR code.", p.styles.Cell("auth.hint"))
+			drawText(r, 0, min(1, r.Height()-1), "Make this pane wider or taller.", p.styles.Cell("auth.hint"))
 			return
 		}
 	}
-	drawText(r, 0, min(y+1, r.Height()-1), p.status, p.styles.Muted)
+	drawText(r, 0, min(y+1, r.Height()-1), p.status, p.styles.Cell("auth.status"))
 }
 
 // Handle ignores input; the panel is driven by the remote-auth flow.
@@ -243,7 +243,7 @@ func drawModeChoice(r screen.Region, x, y int, label string, selected, preferred
 	if preferred {
 		hint = " (preferred)"
 	}
-	drawText(r, x, y, marker+label+hint, styles.Text)
+	drawText(r, x, y, marker+label+hint, styles.Cell("auth.choice"))
 }
 
 func browserMouseActions(ev input.MouseEvent, x, y int) []map[string]any {
@@ -321,7 +321,10 @@ func browserKey(ev input.KeyEvent) (string, bool) {
 // each character row encodes two module rows. Returns the next free row and
 // whether the whole code fit; clipped QR codes are usually unscannable.
 func drawQR(r screen.Region, matrix [][]bool) (int, bool) {
-	on := screen.Style{Fg: screen.RGB(0, 0, 0), Bg: screen.RGB(255, 255, 255)}
+	return drawQRStyled(r, matrix, screen.Style{Fg: screen.RGB(0, 0, 0), Bg: screen.RGB(255, 255, 255)}, screen.Style{Fg: screen.RGB(255, 255, 255), Bg: screen.RGB(0, 0, 0)})
+}
+
+func drawQRStyled(r screen.Region, matrix [][]bool, dark, light screen.Style) (int, bool) {
 	rows := len(matrix)
 	cols := qrCols(matrix)
 	qrRows := (rows + 1) / 2
@@ -338,7 +341,7 @@ func drawQR(r screen.Region, matrix [][]bool) (int, bool) {
 		for x := 0; x < cols; x++ {
 			upper := qrModule(matrix, top, x)
 			lower := qrModule(matrix, top+1, x)
-			r.Set(x0+x, y, halfBlock(upper, lower, on))
+			r.Set(x0+x, y, halfBlockStyled(upper, lower, dark, light))
 		}
 		y++
 	}
@@ -362,16 +365,20 @@ func qrModule(matrix [][]bool, row, col int) bool {
 // halfBlock picks the glyph/colors so a light module is shown as the terminal's
 // light color and a dark module as dark, matching a scannable QR.
 func halfBlock(upper, lower bool, on screen.Style) screen.Cell {
+	return halfBlockStyled(upper, lower, on, screen.Style{Fg: on.Bg, Bg: on.Fg})
+}
+
+func halfBlockStyled(upper, lower bool, dark, light screen.Style) screen.Cell {
 	// Convention: true = dark module (drawn dark). We invert to keep quiet zones
 	// light so phone cameras can lock on.
 	switch {
 	case upper && lower:
-		return screen.Cell{Content: " ", Style: screen.Style{Bg: on.Fg}}
+		return screen.Cell{Content: " ", Style: screen.Style{Bg: dark.Fg}}
 	case !upper && !lower:
-		return screen.Cell{Content: " ", Style: screen.Style{Bg: on.Bg}}
+		return screen.Cell{Content: " ", Style: screen.Style{Bg: light.Bg}}
 	case upper && !lower:
-		return screen.Cell{Content: "▀", Style: screen.Style{Fg: on.Fg, Bg: on.Bg}}
+		return screen.Cell{Content: "▀", Style: screen.Style{Fg: dark.Fg, Bg: light.Bg}}
 	default: // lower only
-		return screen.Cell{Content: "▄", Style: screen.Style{Fg: on.Fg, Bg: on.Bg}}
+		return screen.Cell{Content: "▄", Style: screen.Style{Fg: dark.Fg, Bg: light.Bg}}
 	}
 }

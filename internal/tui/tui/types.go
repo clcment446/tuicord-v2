@@ -51,6 +51,12 @@ type Overlay interface {
 	DrawOverlay(screen.Region)
 }
 
+// EventOverlay optionally receives events before retained children. It is used
+// for transient popups that are drawn over, but are not part of, the tree.
+type EventOverlay interface {
+	HandleOverlay(Event) bool
+}
+
 // Focusable is implemented by widgets that can receive keyboard focus.
 type Focusable interface {
 	// CanFocus reports whether the widget should be present in the focus ring.
@@ -79,4 +85,19 @@ type FocusOwnerIndicator interface {
 // when no previous focused widget can be preserved.
 type PreferredFocus interface {
 	PreferredFocus() bool
+}
+
+// VimFocusTraverser opts a focused widget into h/l focus traversal. The widget
+// may consume the key for a local expand/unfold action; returning false asks
+// the runtime to move through the normal focus ring.
+type VimFocusTraverser interface {
+	VimFocusEnabled() bool
+	HandleVimFocus(forward bool) bool
+}
+
+// FocusRequester lets a root widget request an exact focus transfer after the
+// current event has finished routing. Modal input modes use it to move between
+// a navigation surface and an editor without exposing the FocusManager.
+type FocusRequester interface {
+	TakeFocusRequest() Widget
 }

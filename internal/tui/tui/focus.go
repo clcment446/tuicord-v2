@@ -7,8 +7,10 @@ import "reflect"
 // It is a pure state holder: callers decide when to rebuild the ring and how
 // to present focus changes to widgets.
 type FocusManager struct {
-	ring    []Widget
-	current int
+	ring         []Widget
+	current      int
+	history      []Widget
+	historyIndex int
 }
 
 // Len returns the number of focusable widgets in the ring.
@@ -57,9 +59,11 @@ func (f *FocusManager) Replace(widgets []Widget) {
 		preferred, ok := w.(PreferredFocus)
 		if ok && preferred.PreferredFocus() {
 			f.current = i
+			f.recordVisit(w)
 			return
 		}
 	}
+	f.recordVisit(f.ring[f.current])
 }
 
 // Clear removes every widget from the focus ring.
@@ -89,6 +93,7 @@ func (f *FocusManager) Set(w Widget) bool {
 		return false
 	}
 	f.current = i
+	f.recordVisit(w)
 	return true
 }
 
@@ -99,9 +104,11 @@ func (f *FocusManager) Next() Widget {
 	}
 	if f.current < 0 {
 		f.current = 0
+		f.recordVisit(f.ring[f.current])
 		return f.ring[f.current]
 	}
 	f.current = (f.current + 1) % len(f.ring)
+	f.recordVisit(f.ring[f.current])
 	return f.ring[f.current]
 }
 
@@ -112,13 +119,47 @@ func (f *FocusManager) Prev() Widget {
 	}
 	if f.current < 0 {
 		f.current = 0
+		f.recordVisit(f.ring[f.current])
 		return f.ring[f.current]
 	}
 	f.current--
 	if f.current < 0 {
 		f.current = len(f.ring) - 1
 	}
+	f.recordVisit(f.ring[f.current])
 	return f.ring[f.current]
+}
+
+// Back focuses the most recently visited widget before the current one.
+// Widgets no longer present in the current focus ring are skipped.
+func (f *FocusManager) Back() Widget {
+	if f == nil || len(f.ring) == 0 {
+		return nil
+	}
+	for i := f.historyIndex - 1; i >= 0; i-- {
+		if index := f.index(f.history[i]); index >= 0 {
+			f.current = index
+			f.historyIndex = i
+			return f.ring[index]
+		}
+	}
+	return nil
+}
+
+// Forward focuses the next widget in the visit history, skipping widgets no
+// longer present in the current focus ring.
+func (f *FocusManager) Forward() Widget {
+	if f == nil || len(f.ring) == 0 {
+		return nil
+	}
+	for i := f.historyIndex + 1; i < len(f.history); i++ {
+		if index := f.index(f.history[i]); index >= 0 {
+			f.current = index
+			f.historyIndex = i
+			return f.ring[index]
+		}
+	}
+	return nil
 }
 
 // Remove deletes a widget from the focus ring.
@@ -150,6 +191,20 @@ func (f *FocusManager) index(w Widget) int {
 		}
 	}
 	return -1
+}
+
+func (f *FocusManager) recordVisit(w Widget) {
+	if f == nil || w == nil {
+		return
+	}
+	if f.historyIndex >= 0 && f.historyIndex < len(f.history) && sameWidget(f.history[f.historyIndex], w) {
+		return
+	}
+	if f.historyIndex+1 < len(f.history) {
+		f.history = f.history[:f.historyIndex+1]
+	}
+	f.history = append(f.history, w)
+	f.historyIndex = len(f.history) - 1
 }
 
 func canFocus(w Widget) bool {

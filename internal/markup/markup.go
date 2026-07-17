@@ -84,6 +84,8 @@ const (
 	// Kind_FakeSticker is a marked link used to share a sticker
 	// when the sender cannot use it natively. URL is the unmarked CDN URL.
 	Kind_FakeSticker
+	// Kind_Small is Discord's -# small-text line.
+	Kind_Small
 )
 
 const (
@@ -156,6 +158,8 @@ type Span struct {
 	Kind Kind
 	Text string
 	URL  string // set for Kind_Link
+	// HeaderLevel is 1-based for Kind_Header spans and zero otherwise.
+	HeaderLevel int
 	// Quoted marks spans parsed inside a blockquote. It lets renderers preserve
 	// quote styling while still handling inline entities such as custom emoji.
 	Quoted bool

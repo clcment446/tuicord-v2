@@ -28,10 +28,14 @@ type ForumPostPrompt struct {
 
 func NewForumPostPrompt(tags []store.Tag, styles Styles, onSubmit func(string, string, []uint64), onClose func()) *ForumPostPrompt {
 	p := &ForumPostPrompt{title: widget.NewTextInput("Post title…"), body: widget.NewTextInput("First message…"), tags: append([]store.Tag(nil), tags...), selected: map[uint64]bool{}, tagList: widget.NewItemList(nil), onSubmit: onSubmit, onClose: onClose, node: layout.Node{Grow: 1}}
-	p.title.SetStyle(styles.Text)
-	p.body.SetStyle(styles.Text)
-	p.tagList.SetStyle(styles.Text)
-	p.tagList.SetSelectedStyle(styles.Accent)
+	p.title.SetStyle(styles.Cell("forum.title"))
+	p.title.SetPlaceholderStyle(styles.Cell("forum.title.placeholder"))
+	p.title.SetCursorStyle(styles.Cell("forum.title.cursor"))
+	p.body.SetStyle(styles.Cell("forum.body"))
+	p.body.SetPlaceholderStyle(styles.Cell("forum.body.placeholder"))
+	p.body.SetCursorStyle(styles.Cell("forum.body.cursor"))
+	p.tagList.SetStyle(styles.Cell("forum.tags"))
+	p.tagList.SetSelectedStyle(styles.Cell("forum.tags.selected"))
 	p.root = widget.Column(titled("Title", p.title), titled("Body", p.body), titled("Tags — Space toggles", p.tagList), widget.NewText("Tab fields · Ctrl+Enter create · Esc cancel"))
 	p.root.Children()[0].Layout().Basis = 3
 	p.root.Children()[1].Layout().Basis = 3

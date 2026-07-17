@@ -27,6 +27,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/session"
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/json/option"
+	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // poster is the slice of tui.App the orchestrator depends on. It exists so the
@@ -43,6 +44,7 @@ type sender interface {
 	PinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	UnpinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	CrosspostMessage(discord.ChannelID, discord.MessageID) (*discord.Message, error)
+	React(discord.ChannelID, discord.MessageID, discord.APIEmoji) error
 }
 
 // threadClient is the slice of the arikawa client used to list and mutate
@@ -280,19 +282,12 @@ type App struct {
 	now                 func() time.Time
 
 	resourceMu       sync.Mutex
-	historyLoaded    map[store.ChannelID]struct{}
-	historyPending   map[store.ChannelID]struct{}
-	historyExhausted map[store.ChannelID]struct{}
-	rolesLoaded      map[store.GuildID]struct{}
-	rolesPending     map[store.GuildID]struct{}
-	guildsLoaded     bool
-	guildsPending    bool
-	channelsLoaded   map[store.GuildID]struct{}
-	channelsPending  map[store.GuildID]struct{}
-	threadsLoaded    map[store.GuildID]struct{}
-	threadsPending   map[store.GuildID]struct{}
-	archivedLoaded   map[store.ChannelID]struct{}
-	archivedPending  map[store.ChannelID]struct{}
+	historyGate      loadGate[store.ChannelID]
+	rolesGate        loadGate[store.GuildID]
+	guildsGate       singleLoadGate
+	channelsGate     loadGate[store.GuildID]
+	threadsGate      loadGate[store.GuildID]
+	archivedGate     loadGate[store.ChannelID]
 	archivedBefore   map[store.ChannelID]discord.Timestamp
 	forumMetaPending map[store.ChannelID]struct{}
 
@@ -310,7 +305,7 @@ type App struct {
 
 // New returns an orchestrator over the given session, store, and UI runtime.
 func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
-	return &App{
+	a := &App{
 		store:               st,
 		ui:                  ui,
 		send:                sess,
@@ -332,6 +327,7 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		commandCache:        make(map[CommandContext]commandCacheEntry),
 		now:                 time.Now,
 	}
+	return a
 }
 
 // SubmitCommand dispatches a chat-input command in the active channel. The UI
@@ -467,39 +463,11 @@ func (a *App) SearchGIFs(query string, done func([]clientdiscord.GIFResult, erro
 }
 
 func (a *App) ensureResourceMaps() {
-	if a.historyLoaded == nil {
-		a.historyLoaded = map[store.ChannelID]struct{}{}
-	}
-	if a.historyPending == nil {
-		a.historyPending = map[store.ChannelID]struct{}{}
-	}
-	if a.historyExhausted == nil {
-		a.historyExhausted = map[store.ChannelID]struct{}{}
-	}
-	if a.rolesLoaded == nil {
-		a.rolesLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.rolesPending == nil {
-		a.rolesPending = map[store.GuildID]struct{}{}
-	}
-	if a.channelsLoaded == nil {
-		a.channelsLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.channelsPending == nil {
-		a.channelsPending = map[store.GuildID]struct{}{}
-	}
-	if a.threadsLoaded == nil {
-		a.threadsLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.threadsPending == nil {
-		a.threadsPending = map[store.GuildID]struct{}{}
-	}
-	if a.archivedLoaded == nil {
-		a.archivedLoaded = map[store.ChannelID]struct{}{}
-	}
-	if a.archivedPending == nil {
-		a.archivedPending = map[store.ChannelID]struct{}{}
-	}
+	a.historyGate.ensure()
+	a.rolesGate.ensure()
+	a.channelsGate.ensure()
+	a.threadsGate.ensure()
+	a.archivedGate.ensure()
 	if a.archivedBefore == nil {
 		a.archivedBefore = map[store.ChannelID]discord.Timestamp{}
 	}
@@ -873,21 +841,41 @@ func (a *App) handleRoleUpsert(guild discord.GuildID, role discord.Role) {
 // style). On success the reconciliation happens when the gateway echoes the
 // message back (matched by nonce), so no duplicate appears.
 func (a *App) Send(content string) {
-	if strings.TrimSpace(content) == "" || a.activeChannel == 0 {
+	a.SendFiles(content, nil, nil, nil)
+}
+
+// SendFiles posts message content and/or uploaded files to the active channel
+// with an optimistic local echo. cleanup runs after the multipart request has
+// completed (whether it succeeds or fails), and also runs immediately when a
+// send cannot be started. It is intended for closing opened files and removing
+// managed temporary clipboard uploads.
+func (a *App) SendFiles(content string, files []sendpart.File, optimistic []store.Attachment, cleanup func()) {
+	if a == nil || (strings.TrimSpace(content) == "" && len(files) == 0) || a.activeChannel == 0 {
+		if cleanup != nil {
+			cleanup()
+		}
 		return
 	}
+
 	channel := a.activeChannel
 	nonce := newNonce()
-
+	fileCopy := append([]sendpart.File(nil), files...)
+	attachmentCopy := append([]store.Attachment(nil), optimistic...)
 	a.store.AppendMessage(store.Message{
-		ChannelID: channel,
-		Author:    "you",
-		Content:   content,
-		Nonce:     nonce,
-		Pending:   true,
+		ChannelID:   channel,
+		Author:      "you",
+		Content:     content,
+		Nonce:       nonce,
+		Pending:     true,
+		Attachments: attachmentCopy,
 	})
 
-	go a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce}, nonce)
+	go func() {
+		if cleanup != nil {
+			defer cleanup()
+		}
+		a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce, Files: fileCopy}, nonce)
+	}()
 }
 
 // SendSticker posts a native Discord sticker to the active channel.
@@ -1018,12 +1006,10 @@ func (a *App) EditMessage(channel store.ChannelID, id store.MessageID, content s
 	if channel == 0 || id == 0 {
 		return
 	}
-	go func() {
+	a.runInBackground(func() error {
 		_, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content)
-		if err != nil {
-			a.reportError(err)
-		}
-	}()
+		return err
+	})
 }
 
 // DeleteMessage deletes a message. Local removal waits for MESSAGE_DELETE.
@@ -1031,11 +1017,20 @@ func (a *App) DeleteMessage(channel store.ChannelID, id store.MessageID) {
 	if channel == 0 || id == 0 {
 		return
 	}
-	go func() {
-		if err := a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), ""); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), "")
+	})
+}
+
+// AddReaction applies the current user's reaction and lets the gateway update
+// the local reaction count.
+func (a *App) AddReaction(channel store.ChannelID, id store.MessageID, emoji string) {
+	if channel == 0 || id == 0 || emoji == "" {
+		return
+	}
+	a.runInBackground(func() error {
+		return a.send.React(discord.ChannelID(channel), discord.MessageID(id), discord.APIEmoji(emoji))
+	})
 }
 
 // SetPinned pins or unpins a message. Discord's pin event omits the message ID,
@@ -1335,138 +1330,89 @@ func (a *App) markRolesLoaded(guild store.GuildID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.rolesLoaded[guild] = struct{}{}
-	delete(a.rolesPending, guild)
+	a.rolesGate.markLoaded(guild)
 }
 
 func (a *App) markChannelsLoaded(guild store.GuildID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.channelsLoaded[guild] = struct{}{}
-	delete(a.channelsPending, guild)
+	a.channelsGate.markLoaded(guild)
 }
 
 func (a *App) beginGuildLoad() bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	if a.guildsLoaded || a.guildsPending {
-		return false
-	}
-	a.guildsPending = true
-	return true
+	return a.guildsGate.begin()
 }
 
 func (a *App) finishGuildLoad(ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	a.guildsPending = false
-	if ok {
-		a.guildsLoaded = true
-	}
+	a.guildsGate.finish(ok)
 }
 
 func (a *App) beginHistoryLoad(channel store.ChannelID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.historyLoaded[channel]; ok {
-		return false
-	}
-	if _, ok := a.historyPending[channel]; ok {
-		return false
-	}
-	a.historyPending[channel] = struct{}{}
-	return true
+	return a.historyGate.begin(channel)
 }
 
 func (a *App) finishHistoryLoad(channel store.ChannelID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.historyPending, channel)
-	if ok {
-		a.historyLoaded[channel] = struct{}{}
-	}
+	a.historyGate.finish(channel, ok)
 }
 
 func (a *App) beginOlderHistoryLoad(channel store.ChannelID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.historyPending[channel]; ok {
-		return false
-	}
-	if _, ok := a.historyExhausted[channel]; ok {
-		return false
-	}
-	a.historyPending[channel] = struct{}{}
-	return true
+	return a.historyGate.beginOlder(channel)
 }
 
 func (a *App) finishOlderHistory(channel store.ChannelID, exhausted bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.historyPending, channel)
-	if exhausted {
-		a.historyExhausted[channel] = struct{}{}
-	}
+	a.historyGate.finishOlder(channel, exhausted)
 }
 
 func (a *App) markHistoryExhausted(channel store.ChannelID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.historyExhausted[channel] = struct{}{}
+	a.historyGate.markExhausted(channel)
 }
 
 func (a *App) beginRoleLoad(guild store.GuildID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.rolesLoaded[guild]; ok {
-		return false
-	}
-	if _, ok := a.rolesPending[guild]; ok {
-		return false
-	}
-	a.rolesPending[guild] = struct{}{}
-	return true
+	return a.rolesGate.begin(guild)
 }
 
 func (a *App) finishRoleLoad(guild store.GuildID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.rolesPending, guild)
-	if ok {
-		a.rolesLoaded[guild] = struct{}{}
-	}
+	a.rolesGate.finish(guild, ok)
 }
 
 func (a *App) beginChannelLoad(guild store.GuildID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.channelsLoaded[guild]; ok {
-		return false
-	}
-	if _, ok := a.channelsPending[guild]; ok {
-		return false
-	}
-	a.channelsPending[guild] = struct{}{}
-	return true
+	return a.channelsGate.begin(guild)
 }
 
 func (a *App) finishChannelLoad(guild store.GuildID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.channelsPending, guild)
-	if ok {
-		a.channelsLoaded[guild] = struct{}{}
-	}
+	a.channelsGate.finish(guild, ok)
 }
 
 // Connect opens the gateway and blocks until ctx is canceled.

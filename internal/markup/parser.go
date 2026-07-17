@@ -35,6 +35,10 @@ func (p *parser) run() {
 func (p *parser) matchAt(i int) int {
 	if p.atLineStart(i) {
 		switch {
+		case p.has(i, "-#"):
+			if n := p.scanSmall(i); n > i {
+				return n
+			}
 		case p.has(i, "#"):
 			if n := p.scanHeader(i); n > i {
 				return n
@@ -80,6 +84,18 @@ func (p *parser) matchAt(i int) int {
 	}
 }
 
+// scanSmall consumes Discord's -# small-text line. The marker requires a
+// following space and the rest of the line remains available as plain text.
+func (p *parser) scanSmall(i int) int {
+	if i+3 >= len(p.src) || p.src[i:i+2] != "-#" || p.src[i+2] != ' ' {
+		return i
+	}
+	start := i + 3
+	end := lineEnd(p.src, start)
+	p.emit(Span{Kind: Kind_Small, Text: p.src[start:end]})
+	return end
+}
+
 func (p *parser) has(i int, s string) bool {
 	return strings.HasPrefix(p.src[i:], s)
 }
@@ -89,12 +105,12 @@ func (p *parser) atLineStart(i int) bool {
 	return i == 0 || p.src[i-1] == '\n'
 }
 
-// scanHeader consumes a "# ", "## ", or "### " heading. The rest of the line
-// (up to but not including the newline) becomes one Kind_Header span. Inner
-// inline markup is not parsed in v1.
+// scanHeader consumes a Markdown heading up to level six. Plain headings keep
+// their historical single Kind_Header span; headings containing inline markup
+// emit a header marker followed by inline spans carrying the same level.
 func (p *parser) scanHeader(i int) int {
 	level := 0
-	for level < 3 && i+level < len(p.src) && p.src[i+level] == '#' {
+	for level < 6 && i+level < len(p.src) && p.src[i+level] == '#' {
 		level++
 	}
 	marker := i + level
@@ -103,7 +119,17 @@ func (p *parser) scanHeader(i int) int {
 	}
 	start := marker + 1
 	end := lineEnd(p.src, start)
-	p.emit(Span{Kind: Kind_Header, Text: p.src[start:end]})
+	inner := &parser{src: p.src[start:end], res: p.res, format: p.format}
+	inner.run()
+	if len(inner.spans) == 1 && inner.spans[0].Kind == Kind_Text {
+		p.emit(Span{Kind: Kind_Header, Text: inner.spans[0].Text, HeaderLevel: level})
+		return end
+	}
+	p.emit(Span{Kind: Kind_Header, HeaderLevel: level})
+	for _, span := range inner.spans {
+		span.HeaderLevel = level
+		p.emit(span)
+	}
 	return end
 }
 
