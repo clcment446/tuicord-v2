@@ -207,7 +207,7 @@ If this program doesn't stay this small, the API failed:
 
 ```go
 func main() {
-    cfg := config.Load()                       // defaults if file absent
+    cfg := config.Load()                       // defaults if file absent; ~/.config/tuicord-v2/config.toml
     app := tui.New(tui.WithTheme(cfg.Theme))
 
     sidebar := widget.NewList(guilds)
@@ -237,7 +237,7 @@ test rig.
 internal/app/        session orchestration: gateway → store → app.Post(ui update)
 internal/store/      normalized state: guilds, channels, messages, members
 internal/markup/     Discord markdown → []Span{Text|Emoji|Mention|Link|Code}
-internal/config/     TOML: ~/.config/<name>/config.toml (+ [keys], [theme])
+internal/config/     TOML: ~/.config/tuicord-v2/config.toml (+ [keys], [colors])
 cmd/<name>/main.go
 ```
 

@@ -8,7 +8,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
@@ -31,19 +33,43 @@ type ChatView struct {
 	styles     Styles
 	node       layout.Node
 
-	visibleLines       []chatLine
-	contextMessage     store.Message
-	contextMessageSet  bool
-	componentAction    ComponentAction
-	componentActionSet bool
-	entityAction       markup.Action
-	entityActionSet    bool
-	componentFlashes   map[string]time.Time
-	expandedComponents map[string]bool
-	selectedComponents map[string]map[string]bool
-	multiPickers       map[string]bool
-	activePicker       componentAction
-	activePickerSet    bool
+	visibleLines            []chatLine
+	visibleStart            int
+	contextMessage          store.Message
+	contextMessageSet       bool
+	componentAction         ComponentAction
+	componentActionSet      bool
+	entityAction            markup.Action
+	entityActionSet         bool
+	componentFlashes        map[string]time.Time
+	expandedComponents      map[string]bool
+	collapsedHeaders        map[string]bool
+	focusedMessage          store.Message
+	focusedMessageSet       bool
+	focusedExplicit         bool
+	keyboardFocused         bool
+	vimNavigation           bool
+	mouseBreakpointTracking bool
+	highlightFocusBlock     bool
+	focusKey                string
+	focusOrder              []string
+	focusMessages           map[string]store.Message
+	focusRanges             map[string]messageRange
+	focusStops              []chatFocusStop
+	focusStopKey            string
+	focusStopIndex          int
+	renderLineCount         int
+	viewportHeight          int
+	onMessageAction         func(rune, store.Message)
+	onMessageCopy           func([]store.Message)
+	selectionStart          int
+	selectionActive         bool
+	headerMessageKey        string
+	headerSeq               int
+	selectedComponents      map[string]map[string]bool
+	multiPickers            map[string]bool
+	activePicker            componentAction
+	activePickerSet         bool
 
 	mediaCfg     media.Config
 	mediaFetcher *media.Fetcher
@@ -94,18 +120,73 @@ type Styles struct {
 	Border  screen.Style
 	Pending screen.Style
 	Error   screen.Style
+	// Cells is the semantic cell palette. Legacy fields remain as compatibility
+	// aliases for widgets that have not yet moved to a named surface.
+	Cells     map[string]screen.Style
+	Custom    map[string]bool
+	Overrides *config.ColorOverrides
+}
+
+// Cell returns a semantic cell style, falling back to the legacy palette for
+// callers that use a surface not present in Cells.
+func (s Styles) Cell(name string) screen.Style {
+	if style, ok := s.Cells[name]; ok {
+		return config.ApplyColorRule(style, s.Overrides.Resolve(name))
+	}
+	var style screen.Style
+	switch name {
+	case "text", "messages.content":
+		style = s.Text
+	case "muted", "messages.thread", "messages.quote", "messages.code", "messages.attachment", "messages.reaction", "messages.timestamp":
+		style = s.Muted
+	case "messages.small":
+		style = s.Muted
+	case "accent", "messages.author", "messages.mention", "messages.roleMention", "messages.link", "messages.link.prettyLink", "messages.link.channel", "messages.link.message", "messages.link.invite":
+		style = s.Accent
+	case "messages.header1", "messages.header2", "messages.header3", "messages.header4", "messages.header5", "messages.header6":
+		style := s.Accent
+		style.Attrs |= screen.Bold | screen.Underline
+		return config.ApplyColorRule(style, s.Overrides.Resolve(name))
+	case "border", "panels.border":
+		style = s.Border
+	case "pending", "messages.pending":
+		style = s.Pending
+	case "error", "messages.failed":
+		style = s.Error
+	case "messages.focused":
+		style = screen.Style{Attrs: screen.Reverse}
+	case "messages.bold":
+		style = screen.Style{Attrs: screen.Bold}
+	case "messages.italic":
+		style = screen.Style{Attrs: screen.Italic}
+	case "messages.underlined":
+		style = screen.Style{Attrs: screen.Underline}
+	case "messages.strikethrough":
+		style = screen.Style{Attrs: screen.Strike}
+	case "messages.spoiler":
+		style = screen.Style{Attrs: screen.Reverse}
+	default:
+		style = s.Text
+	}
+	return config.ApplyColorRule(style, s.Overrides.Resolve(name))
+}
+
+func (s Styles) HasCustom(name string) bool {
+	return s.Custom[name] || s.Overrides.HasOverride(name)
 }
 
 // NewChatView returns a chat view over st. active reports which channel to show;
 // resolver (optional) resolves mentions and channel references for markup.
 func NewChatView(st *store.Store, active func() store.ChannelID, resolver func() markup.Resolver, styles Styles) *ChatView {
 	return &ChatView{
-		store:    st,
-		active:   active,
-		resolver: resolver,
-		styles:   styles,
-		mediaCfg: media.DefaultConfig(),
-		node:     layout.Node{Grow: 1},
+		store:           st,
+		active:          active,
+		resolver:        resolver,
+		styles:          styles,
+		keyboardFocused: true,
+		focusStopIndex:  -1,
+		mediaCfg:        media.DefaultConfig(),
+		node:            layout.Node{Grow: 1},
 	}
 }
 
@@ -158,9 +239,57 @@ func (w *ChatView) Layout() *layout.Node { return &w.node }
 // CanFocus lets the chat view take focus for scrolling.
 func (w *ChatView) CanFocus() bool { return true }
 
+// PreferredFocus starts an opted-in Vim session on message navigation rather
+// than in the composer.
+func (w *ChatView) PreferredFocus() bool { return w != nil && w.vimNavigation }
+
+func (w *ChatView) VimFocusEnabled() bool { return w != nil && w.vimNavigation }
+
+// SetFocusOwner records whether the chat panel itself owns keyboard focus.
+// Component shortcut labels are deliberately hidden while another panel owns
+// focus, preventing number keys typed elsewhere from looking actionable here.
+func (w *ChatView) SetFocusOwner(focused bool) {
+	if w == nil || w.keyboardFocused == focused {
+		return
+	}
+	w.keyboardFocused = focused
+	w.invalidateBodies()
+}
+
+// SetVimNavigation enables modal hjkl/message actions for this chat view.
+// It is disabled by default so ordinary letter input remains inert outside
+// explicit Vim configurations.
+func (w *ChatView) SetVimNavigation(enabled bool) {
+	if w != nil {
+		w.vimNavigation = enabled
+	}
+}
+
+// SetMouseBreakpointTracking opts pointer motion into changing the keyboard
+// stopping point. Click activation remains available regardless of this flag.
+func (w *ChatView) SetMouseBreakpointTracking(enabled bool) {
+	if w != nil {
+		w.mouseBreakpointTracking = enabled
+	}
+}
+
+// SetHighlightFocusBlock expands the focused anchor across its full logical
+// block, through the line before the next stopping point.
+func (w *ChatView) SetHighlightFocusBlock(enabled bool) {
+	if w != nil {
+		w.highlightFocusBlock = enabled
+	}
+}
+
+// OnMessageAction receives D/R/E/A actions for the focused message row.
+func (w *ChatView) OnMessageAction(fn func(rune, store.Message)) { w.onMessageAction = fn }
+
+// OnMessageCopy receives the messages selected through Vim visual mode.
+func (w *ChatView) OnMessageCopy(fn func([]store.Message)) { w.onMessageCopy = fn }
+
 func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style, spec mediaSpec) []chatLine {
 	state := w.ensureMedia(url)
-	muted := mergeStyle(base, w.styles.Muted)
+	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
 	switch {
 	case state == nil:
 		return []chatLine{{segments: []chatSegment{{text: label, style: muted}}}}
@@ -310,7 +439,7 @@ func (w *ChatView) normalizeMediaSpec(spec mediaSpec) mediaSpec {
 	return spec
 }
 
-func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia, width int) {
+func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia, width int, focused bool) {
 	if block == nil || block.img == nil {
 		return
 	}
@@ -319,7 +448,12 @@ func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia
 		cols = max(min(width-x, block.cols), 1)
 	}
 	rows := max(block.rows, 1)
-	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url)).SetStyle(block.style)
+	// Kitty placements must remain below popup menus rendered over the chat.
+	style := block.style
+	if focused {
+		style = w.styles.focusedStyle(style)
+	}
+	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url)).SetZ(-1).SetStyle(style)
 	if block.placementKey != "" {
 		img.SetPlacementID(stableImageID(block.placementKey))
 	}
@@ -327,6 +461,19 @@ func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia
 		img.SetPixelSize(b.Dx(), b.Dy())
 	}
 	img.Draw(r.Clip(screen.Rect{X: x, Y: y, W: cols, H: rows}))
+}
+
+// focusedStyle swaps a cell's colors by default. Explicit focused fg/bg rules
+// are final colors from colors.conf, so they intentionally replace the swap.
+func (s Styles) focusedStyle(base screen.Style) screen.Style {
+	focused := s.Cell("messages.focused")
+	if focused.Fg.Set() || focused.Bg.Set() {
+		base.Attrs &^= screen.Reverse
+		focused.Attrs &^= screen.Reverse
+		return mergeStyle(base, focused)
+	}
+	base.Attrs |= screen.Reverse
+	return mergeStyle(base, focused)
 }
 
 func stableImageID(s string) uint32 {
@@ -341,10 +488,11 @@ func stableImageID(s string) uint32 {
 
 // Draw renders wrapped message lines, newest at the bottom.
 func (w *ChatView) Draw(r screen.Region) {
-	fill(r, w.styles.Text)
+	fill(r, w.styles.Cell("messages.content"))
 	if r.Width() <= 0 || r.Height() <= 0 {
 		return
 	}
+	w.ensureInitialFocusedMessage()
 	lines := w.render(r.Width())
 	channel := w.active()
 	messages := w.store.Messages(channel)
@@ -362,6 +510,7 @@ func (w *ChatView) Draw(r screen.Region) {
 	} else {
 		w.bottomScroll.Update(len(lines), r.Height())
 	}
+	w.buildFocusIndex(lines, r.Height())
 	w.lastMessageChannel = channel
 	w.lastFirstMessage = firstMessage
 	w.lastLastMessage = lastMessage
@@ -377,28 +526,164 @@ func (w *ChatView) Draw(r screen.Region) {
 		displayLines = append([]chatLine{pinned}, displayLines[1:]...)
 	}
 	w.visibleLines = append(w.visibleLines[:0], displayLines...)
+	w.visibleStart = start
 	y := 0
 	w.spinnerVisible = false
 	drawnMedia := map[*inlineMedia]struct{}{}
-	for _, line := range displayLines {
+	for i, line := range displayLines {
 		if line.spinner {
 			w.spinnerVisible = true
 		}
+		lineIndex := start + i
+		stop, focused, fillFocus := w.focusedHighlightAt(lineIndex)
+		if w.selectionContainsLine(lineIndex) {
+			focused, fillFocus = true, true
+		}
+		focused = focused && !line.author
+		focusStart, focusEnd := 0, r.Width()
+		if focused && stop.kind == chatFocusControl && !fillFocus {
+			focusStart, focusEnd = stop.start, stop.end
+		}
 		if line.media != nil {
-			drawChatLine(r, 0, y, line)
+			if focused {
+				drawFocusedChatLine(r, 0, y, line, focusStart, focusEnd, w.styles.Cell("messages.focused"), fillFocus)
+			} else {
+				drawChatLine(r, 0, y, line)
+			}
 			if _, ok := drawnMedia[line.media]; !ok {
 				drawnMedia[line.media] = struct{}{}
-				w.drawInlineMedia(r, line.mediaX, y-line.mediaRow, line.media, r.Width())
+				w.drawInlineMedia(r, line.mediaX, y-line.mediaRow, line.media, r.Width(), focused)
 			}
 			y++
 			continue
 		}
-		drawChatLine(r, 0, y, line)
+		if focused {
+			drawFocusedChatLine(r, 0, y, line, focusStart, focusEnd, w.styles.Cell("messages.focused"), fillFocus)
+		} else {
+			drawChatLine(r, 0, y, line)
+		}
 		for _, inline := range line.inlineMedia {
-			w.drawInlineMedia(r, inline.col, y, inline.media, r.Width())
+			w.drawInlineMedia(r, inline.col, y, inline.media, r.Width(), focused)
 		}
 		y++
 	}
+}
+
+func (w *ChatView) ensureInitialFocusedMessage() {
+	if w == nil || !w.keyboardFocused {
+		return
+	}
+	messages := w.store.Messages(w.active())
+	if len(messages) == 0 {
+		return
+	}
+	latest := messages[len(messages)-1]
+	if w.focusedMessageSet && (w.focusedExplicit || messagePlacementPrefix(w.focusedMessage) == messagePlacementPrefix(latest)) {
+		return
+	}
+	if w.focusedMessageSet {
+		w.invalidateBodies()
+	}
+	w.focusedMessage = latest
+	w.focusedMessageSet = true
+	w.focusKey = messagePlacementPrefix(w.focusedMessage)
+	w.focusStopKey = ""
+}
+
+func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
+	w.focusOrder = w.focusOrder[:0]
+	if w.focusMessages == nil {
+		w.focusMessages = map[string]store.Message{}
+	}
+	for key := range w.focusMessages {
+		delete(w.focusMessages, key)
+	}
+	w.focusRanges = make(map[string]messageRange)
+	firstBody := map[string]int{}
+	for i, line := range lines {
+		if line.message.ID == 0 && line.message.Nonce == "" {
+			continue
+		}
+		key := messagePlacementPrefix(line.message)
+		if !line.author {
+			if _, ok := firstBody[key]; !ok {
+				firstBody[key] = i
+			}
+		}
+		if _, ok := w.focusMessages[key]; !ok {
+			w.focusOrder = append(w.focusOrder, key)
+			w.focusMessages[key] = line.message
+			w.focusRanges[key] = messageRange{start: i, end: i + 1}
+			continue
+		}
+		range_ := w.focusRanges[key]
+		range_.end = i + 1
+		w.focusRanges[key] = range_
+	}
+	w.focusStops = w.focusStops[:0]
+	for i, line := range lines {
+		if line.message.ID == 0 && line.message.Nonce == "" {
+			continue
+		}
+		messageKey := messagePlacementPrefix(line.message)
+		first, hasBody := firstBody[messageKey]
+		if hasBody && (i == first || line.embedStart) {
+			stop := chatFocusStop{kind: chatFocusMessage, key: messageKey + ":first", message: line.message, line: i}
+			if line.embedKey != "" {
+				stop.key = line.embedKey
+			}
+			if line.header != nil {
+				stop.kind = chatFocusHeader
+				stop.key = line.header.key
+				stop.headerKey = line.header.key
+			}
+			w.focusStops = append(w.focusStops, stop)
+		} else if line.header != nil {
+			w.focusStops = append(w.focusStops, chatFocusStop{
+				kind: chatFocusHeader, key: line.header.key, message: line.message,
+				line: i, headerKey: line.header.key,
+			})
+		}
+		for _, hit := range line.actions {
+			w.focusStops = append(w.focusStops, chatFocusStop{
+				kind: chatFocusControl, key: hit.action.key(), message: line.message,
+				line: i, start: hit.start, end: hit.end,
+			})
+		}
+	}
+	w.renderLineCount = len(lines)
+	w.viewportHeight = height
+	if len(w.focusOrder) == 0 || len(w.focusStops) == 0 {
+		w.focusKey = ""
+		w.focusedMessageSet = false
+		w.focusStopKey = ""
+		w.focusStopIndex = -1
+		return
+	}
+	selected := -1
+	for i := range w.focusStops {
+		if w.focusStops[i].key == w.focusStopKey {
+			selected = i
+			break
+		}
+	}
+	if selected < 0 && w.focusedMessageSet {
+		messageKey := messagePlacementPrefix(w.focusedMessage)
+		for i := range w.focusStops {
+			if messagePlacementPrefix(w.focusStops[i].message) == messageKey {
+				selected = i
+				break
+			}
+		}
+	}
+	if selected < 0 {
+		selected = len(w.focusStops) - 1
+	}
+	w.focusStopIndex = selected
+	w.focusStopKey = w.focusStops[selected].key
+	w.focusedMessage = w.focusStops[selected].message
+	w.focusKey = messagePlacementPrefix(w.focusedMessage)
+	w.focusedMessageSet = true
 }
 
 type chatLine struct {
@@ -407,16 +692,52 @@ type chatLine struct {
 	segments    []chatSegment
 	message     store.Message
 	author      bool
+	embedStart  bool
+	embedKey    string
 	media       *inlineMedia
 	mediaRow    int
 	mediaX      int
 	inlineMedia []positionedInlineMedia
 	actions     []componentHit
 	entities    []entityHit
+	header      *headerHit
 	// spinner marks a line that drew a media-loading spinner. Only spinners on
 	// screen need the tick to animate them, so Draw tracks whether any visible
 	// line carries this flag.
 	spinner bool
+	// restrictHighlight keeps a focus or visual-selection highlight inside a
+	// framed embed's content cells, leaving its box-drawing border intact.
+	restrictHighlight bool
+	highlightStart    int
+	highlightEnd      int
+}
+
+type headerHit struct {
+	key       string
+	level     int
+	collapsed bool
+}
+
+type chatFocusKind uint8
+
+const (
+	chatFocusMessage chatFocusKind = iota
+	chatFocusHeader
+	chatFocusControl
+)
+
+type chatFocusStop struct {
+	kind      chatFocusKind
+	key       string
+	message   store.Message
+	line      int
+	start     int
+	end       int
+	headerKey string
+}
+
+type messageRange struct {
+	start, end int
 }
 
 type entityHit struct {
@@ -606,12 +927,14 @@ func (w *ChatView) render(width int) []chatLine {
 func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width int) []chatLine {
 	w.emojiKeyPrefix = messagePlacementPrefix(m)
 	w.emojiSeq = 0
-	style := w.styles.Text
+	w.headerMessageKey = messagePlacementPrefix(m)
+	w.headerSeq = 0
+	style := w.styles.Cell("messages.content")
 	switch {
 	case m.Failed:
-		style = w.styles.Error
+		style = w.styles.Cell("messages.failed")
 	case m.Pending:
-		style = w.styles.Pending
+		style = w.styles.Cell("messages.pending")
 	}
 
 	w.bodyDeps = w.bodyDeps[:0]
@@ -746,8 +1069,13 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 	} else if m.Pending {
 		header += " (sending…)"
 	}
-	authorStyle := w.styles.Accent
-	if color := w.store.MemberColor(guild, m.AuthorID); color != 0 {
+	authorStyle := w.styles.Cell("messages.author")
+	if m.Failed {
+		authorStyle = mergeStyle(authorStyle, w.styles.Cell("messages.failed"))
+	} else if m.Pending {
+		authorStyle = mergeStyle(authorStyle, w.styles.Cell("messages.pending"))
+	}
+	if color := w.store.MemberColor(guild, m.AuthorID); color != 0 && !w.styles.HasCustom("messages.author") {
 		authorStyle.Fg = rgbColor(color)
 	}
 	return chatLine{text: header, style: authorStyle, message: m, author: true}
@@ -772,7 +1100,7 @@ func (w *ChatView) renderThreadStarter(m store.Message, channel store.ChannelID)
 	if c.Thread != nil && c.Thread.MessageCount > 0 {
 		text += " (" + strconv.Itoa(c.Thread.MessageCount) + " messages)"
 	}
-	return chatLine{text: text, style: w.styles.Muted, message: m}, true
+	return chatLine{text: text, style: w.styles.Cell("messages.thread"), message: m}, true
 }
 
 func stampMessage(lines []chatLine, m store.Message) []chatLine {
@@ -800,6 +1128,10 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 	var entities []entityHit
 	var inline []positionedInlineMedia
 	spinner := false
+	collapsedLevel := 0
+	skip := false
+	skipHeaderNewline := false
+	var pendingHeader *chatLine
 	used := 0
 	flush := func() {
 		lines = append(lines, chatLine{segments: line, inlineMedia: inline, entities: entities, spinner: spinner})
@@ -813,7 +1145,11 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 		parts := strings.Split(s, "\n")
 		for i, part := range parts {
 			if i > 0 {
-				flush()
+				if skipHeaderNewline && len(line) == 0 && len(inline) == 0 {
+					skipHeaderNewline = false
+				} else {
+					flush()
+				}
 			}
 			for cluster := range text.Clusters(part) {
 				if cluster.Width == 0 {
@@ -831,8 +1167,70 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 		}
 	}
 	for _, span := range markup.Parse(content, res) {
+		if pendingHeader != nil && span.Kind != markup.Kind_Header {
+			if span.HeaderLevel > 0 {
+				style := w.markupStyle(span, base)
+				for cluster := range text.Clusters(span.Text) {
+					if cluster.Width == 0 || (width > 0 && chatLineWidth(*pendingHeader)+cluster.Width > width) {
+						continue
+					}
+					pendingHeader.segments = appendChatSegment(pendingHeader.segments, chatSegment{text: cluster.Text, style: style})
+				}
+				continue
+			}
+			lines = append(lines, *pendingHeader)
+			pendingHeader = nil
+		}
+		if span.Kind == markup.Kind_Header {
+			level := span.HeaderLevel
+			key := w.headerMessageKey + ":header:" + strconv.Itoa(w.headerSeq)
+			w.headerSeq++
+			if collapsedLevel != 0 {
+				if level > collapsedLevel {
+					continue
+				}
+				collapsedLevel = 0
+				skip = false
+			}
+			style := w.markupStyle(span, base)
+			collapsed := w.collapsedHeaders[key]
+			marker := "▾ "
+			if collapsed {
+				marker = "▸ "
+			}
+			if len(line) > 0 || len(inline) > 0 {
+				flush()
+			}
+			headerLine := chatLine{header: &headerHit{key: key, level: level, collapsed: collapsed}}
+			for cluster := range text.Clusters(text.Truncate(marker+span.Text, width, text.Ellipsis)) {
+				if cluster.Width == 0 {
+					continue
+				}
+				headerLine.segments = appendChatSegment(headerLine.segments, chatSegment{text: cluster.Text, style: style})
+			}
+			if span.Text == "" {
+				pendingHeader = &headerLine
+			} else {
+				lines = append(lines, headerLine)
+			}
+			skipHeaderNewline = true
+			skip = collapsed
+			if collapsed {
+				collapsedLevel = level
+			}
+			continue
+		}
+		if skip {
+			continue
+		}
 		style := w.markupStyle(span, base)
-		if span.FG != 0 {
+		mentionStyle := ""
+		if span.Kind == markup.Kind_RoleMention {
+			mentionStyle = "messages.roleMention"
+		} else if span.Kind == markup.Kind_Mention || span.Kind == markup.Kind_ChannelMention {
+			mentionStyle = "messages.mention"
+		}
+		if span.FG != 0 && (mentionStyle == "" || !w.styles.HasCustom(mentionStyle)) {
 			style.Fg = rgbColor(span.FG)
 		}
 		if span.Kind == markup.Kind_FakeSticker {
@@ -904,6 +1302,9 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 		}
 		appendText(span.Text, style, span.Action)
 	}
+	if pendingHeader != nil {
+		lines = append(lines, *pendingHeader)
+	}
 	if len(line) > 0 || len(lines) == 0 {
 		flush()
 	}
@@ -927,53 +1328,72 @@ func customEmojiURLParts(id uint64, name string, animated bool) string {
 func (w *ChatView) markupStyle(span markup.Span, base screen.Style) screen.Style {
 	style := base
 	if span.Quoted {
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("messages.quote"))
 		style.Bg = base.Bg
 	}
 	switch span.Kind {
 	case markup.Kind_Bold:
-		style.Attrs |= screen.Bold
+		style = mergeStyle(style, w.styles.Cell("messages.bold"))
 	case markup.Kind_Italic:
-		style.Attrs |= screen.Italic
+		style = mergeStyle(style, w.styles.Cell("messages.italic"))
 	case markup.Kind_Code, markup.Kind_CodeBlock:
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("messages.code"))
 	case markup.Kind_Underline:
-		style.Attrs |= screen.Underline
+		style = mergeStyle(style, w.styles.Cell("messages.underlined"))
 	case markup.Kind_Strike:
-		style.Attrs |= screen.Strike
+		style = mergeStyle(style, w.styles.Cell("messages.strikethrough"))
 	case markup.Kind_Spoiler:
 		// No hover in a TUI, so mask the text as a reverse-video block.
-		style.Attrs |= screen.Reverse
+		style = mergeStyle(style, w.styles.Cell("messages.spoiler"))
 	case markup.Kind_Link:
-		style.Attrs |= screen.Underline
+		style = mergeStyle(style, w.styles.Cell("messages.link.prettyLink"))
 	case markup.Kind_Quote:
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("messages.quote"))
 		style.Bg = base.Bg
 	case markup.Kind_Header:
-		style = mergeStyle(style, w.styles.Accent)
-		style.Attrs |= screen.Bold | screen.Underline
-	case markup.Kind_Mention, markup.Kind_ChannelMention, markup.Kind_RoleMention:
-		style = mergeStyle(style, w.styles.Accent)
+		level := span.HeaderLevel
+		if level < 1 || level > 6 {
+			level = 1
+		}
+		style = mergeStyle(style, w.styles.Cell("messages.header"+strconv.Itoa(level)))
+	case markup.Kind_Small:
+		style = mergeStyle(style, w.styles.Cell("messages.small"))
+	case markup.Kind_Mention, markup.Kind_ChannelMention:
+		style = mergeStyle(style, w.styles.Cell("messages.mention"))
+	case markup.Kind_RoleMention:
+		style = mergeStyle(style, w.styles.Cell("messages.roleMention"))
 	case markup.Kind_MessageLink, markup.Kind_ChannelLink, markup.Kind_InviteLink:
-		style = mergeStyle(style, w.styles.Accent)
-		style.Attrs |= screen.Underline
+		name := "messages.link.invite"
+		if span.Kind == markup.Kind_MessageLink {
+			name = "messages.link.message"
+		} else if span.Kind == markup.Kind_ChannelLink {
+			name = "messages.link.channel"
+		}
+		style = mergeStyle(style, w.styles.Cell(name))
 	case markup.Kind_Timestamp:
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("messages.timestamp"))
+	}
+	if span.HeaderLevel > 0 {
+		level := span.HeaderLevel
+		if level > 6 {
+			level = 6
+		}
+		style = mergeStyle(style, w.styles.Cell("messages.header"+strconv.Itoa(level)))
 	}
 	if span.Format&markup.FormatBold != 0 {
-		style.Attrs |= screen.Bold
+		style = mergeStyle(style, w.styles.Cell("messages.bold"))
 	}
 	if span.Format&markup.FormatItalic != 0 {
-		style.Attrs |= screen.Italic
+		style = mergeStyle(style, w.styles.Cell("messages.italic"))
 	}
 	if span.Format&markup.FormatUnderline != 0 {
-		style.Attrs |= screen.Underline
+		style = mergeStyle(style, w.styles.Cell("messages.underlined"))
 	}
 	if span.Format&markup.FormatStrike != 0 {
-		style.Attrs |= screen.Strike
+		style = mergeStyle(style, w.styles.Cell("messages.strikethrough"))
 	}
 	if span.Format&markup.FormatSpoiler != 0 {
-		style.Attrs |= screen.Reverse
+		style = mergeStyle(style, w.styles.Cell("messages.spoiler"))
 	}
 	return style
 }
@@ -1005,6 +1425,97 @@ func drawChatLine(r screen.Region, x, y int, line chatLine) {
 			return
 		}
 	}
+}
+
+func drawFocusedChatLine(r screen.Region, x, y int, line chatLine, focusStart, focusEnd int, focus screen.Style, fillFocus bool) {
+	if line.restrictHighlight {
+		focusStart = max(focusStart, line.highlightStart)
+		focusEnd = min(focusEnd, line.highlightEnd)
+	}
+	segments := line.segments
+	if len(segments) == 0 {
+		segments = []chatSegment{{text: line.text, style: line.style}}
+	}
+	col := x
+	for _, segment := range segments {
+		for cluster := range text.Clusters(segment.text) {
+			if cluster.Width <= 0 || col >= r.Width() {
+				continue
+			}
+			style := segment.style
+			if col < focusEnd && col+cluster.Width > focusStart {
+				style = Styles{}.focusedStyle(style)
+				if focus.Fg.Set() || focus.Bg.Set() {
+					style = mergeStyle(style, focus)
+					style.Attrs &^= screen.Reverse
+				}
+			}
+			r.Set(col, y, screen.Cell{Content: cluster.Text, Style: style})
+			col += cluster.Width
+		}
+	}
+	if fillFocus {
+		style := Styles{}.focusedStyle(line.style)
+		if focus.Fg.Set() || focus.Bg.Set() {
+			style = mergeStyle(style, focus)
+			style.Attrs &^= screen.Reverse
+		}
+		for col < min(focusEnd, r.Width()) {
+			if col >= focusStart {
+				r.Set(col, y, screen.Cell{Content: " ", Style: style})
+			}
+			col++
+		}
+	}
+}
+
+func (w *ChatView) selectionContainsLine(line int) bool {
+	if w == nil || !w.selectionActive || w.selectionStart < 0 || w.focusStopIndex < 0 {
+		return false
+	}
+	start, end := w.selectionStart, w.focusStopIndex
+	if start > end {
+		start, end = end, start
+	}
+	for i := start; i <= end && i < len(w.focusStops); i++ {
+		range_, ok := w.focusRanges[messagePlacementPrefix(w.focusStops[i].message)]
+		if ok && line >= range_.start && line < range_.end {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *ChatView) focusedStopAt(line int) (chatFocusStop, bool) {
+	if w == nil || !w.keyboardFocused || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
+		return chatFocusStop{}, false
+	}
+	stop := w.focusStops[w.focusStopIndex]
+	return stop, stop.line == line
+}
+
+func (w *ChatView) focusedHighlightAt(line int) (chatFocusStop, bool, bool) {
+	stop, exact := w.focusedStopAt(line)
+	if !w.highlightFocusBlock || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
+		return stop, exact, false
+	}
+	stop = w.focusStops[w.focusStopIndex]
+	if line < stop.line {
+		return chatFocusStop{}, false, false
+	}
+	messageKey := messagePlacementPrefix(stop.message)
+	end := w.focusRanges[messageKey].end
+	for i := w.focusStopIndex + 1; i < len(w.focusStops); i++ {
+		next := w.focusStops[i]
+		if messagePlacementPrefix(next.message) != messageKey {
+			break
+		}
+		if next.line > stop.line {
+			end = min(end, next.line)
+			break
+		}
+	}
+	return stop, line < end, true
 }
 
 func mergeStyle(base, overlay screen.Style) screen.Style {
@@ -1039,6 +1550,39 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				return true
 			}
 		}
+		if ev.Key == input.KeyRune && w.vimNavigation {
+			switch ev.Rune {
+			case 'V':
+				if !w.keyboardFocused || w.focusStopIndex < 0 {
+					return false
+				}
+				w.selectionActive = !w.selectionActive
+				w.selectionStart = w.focusStopIndex
+				return true
+			case 'Y':
+				if !w.keyboardFocused || !w.focusedMessageSet || w.onMessageCopy == nil {
+					return false
+				}
+				w.onMessageCopy(w.selectedMessages())
+				w.selectionActive = false
+				return true
+			case 'j':
+				w.moveFocus(1)
+				return true
+			case 'k':
+				w.moveFocus(-1)
+				return true
+			case '-':
+				if w.foldFocusedHeader() {
+					return true
+				}
+			case 'd', 'D', 'r', 'R', 'e', 'E', 'a', 'A', 'u', 'U':
+				if w.keyboardFocused && w.focusedMessageSet && w.onMessageAction != nil {
+					w.onMessageAction(unicode.ToLower(ev.Rune), w.focusedMessage)
+					return true
+				}
+			}
+		}
 		if shortcut, ok := componentShortcutRune(ev); ok {
 			if w.activateShortcut(shortcut) {
 				return true
@@ -1046,17 +1590,35 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 		switch ev.Key {
 		case input.KeyEsc:
+			w.activePickerSet = false
+			w.activePicker = componentAction{}
+			w.expandedComponents = nil
 			w.bottomScroll.SetOffset(0)
+			w.invalidateBodies()
 			return true
 		case input.KeyUp:
-			w.scrollUp()
+			w.moveFocus(-1)
 			return true
 		case input.KeyDown:
-			w.scrollDown()
+			w.moveFocus(1)
 			return true
 		}
 	case input.MouseEvent:
+		if ev.Kind == input.MouseMotion && w.mouseBreakpointTracking && ev.Y >= 0 && ev.Y < len(w.visibleLines) {
+			w.focusAtVisible(ev.X, ev.Y)
+			return false
+		}
 		if ev.Kind == input.MousePress && ev.Btn == input.ButtonLeft {
+			w.focusAtVisible(ev.X, ev.Y)
+			if ev.Y >= 0 && ev.Y < len(w.visibleLines) && w.visibleLines[ev.Y].header != nil && ev.X < 2 {
+				hit := w.visibleLines[ev.Y].header
+				if w.collapsedHeaders == nil {
+					w.collapsedHeaders = map[string]bool{}
+				}
+				w.collapsedHeaders[hit.key] = !hit.collapsed
+				w.invalidateBodies()
+				return true
+			}
 			if w.activateAt(ev.X, ev.Y, ev.Mods&input.Shift != 0) {
 				return true
 			}
@@ -1065,8 +1627,12 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			if ev.Y >= 0 && ev.Y < len(w.visibleLines) {
 				msg := w.visibleLines[ev.Y].message
 				if msg.ID != 0 {
+					w.focusAtVisible(ev.X, ev.Y)
 					w.contextMessage = msg
 					w.contextMessageSet = true
+					w.focusedMessage = msg
+					w.focusedMessageSet = true
+					w.focusKey = messagePlacementPrefix(msg)
 				}
 			}
 			return false
@@ -1086,6 +1652,84 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 	return false
 }
 
+func (w *ChatView) selectedMessages() []store.Message {
+	if w == nil || !w.focusedMessageSet {
+		return nil
+	}
+	start, end := w.focusStopIndex, w.focusStopIndex
+	if w.selectionActive && w.selectionStart >= 0 {
+		start = w.selectionStart
+	}
+	if start > end {
+		start, end = end, start
+	}
+	seen := make(map[string]struct{}, end-start+1)
+	messages := make([]store.Message, 0, end-start+1)
+	for i := start; i <= end && i < len(w.focusStops); i++ {
+		message := w.focusStops[i].message
+		key := messagePlacementPrefix(message)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		messages = append(messages, message)
+	}
+	return messages
+}
+
+func (w *ChatView) focusAtVisible(x, y int) {
+	if w == nil || y < 0 || y >= len(w.visibleLines) {
+		return
+	}
+	if w.visibleLines[y].author {
+		return
+	}
+	msg := w.visibleLines[y].message
+	if msg.ID == 0 && msg.Nonce == "" {
+		return
+	}
+	line := w.visibleStart + y
+	selected := -1
+	for i := range w.focusStops {
+		stop := w.focusStops[i]
+		if stop.line != line {
+			continue
+		}
+		if stop.kind == chatFocusControl && x >= stop.start && x < stop.end {
+			selected = i
+			break
+		}
+		if selected < 0 {
+			selected = i
+		}
+	}
+	if selected < 0 {
+		key := messagePlacementPrefix(msg)
+		for i := range w.focusStops {
+			if messagePlacementPrefix(w.focusStops[i].message) == key {
+				selected = i
+				break
+			}
+		}
+	}
+	if selected < 0 {
+		return
+	}
+	previous := messagePlacementPrefix(w.focusedMessage)
+	stop := w.focusStops[selected]
+	w.focusStopIndex = selected
+	w.focusStopKey = stop.key
+	w.focusedMessage = stop.message
+	w.focusedMessageSet = true
+	w.focusedExplicit = true
+	w.focusKey = messagePlacementPrefix(stop.message)
+	if previous != w.focusKey {
+		w.activePickerSet = false
+		w.activePicker = componentAction{}
+		w.invalidateBodies()
+	}
+}
+
 func componentShortcutRune(ev input.KeyEvent) (rune, bool) {
 	if ev.Key != input.KeyRune {
 		return 0, false
@@ -1103,8 +1747,6 @@ func componentShortcutRune(ev input.KeyEvent) (rune, bool) {
 		return '4', true
 	case '(':
 		return '5', true
-	case '-':
-		return '6', true
 	case 'è', 'È':
 		return '7', true
 	case '_':
@@ -1119,14 +1761,50 @@ func componentShortcutRune(ev input.KeyEvent) (rune, bool) {
 }
 
 func (w *ChatView) activateShortcut(shortcut rune) bool {
+	if w == nil || !w.keyboardFocused || !w.focusedMessageSet {
+		return false
+	}
+	focused := messagePlacementPrefix(w.focusedMessage)
 	for _, line := range w.visibleLines {
 		for _, hit := range line.actions {
-			if hit.action.shortcut == shortcut {
+			if hit.action.shortcut == shortcut && messagePlacementPrefix(hit.action.message) == focused {
 				return w.setComponentAction(hit.action)
 			}
 		}
 	}
 	return false
+}
+
+func (w *ChatView) foldFocusedHeader() bool {
+	if w == nil || !w.keyboardFocused || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
+		return false
+	}
+	stop := w.focusStops[w.focusStopIndex]
+	if stop.kind != chatFocusHeader || stop.headerKey == "" {
+		return false
+	}
+	if w.collapsedHeaders == nil {
+		w.collapsedHeaders = map[string]bool{}
+	}
+	w.collapsedHeaders[stop.headerKey] = !w.collapsedHeaders[stop.headerKey]
+	w.invalidateBodies()
+	return true
+}
+
+// HandleVimFocus lets h/l use the global reverse/forward focus ring. A
+// collapsed header gets first refusal and unfolds in place, keeping the user
+// inside the message instead of unexpectedly leaving the chat panel.
+func (w *ChatView) HandleVimFocus(_ bool) bool {
+	if w == nil || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
+		return false
+	}
+	stop := w.focusStops[w.focusStopIndex]
+	if stop.kind != chatFocusHeader || stop.headerKey == "" || !w.collapsedHeaders[stop.headerKey] {
+		return false
+	}
+	w.collapsedHeaders[stop.headerKey] = false
+	w.invalidateBodies()
+	return true
 }
 
 // activateAt dispatches the component under (x, y). Shift-clicking an option of
@@ -1383,6 +2061,48 @@ func (w *ChatView) scrollUp() {
 	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + 1)
 	if w.onReachTop != nil {
 		w.onReachTop()
+	}
+}
+
+func (w *ChatView) moveFocus(delta int) {
+	if len(w.focusStops) == 0 {
+		if delta < 0 {
+			w.scrollUp()
+		} else {
+			w.scrollDown()
+		}
+		return
+	}
+	index := w.focusStopIndex
+	if index < 0 || index >= len(w.focusStops) {
+		index = 0
+	}
+	next := index + delta
+	if next < 0 || next >= len(w.focusStops) {
+		if delta < 0 {
+			w.scrollUp()
+		} else {
+			w.scrollDown()
+		}
+		return
+	}
+	previousMessage := messagePlacementPrefix(w.focusedMessage)
+	stop := w.focusStops[next]
+	w.focusStopIndex = next
+	w.focusStopKey = stop.key
+	w.focusedMessage = stop.message
+	w.focusKey = messagePlacementPrefix(stop.message)
+	w.focusedMessageSet = true
+	w.focusedExplicit = true
+	if previousMessage != w.focusKey {
+		w.activePickerSet = false
+		w.activePicker = componentAction{}
+		w.invalidateBodies()
+	}
+	start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
+	end := min(start+w.viewportHeight, w.renderLineCount)
+	if stop.line < start || stop.line >= end {
+		w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight-stop.line-1, 0))
 	}
 }
 

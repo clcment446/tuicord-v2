@@ -17,9 +17,14 @@ func TestParserKeys(t *testing.T) {
 		{"arrow", []byte("\x1b[A"), []Event{KeyEvent{Key: KeyUp}}},
 		{"back-tab", []byte("\x1b[Z"), []Event{KeyEvent{Key: KeyTab, Mods: Shift}}},
 		{"modified arrow", []byte("\x1b[1;6D"), []Event{KeyEvent{Key: KeyLeft, Mods: Shift | Ctrl}}},
+		{"alt arrows", []byte("\x1b[1;3D\x1b[1;3C"), []Event{
+			KeyEvent{Key: KeyLeft, Mods: Alt},
+			KeyEvent{Key: KeyRight, Mods: Alt},
+		}},
 		{"delete", []byte("\x1b[3~"), []Event{KeyEvent{Key: KeyDelete}}},
 		{"ss3 function key", []byte("\x1bOP"), []Event{KeyEvent{Key: KeyF1}}},
 		{"kitty ctrl a", []byte("\x1b[97;5u"), []Event{KeyEvent{Key: KeyRune, Mods: Ctrl, Rune: 'a'}}},
+		{"kitty shift enter", []byte("\x1b[13;2u"), []Event{KeyEvent{Key: KeyEnter, Mods: Shift}}},
 		{"kitty release", []byte("\x1b[13;1;3u"), []Event{KeyEvent{Key: KeyEnter, Release: true}}},
 		{"alt rune", []byte("\x1bb"), []Event{KeyEvent{Key: KeyRune, Mods: Alt, Rune: 'b'}}},
 	}

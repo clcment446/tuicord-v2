@@ -1,15 +1,26 @@
 package term
 
 import (
+	"bufio"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
+	"awesomeProject/internal/tui/screen"
 	"golang.org/x/sys/unix"
 )
 
 func probeCapabilities(fd int, environ []string, timeout time.Duration) Capabilities {
 	env := envMap(environ)
 	caps := capabilitiesFromEnv(env)
+	if isKitty(env) {
+		if palette, ok := loadKittyANSI16Palette(kittyThemePath(env)); ok {
+			caps.ANSI16 = palette
+			caps.ANSI16Known = true
+		}
+	}
 	if fd >= 0 && timeout > 0 {
 		reply := queryTerminal(fd, timeout)
 		if strings.Contains(reply, "?2026;1$y") || strings.Contains(reply, "?2026;2$y") {
@@ -20,6 +31,62 @@ func probeCapabilities(fd int, environ []string, timeout time.Duration) Capabili
 		}
 	}
 	return caps
+}
+
+func isKitty(env map[string]string) bool {
+	return strings.Contains(strings.ToLower(env["TERM"]), "kitty") || strings.Contains(strings.ToLower(env["TERM_PROGRAM"]), "kitty")
+}
+
+func kittyThemePath(env map[string]string) string {
+	configHome := env["XDG_CONFIG_HOME"]
+	if configHome == "" {
+		configHome = filepath.Join(env["HOME"], ".config")
+	}
+	return filepath.Join(configHome, "kitty", "current-theme.conf")
+}
+
+func loadKittyANSI16Palette(path string) (screen.Palette, bool) {
+	file, err := os.Open(path)
+	if err != nil {
+		return screen.Palette{}, false
+	}
+	defer file.Close()
+
+	palette := screen.DefaultANSI16Palette()
+	seen := 0
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 || !strings.HasPrefix(fields[0], "color") {
+			continue
+		}
+		index, err := strconv.Atoi(strings.TrimPrefix(fields[0], "color"))
+		if err != nil || index < 0 || index >= len(palette) {
+			continue
+		}
+		color, err := parseKittyHexColor(fields[1])
+		if err != nil {
+			continue
+		}
+		palette[index] = color
+		seen++
+	}
+	if err := scanner.Err(); err != nil || seen == 0 {
+		return screen.Palette{}, false
+	}
+	return palette, true
+}
+
+func parseKittyHexColor(value string) (screen.Color, error) {
+	value = strings.TrimPrefix(strings.TrimSpace(value), "#")
+	if len(value) != 6 {
+		return screen.Color{}, strconv.ErrSyntax
+	}
+	v, err := strconv.ParseUint(value, 16, 32)
+	if err != nil {
+		return screen.Color{}, err
+	}
+	return screen.RGB(uint8(v>>16), uint8(v>>8), uint8(v)), nil
 }
 
 func capabilitiesFromEnv(env map[string]string) Capabilities {

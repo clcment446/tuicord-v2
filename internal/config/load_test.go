@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -28,6 +29,28 @@ func TestLoadUsesXDGConfigHome(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Errorf("config file not created by Load: %v", err)
+	}
+	template, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read generated config: %v", err)
+	}
+	for _, want := range []string{"# tuicord-v2 configuration", "[layout]", "[colors]", "tty_colors = false", "messages.author.fg"} {
+		if !strings.Contains(string(template), want) {
+			t.Errorf("generated config missing %q", want)
+		}
+	}
+	colorsPath := filepath.Join(dir, AppName, "colors.conf")
+	colors, err := os.ReadFile(colorsPath)
+	if err != nil {
+		t.Fatalf("read generated colors.conf: %v", err)
+	}
+	if !strings.Contains(string(colors), "# messages.author.fg=#ffffff") || !strings.Contains(string(colors), "# messages.header{n}.attrs=bold") {
+		t.Error("generated colors.conf is missing semantic selector examples")
+	}
+	for _, line := range strings.Split(string(colors), "\n") {
+		if strings.TrimSpace(line) != "" && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Errorf("colors.conf contains active rule %q", line)
+		}
 	}
 }
 

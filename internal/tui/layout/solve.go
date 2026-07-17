@@ -12,7 +12,7 @@ func Solve(root *Node, w, h int) map[*Node]Rect {
 }
 
 func solve(n *Node, r Rect, rootWidth int, rects map[*Node]Rect) {
-	if n == nil || hidden(n, rootWidth) || r.W <= 0 || r.H <= 0 {
+	if n == nil || n.Hidden || hidden(n, rootWidth) || r.W <= 0 || r.H <= 0 {
 		return
 	}
 	rects[n] = r
@@ -148,7 +148,7 @@ func shrink(children []*Node, sizes []int, need int) {
 func visibleChildren(children []*Node, rootWidth int) []*Node {
 	out := make([]*Node, 0, len(children))
 	for _, child := range children {
-		if child != nil && !hidden(child, rootWidth) {
+		if child != nil && !child.Hidden && !hidden(child, rootWidth) {
 			out = append(out, child)
 		}
 	}

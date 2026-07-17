@@ -65,6 +65,47 @@ func TestFocusReplaceUsesPreferredWhenNoCurrent(t *testing.T) {
 	}
 }
 
+func TestFocusHistoryNavigatesBackAndForward(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	third := newTestWidget("third", true)
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, second, third})
+	focus.Set(second)
+	focus.Set(third)
+
+	if got := focus.Back(); !sameWidget(got, second) {
+		t.Fatalf("Back() = %v, want second", got)
+	}
+	if got := focus.Back(); !sameWidget(got, first) {
+		t.Fatalf("second Back() = %v, want first", got)
+	}
+	if got := focus.Forward(); !sameWidget(got, second) {
+		t.Fatalf("Forward() = %v, want second", got)
+	}
+	if got := focus.Forward(); !sameWidget(got, third) {
+		t.Fatalf("second Forward() = %v, want third", got)
+	}
+}
+
+func TestFocusHistoryNewVisitDropsForwardEntries(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	third := newTestWidget("third", true)
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, second, third})
+	focus.Set(second)
+	focus.Set(third)
+	focus.Back()
+	focus.Set(first)
+
+	if got := focus.Forward(); got != nil {
+		t.Fatalf("Forward() after new visit = %v, want nil", got)
+	}
+}
+
 type testWidget struct {
 	name     string
 	focus    bool

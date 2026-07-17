@@ -40,8 +40,10 @@ func NewQuickSwitcher(st *store.Store, styles Styles, onPick func(store.GuildID,
 		onClose: onClose,
 		node:    layout.Node{Grow: 1},
 	}
-	qs.input.SetStyle(styles.Text)
-	qs.list.SetSelectedStyle(styles.Accent)
+	qs.input.SetStyle(styles.Cell("quick_switcher.input"))
+	qs.input.SetPlaceholderStyle(styles.Cell("quick_switcher.placeholder"))
+	qs.input.SetCursorStyle(styles.Cell("quick_switcher.cursor"))
+	qs.list.SetSelectedStyle(styles.Cell("quick_switcher.selected"))
 	qs.entries = collectEntries(st)
 	qs.applyFilter("")
 

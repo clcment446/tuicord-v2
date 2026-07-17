@@ -1,6 +1,6 @@
 // Package config loads and persists the tuicord user configuration.
 //
-// Configuration lives at ~/.config/tuicord/config.toml. Load returns sane
+// Configuration lives at ~/.config/tuicord-v2/config.toml. Load returns sane
 // defaults when the file is absent and writes a commented default file on first
 // run, so a fresh install starts with a discoverable, editable config.
 package config
@@ -12,14 +12,19 @@ import (
 	"os"
 	"path/filepath"
 
+	"awesomeProject/internal/tui/layout"
 	"github.com/BurntSushi/toml"
 )
 
 // AppName is the config/keyring namespace.
-const AppName = "tuicord"
+const AppName = "tuicord-v2"
 
 // Layout controls sidebar widths and the members panel.
 type Layout struct {
+	// Elements contains per-surface presentation policies. Keys are semantic UI
+	// names such as "guilds", "channels", "members", "messages", and
+	// "composer".
+	Elements *ElementPolicies `toml:"elements"`
 	// GuildsWidth is the guild rail width in columns.
 	GuildsWidth int `toml:"guilds_width"`
 	// ChannelsWidth is the channel sidebar width in columns.
@@ -30,6 +35,62 @@ type Layout struct {
 	MembersAutoHide bool `toml:"members_auto_hide"`
 	// MembersHideBelow is the terminal width under which members auto-hides.
 	MembersHideBelow int `toml:"members_hide_below"`
+}
+
+// ElementLayout controls whether a named UI surface is rendered and its size
+// along the containing layout's main axis. Zero dimensions inherit the widget's
+// built-in policy.
+type ElementLayout struct {
+	Visible   *bool `toml:"visible"`
+	Width     int   `toml:"width"`
+	Height    int   `toml:"height"`
+	MinWidth  int   `toml:"min_width"`
+	MaxWidth  int   `toml:"max_width"`
+	MinHeight int   `toml:"min_height"`
+	MaxHeight int   `toml:"max_height"`
+}
+
+// ElementPolicies is the named-surface layout table. It is held by pointer so
+// Config remains comparable for callers that use it as a default-value check.
+type ElementPolicies map[string]ElementLayout
+
+// Apply projects a named element policy onto a low-level layout node.
+func (e ElementLayout) Apply(node *layout.Node, dir layout.Direction) {
+	if node == nil {
+		return
+	}
+	if e.Visible != nil {
+		node.Hidden = !*e.Visible
+	}
+	if dir == layout.Row {
+		if e.Width > 0 {
+			node.Basis, node.Grow = e.Width, 0
+		}
+		if e.MinWidth > 0 {
+			node.Min = e.MinWidth
+		}
+		if e.MaxWidth > 0 {
+			node.Max = e.MaxWidth
+		}
+		return
+	}
+	if e.Height > 0 {
+		node.Basis, node.Grow = e.Height, 0
+	}
+	if e.MinHeight > 0 {
+		node.Min = e.MinHeight
+	}
+	if e.MaxHeight > 0 {
+		node.Max = e.MaxHeight
+	}
+}
+
+// Element returns a configured policy, or the zero policy when absent.
+func (l Layout) Element(name string) ElementLayout {
+	if l.Elements == nil {
+		return ElementLayout{}
+	}
+	return (*l.Elements)[name]
 }
 
 // Keys maps actions to key names understood by the UI.
@@ -52,11 +113,11 @@ type Nitro struct {
 
 // Colors holds hex colors (e.g. "#5865F2") applied to the widget tree.
 //
-// Default() ships a full dark palette (the "vivian" theme) so the client looks
-// cohesive out of the box on any terminal. A user may override any field in
-// config.toml; an explicitly empty field falls back to the terminal default for
-// that role.
+// Default() ships Catppuccin Latte so the client looks cohesive out of the box
+// on any terminal. User color overrides are opt-in through Enabled.
 type Colors struct {
+	// Enabled opts into replacing the built-in palette with these values.
+	Enabled bool `toml:"enabled"`
 	// Background is the base fill painted behind every panel.
 	Background string `toml:"background"`
 	Text       string `toml:"text"`
@@ -74,6 +135,8 @@ type Display struct {
 	// also switches to ASCII automatically when NO_COLOR is set in the
 	// environment.
 	ASCII bool `toml:"ascii"`
+	// TTYColors restricts UI colors to the terminal's standard 16-color palette.
+	TTYColors bool `toml:"tty_colors"`
 }
 
 // Auth controls how interactive Discord authentication is presented.
@@ -87,8 +150,11 @@ type Auth struct {
 // Accessibility controls alternate input paths for users who prefer or need
 // keyboard-first navigation.
 type Accessibility struct {
-	MouseOn     bool `toml:"mouse_on"`
-	FocusSplits bool `toml:"focus_splits"`
+	MouseOn                 bool `toml:"mouse_on"`
+	FocusSplits             bool `toml:"focus_splits"`
+	VimNavigation           bool `toml:"vim_navigation"`
+	MouseBreakpointTracking bool `toml:"mouse_breakpoint_tracking"`
+	HighlightFocusBlock     bool `toml:"highlight_focus_block"`
 }
 
 // SlashCommands controls experimental user-client application-command support.
@@ -105,14 +171,21 @@ type Integrations struct {
 
 // Config is the full user configuration.
 type Config struct {
-	Layout        Layout        `toml:"layout"`
-	Keys          Keys          `toml:"keys"`
-	Colors        Colors        `toml:"colors"`
-	Nitro         Nitro         `toml:"nitro"`
-	Display       Display       `toml:"display"`
-	Auth          Auth          `toml:"auth"`
-	Accessibility Accessibility `toml:"accessibility"`
-	Integrations  Integrations  `toml:"integrations"`
+	Layout         Layout          `toml:"layout"`
+	Keys           Keys            `toml:"keys"`
+	Colors         Colors          `toml:"colors"`
+	Nitro          Nitro           `toml:"nitro"`
+	Display        Display         `toml:"display"`
+	Auth           Auth            `toml:"auth"`
+	Accessibility  Accessibility   `toml:"accessibility"`
+	Integrations   Integrations    `toml:"integrations"`
+	ColorOverrides *ColorOverrides `toml:"-"`
+}
+
+// ColorOverrides contains the selector-based overrides loaded from
+// colors.conf. It is intentionally separate from the built-in palette.
+type ColorOverrides struct {
+	Rules map[string]ColorRule
 }
 
 const (
@@ -140,15 +213,15 @@ func Default() Config {
 		},
 		Nitro:         Nitro{Fake: true},
 		Accessibility: Accessibility{MouseOn: true},
-		// The "miyabi" palette — Terafox teal dark theme.
+		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
-			Background: "#152528",
-			Text:       "#e6eaea",
-			Muted:      "#3f585d",
-			Accent:     "#4d9c9f",
-			Selection:  "#1d3337",
-			Border:     "#233134",
-			Error:      "#eb746b",
+			Background: "#eff1f5",
+			Text:       "#4c4f69",
+			Muted:      "#8c8fa1",
+			Accent:     "#1e66f5",
+			Selection:  "#ccd0da",
+			Border:     "#bcc0cc",
+			Error:      "#d20f39",
 		},
 	}
 }
@@ -213,6 +286,12 @@ func loadFrom(path string) (Config, error) {
 		if werr := writeDefault(path); werr != nil {
 			return cfg, werr
 		}
+		if werr := writeColorsTemplate(filepath.Join(filepath.Dir(path), "colors.conf")); werr != nil {
+			return cfg, werr
+		}
+		if werr := loadOptionalColorOverrides(&cfg, path); werr != nil {
+			return cfg, werr
+		}
 		return cfg, nil
 	}
 	if err != nil {
@@ -229,11 +308,48 @@ func loadFrom(path string) (Config, error) {
 	if err := toml.Unmarshal(data, &legacy); err == nil && cfg.Colors == Default().Colors && legacy.Theme != (Colors{}) {
 		cfg.Colors = overlayColors(cfg.Colors, legacy.Theme)
 	}
+	// Custom colors must be explicitly enabled so an old colors section cannot
+	// silently replace the built-in palette after a theme upgrade.
+	var sections struct {
+		Colors struct {
+			Enabled *bool `toml:"enabled"`
+		} `toml:"colors"`
+		Theme struct {
+			Enabled *bool `toml:"enabled"`
+		} `toml:"theme"`
+	}
+	if err := toml.Unmarshal(data, &sections); err == nil && cfg.Colors != Default().Colors {
+		colorsEnabled := sections.Colors.Enabled != nil && *sections.Colors.Enabled
+		themeEnabled := sections.Theme.Enabled != nil && *sections.Theme.Enabled
+		if !colorsEnabled && !themeEnabled {
+			cfg.Colors = Default().Colors
+		}
+	}
+	if err := loadOptionalColorOverrides(&cfg, path); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+func loadOptionalColorOverrides(cfg *Config, configPath string) error {
+	path := filepath.Join(filepath.Dir(configPath), "colors.conf")
+	overrides, err := loadColorOverrides(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("parse %s: %w", path, err)
+	}
+	if len(overrides.Rules) == 0 {
+		return nil
+	}
+	cfg.ColorOverrides = &overrides
+	return nil
 }
 
 // overlayColors returns base with every non-empty field of over applied on top.
 func overlayColors(base, over Colors) Colors {
+	base.Enabled = base.Enabled || over.Enabled
 	set := func(dst *string, src string) {
 		if src != "" {
 			*dst = src
@@ -262,5 +378,97 @@ func writeDefault(path string) error {
 		return err
 	}
 	defer f.Close()
-	return toml.NewEncoder(f).Encode(Default())
+	_, err = f.WriteString(defaultConfigTemplate)
+	return err
 }
+
+func writeColorsTemplate(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	_, err = f.WriteString(colorsTemplate())
+	return err
+}
+
+const defaultConfigTemplate = `# tuicord-v2 configuration
+#
+# This file is generated on first launch. Values below are the built-in
+# defaults; uncomment or edit them to customize the client.
+
+[layout]
+guilds_width = 4
+channels_width = 24
+members_width = 20
+members_auto_hide = true
+members_hide_below = 120
+
+# Named surfaces can control rendering and dimensions.
+# [layout.elements.guilds]
+# visible = true
+# width = 6
+# min_width = 3
+# max_width = 24
+#
+# [layout.elements.channels]
+# visible = true
+# width = 30
+#
+# [layout.elements.members]
+# visible = false
+#
+# [layout.elements.composer]
+# height = 5
+
+[keys]
+quick_switcher = "ctrl+k"
+help = "ctrl+/"
+next_panel = "tab"
+focus_composer = "esc"
+
+[colors]
+# Custom palette values are opt-in. Set enabled = true to use them.
+enabled = false
+background = "#eff1f5"
+text = "#4c4f69"
+muted = "#8c8fa1"
+accent = "#1e66f5"
+selection = "#ccd0da"
+border = "#bcc0cc"
+error = "#d20f39"
+
+[display]
+# Restrict emitted colors to the terminal's standard 16-color palette.
+tty_colors = false
+ascii = false
+
+[auth]
+# preferred_mode = "tui"   # "tui" or "browser"
+
+[accessibility]
+mouse_on = true
+focus_splits = false
+vim_navigation = false
+mouse_breakpoint_tracking = false
+highlight_focus_block = false
+
+[nitro]
+fake = true
+
+[integrations.slash_commands]
+enabled = false
+
+# Fine-grained cell colors live beside this file in colors.conf.
+# Example:
+# messages.author.fg=#ff00ff
+# messages.link.prettyLink.fg=#0000ff
+# messages.header{n}.attrs=bold|underline
+# messages.*.bg=#ffffff
+`

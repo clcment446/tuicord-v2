@@ -133,6 +133,78 @@ func TestFocusableSplitsCanBeEnabledByAppOption(t *testing.T) {
 	}
 }
 
+func TestAltArrowsNavigateFocusHistory(t *testing.T) {
+	first := &handlingWidget{testWidget: *newTestWidget("first", true)}
+	second := &handlingWidget{testWidget: *newTestWidget("second", true)}
+	third := &handlingWidget{testWidget: *newTestWidget("third", true)}
+	root := &splitLikeWidget{children: []Widget{first, second, third}}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	app.Focus.Set(second)
+	app.Focus.Set(third)
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyLeft, Mods: input.Alt}) {
+		t.Fatal("Alt+Left was not handled")
+	}
+	if got := app.Focus.Focused(); got != second {
+		t.Fatalf("Alt+Left focused %v, want second", got)
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyRight, Mods: input.Alt}) {
+		t.Fatal("Alt+Right was not handled")
+	}
+	if got := app.Focus.Focused(); got != third {
+		t.Fatalf("Alt+Right focused %v, want third", got)
+	}
+}
+
+func TestVimHLTraverseFocusAndAllowLocalUnfold(t *testing.T) {
+	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}, enabled: true}
+	second := &handlingWidget{testWidget: *newTestWidget("second", true)}
+	root := &splitLikeWidget{children: []Widget{first, second}}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'l'}) || app.Focus.Focused() != second {
+		t.Fatal("l did not traverse forward like Tab")
+	}
+	app.Focus.Set(first)
+	first.consume = true
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'h'}) || app.Focus.Focused() != first {
+		t.Fatal("local unfold did not keep focus on the Vim-aware widget")
+	}
+	if first.calls != 2 {
+		t.Fatalf("Vim focus calls = %d, want 2", first.calls)
+	}
+}
+
+func TestVimHLDoesNotTraverseWhenWidgetHasNotOptedIn(t *testing.T) {
+	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}}
+	second := &handlingWidget{testWidget: *newTestWidget("second", true)}
+	app := New()
+	app.Render(&splitLikeWidget{children: []Widget{first, second}}, Size{W: 10, H: 1})
+	app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'l'})
+	if app.Focus.Focused() != first {
+		t.Fatal("focus moved while Vim navigation was disabled")
+	}
+	if first.calls != 0 {
+		t.Fatal("disabled Vim traverser was invoked")
+	}
+}
+
+func TestRootFocusRequestMovesFocusAfterHandledKey(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	root := &focusRequestRoot{splitLikeWidget: splitLikeWidget{children: []Widget{first, second}}, target: second}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'I'}) {
+		t.Fatal("input-mode key was not handled")
+	}
+	if app.Focus.Focused() != second {
+		t.Fatalf("focused = %v, want requested second widget", app.Focus.Focused())
+	}
+}
+
 func TestOverlayDrawsAfterChildren(t *testing.T) {
 	child := &drawWidget{
 		testWidget: *newTestWidget("child", false),
@@ -152,6 +224,23 @@ func TestOverlayDrawsAfterChildren(t *testing.T) {
 	buf := New().Render(parent, Size{W: 1, H: 1})
 	if got := buf.Cell(0, 0).Content; got != "o" {
 		t.Fatalf("rendered cell = %q, want overlay drawn above child", got)
+	}
+}
+
+func TestEventOverlayPreemptsFocusedChild(t *testing.T) {
+	child := &handlingWidget{testWidget: *newTestWidget("child", true)}
+	root := &eventOverlayWidget{
+		overlayWidget: overlayWidget{drawWidget: drawWidget{testWidget: *newTestWidget("root", false)}},
+	}
+	root.node = &layout.Node{Children: []*layout.Node{child.node}}
+	root.children = []Widget{child}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'a'}) {
+		t.Fatal("event overlay did not consume key")
+	}
+	if child.handled != 0 || root.events != 1 {
+		t.Fatalf("child events = %d, overlay events = %d; want 0, 1", child.handled, root.events)
 	}
 }
 
@@ -178,6 +267,43 @@ func (errWriter) Write([]byte) (int, error) { return 0, errors.New("file already
 type handlingWidget struct {
 	testWidget
 	handled int
+}
+
+type vimFocusWidget struct {
+	handlingWidget
+	consume bool
+	enabled bool
+	calls   int
+}
+
+func (w *vimFocusWidget) VimFocusEnabled() bool { return w.enabled }
+
+func (w *vimFocusWidget) HandleVimFocus(bool) bool {
+	w.calls++
+	return w.consume
+}
+
+type focusRequestRoot struct {
+	splitLikeWidget
+	target Widget
+	ready  bool
+}
+
+func (w *focusRequestRoot) Handle(ev Event) bool {
+	key, ok := ev.(input.KeyEvent)
+	if ok && key.Key == input.KeyRune && key.Rune == 'I' {
+		w.ready = true
+		return true
+	}
+	return false
+}
+
+func (w *focusRequestRoot) TakeFocusRequest() Widget {
+	if !w.ready {
+		return nil
+	}
+	w.ready = false
+	return w.target
 }
 
 func (w *handlingWidget) Handle(Event) bool {
@@ -207,6 +333,18 @@ func (w *drawWidget) Draw(r screen.Region) {
 type overlayWidget struct {
 	drawWidget
 	overlay string
+}
+
+type eventOverlayWidget struct {
+	overlayWidget
+	children []Widget
+	events   int
+}
+
+func (w *eventOverlayWidget) Children() []Widget { return w.children }
+func (w *eventOverlayWidget) HandleOverlay(Event) bool {
+	w.events++
+	return true
 }
 
 func (w *overlayWidget) DrawOverlay(r screen.Region) {

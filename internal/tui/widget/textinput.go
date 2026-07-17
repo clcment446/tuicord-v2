@@ -1,6 +1,7 @@
 package widget
 
 import (
+	"strings"
 	"unicode"
 
 	"awesomeProject/internal/tui/input"
@@ -16,15 +17,36 @@ type TextInput struct {
 	placeholder      string
 	cursor           int
 	scroll           int
+	scrollRow        int
+	lastWidth        int
+	multiline        bool
+	maxRows          int
 	focused          bool
+	focusEnabled     bool
 	readOnly         bool
 	cursorVisible    bool
+	preferredFocus   bool
 	style            screen.Style
 	placeholderStyle screen.Style
 	cursorStyle      screen.Style
 	onSubmit         func(string)
 	onChange         func(string)
+	onPaste          func(string) bool
 	node             layout.Node
+}
+
+// SetMultiline enables wrapped, multi-row editing. The input grows to its
+// content up to maxRows and then scrolls vertically. A non-positive maxRows
+// restores the normal single-line behavior.
+func (w *TextInput) SetMultiline(maxRows int) {
+	if w == nil {
+		return
+	}
+	w.multiline = maxRows > 1
+	w.maxRows = maxRows
+	if !w.multiline {
+		w.scrollRow = 0
+	}
 }
 
 // NewTextInput returns an empty text input with placeholder text.
@@ -32,7 +54,9 @@ func NewTextInput(placeholder string) *TextInput {
 	return &TextInput{
 		placeholder:      placeholder,
 		focused:          true,
+		focusEnabled:     true,
 		cursorVisible:    true,
+		preferredFocus:   true,
 		placeholderStyle: screen.Style{Attrs: screen.Dim},
 		cursorStyle:      screen.Style{Attrs: screen.Reverse},
 		node:             layout.Node{Basis: 1, Min: 1},
@@ -89,7 +113,18 @@ func (w *TextInput) SetFocused(focused bool) {
 // CanFocus reports that the input can receive keyboard focus. A read-only input
 // declines focus so Tab navigation skips it.
 func (w *TextInput) CanFocus() bool {
-	return w != nil && !w.readOnly
+	return w != nil && w.focusEnabled && !w.readOnly
+}
+
+// SetInputFocusEnabled controls whether focus routing may enter this input without
+// changing its contents or read-only state. Modal editors disable focus in
+// normal mode and re-enable it only for explicit input mode.
+// The name deliberately avoids tui.FocusConfigurable.SetFocusEnabled, which is
+// reserved for globally configuring split selectors.
+func (w *TextInput) SetInputFocusEnabled(enabled bool) {
+	if w != nil {
+		w.focusEnabled = enabled
+	}
 }
 
 // SetReadOnly toggles read-only mode: the input ignores editing and submission
@@ -112,7 +147,14 @@ func (w *TextInput) ReadOnly() bool {
 
 // PreferredFocus reports that text inputs should receive initial focus.
 func (w *TextInput) PreferredFocus() bool {
-	return w != nil
+	return w != nil && w.preferredFocus
+}
+
+// SetPreferredFocus controls whether this input wins initial focus discovery.
+func (w *TextInput) SetPreferredFocus(preferred bool) {
+	if w != nil {
+		w.preferredFocus = preferred
+	}
 }
 
 // SetStyle sets the style used for input text.
@@ -139,6 +181,14 @@ func (w *TextInput) SetPlaceholderStyle(style screen.Style) {
 	w.placeholderStyle = style
 }
 
+// SetCursorStyle sets the style used for the focused cursor cell.
+func (w *TextInput) SetCursorStyle(style screen.Style) {
+	if w == nil {
+		return
+	}
+	w.cursorStyle = style
+}
+
 // OnSubmit registers a callback invoked with the current value when the user
 // presses Enter. Passing nil clears the callback.
 func (w *TextInput) OnSubmit(fn func(string)) {
@@ -157,13 +207,23 @@ func (w *TextInput) OnChange(fn func(string)) {
 	w.onChange = fn
 }
 
+// OnPaste can consume a bracketed-paste payload before it is inserted. It is
+// useful for controls that accept a structured paste format in addition to
+// normal text (for example workspace-file imports). Returning false preserves
+// the ordinary text-paste behavior.
+func (w *TextInput) OnPaste(fn func(string) bool) {
+	if w != nil {
+		w.onPaste = fn
+	}
+}
+
 func (w *TextInput) changed() {
 	if w.onChange != nil {
 		w.onChange(w.value)
 	}
 }
 
-// Measure returns a one-line preferred size.
+// Measure returns the preferred input size.
 func (w *TextInput) Measure(avail tui.Size) tui.Size {
 	width := 1
 	if w != nil {
@@ -172,7 +232,14 @@ func (w *TextInput) Measure(avail tui.Size) tui.Size {
 	if avail.W > 0 {
 		width = minInt(width, avail.W)
 	}
-	return tui.Size{W: maxInt(width, 1), H: 1}
+	height := 1
+	if w != nil && w.multiline {
+		height = strings.Count(w.value, "\n") + 1
+		if height > w.maxRows {
+			height = w.maxRows
+		}
+	}
+	return tui.Size{W: maxInt(width, 1), H: height}
 }
 
 // Layout returns the layout node for this text input.
@@ -186,6 +253,10 @@ func (w *TextInput) Layout() *layout.Node {
 // Draw renders the input value, placeholder, and cursor.
 func (w *TextInput) Draw(r screen.Region) {
 	if w == nil || r.Height() == 0 {
+		return
+	}
+	if w.multiline {
+		w.drawMultiline(r)
 		return
 	}
 	clearLine(r, 0, w.style)
@@ -217,10 +288,114 @@ func (w *TextInput) Draw(r screen.Region) {
 	r.Set(cursorX, 0, styled(content, w.cursorStyle))
 }
 
+type inputRow struct{ start, end int }
+
+func (w *TextInput) drawMultiline(r screen.Region) {
+	w.lastWidth = r.Width()
+	for y := 0; y < r.Height(); y++ {
+		clearLine(r, y, w.style)
+	}
+	if r.Width() <= 0 {
+		return
+	}
+	if w.value == "" {
+		drawText(r, 0, 0, tuitext.Truncate(w.placeholder, r.Width(), tuitext.Ellipsis), w.placeholderStyle)
+		if w.showingCursor() {
+			r.Set(0, 0, styled(" ", w.cursorStyle))
+		}
+		return
+	}
+	rows := wrappedInputRows(w.value, r.Width())
+	row, x := cursorInputPosition(w.value, rows, w.cursor)
+	if row < w.scrollRow {
+		w.scrollRow = row
+	}
+	if row >= w.scrollRow+r.Height() {
+		w.scrollRow = row - r.Height() + 1
+	}
+	if w.scrollRow < 0 {
+		w.scrollRow = 0
+	}
+	for y := 0; y < r.Height() && w.scrollRow+y < len(rows); y++ {
+		line := rows[w.scrollRow+y]
+		drawText(r, 0, y, w.value[line.start:line.end], w.style)
+	}
+	if !w.showingCursor() || row < w.scrollRow || row >= w.scrollRow+r.Height() || x >= r.Width() {
+		return
+	}
+	content := " "
+	if w.cursor < len(w.value) && w.value[w.cursor] != '\n' {
+		for cluster := range tuitext.Clusters(w.value[w.cursor:]) {
+			if cluster.Width > 0 {
+				content = cluster.Text
+			}
+			break
+		}
+	}
+	r.Set(x, row-w.scrollRow, styled(content, w.cursorStyle))
+}
+
+func wrappedInputRows(value string, width int) []inputRow {
+	if width <= 0 {
+		return []inputRow{{0, len(value)}}
+	}
+	rows := make([]inputRow, 0, strings.Count(value, "\n")+1)
+	start, used := 0, 0
+	for cluster := range tuitext.Clusters(value) {
+		if cluster.Text == "\n" {
+			rows = append(rows, inputRow{start, cluster.Offset})
+			start, used = cluster.Offset+len(cluster.Text), 0
+			continue
+		}
+		if used > 0 && used+cluster.Width > width {
+			rows = append(rows, inputRow{start, cluster.Offset})
+			start, used = cluster.Offset, 0
+		}
+		used += cluster.Width
+	}
+	rows = append(rows, inputRow{start, len(value)})
+	return rows
+}
+
+func cursorInputPosition(value string, rows []inputRow, cursor int) (int, int) {
+	for i, row := range rows {
+		if cursor < row.start || cursor > row.end || (cursor == row.start && i > 0) {
+			continue
+		}
+		return i, tuitext.Width(value[row.start:cursor])
+	}
+	last := len(rows) - 1
+	return last, tuitext.Width(value[rows[last].start:rows[last].end])
+}
+
+func (w *TextInput) moveVertical(width, delta int) bool {
+	if !w.multiline || width <= 0 {
+		return false
+	}
+	rows := wrappedInputRows(w.value, width)
+	row, x := cursorInputPosition(w.value, rows, w.cursor)
+	target := row + delta
+	if target < 0 || target >= len(rows) {
+		return true
+	}
+	pos := rows[target].start
+	used := 0
+	for cluster := range tuitext.Clusters(w.value[rows[target].start:rows[target].end]) {
+		if used+cluster.Width > x {
+			break
+		}
+		used += cluster.Width
+		pos = rows[target].start + cluster.Offset + len(cluster.Text)
+	}
+	w.cursor = pos
+	w.showCursor()
+	return true
+}
+
 // Handle edits the input for key and paste events. A read-only input consumes
 // nothing, so its container can react to the same keys.
 func (w *TextInput) Handle(ev tui.Event) bool {
-	if w == nil || w.readOnly {
+	if w == nil || w.readOnly || !w.focusEnabled {
 		return false
 	}
 	switch ev := ev.(type) {
@@ -232,6 +407,9 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 		return false
 	case input.PasteEvent:
 		if ev.Text != "" {
+			if w.onPaste != nil && w.onPaste(ev.Text) {
+				return true
+			}
 			w.insert(ev.Text)
 			w.showCursor()
 			w.changed()
@@ -249,6 +427,12 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			w.changed()
 			return true
 		case input.KeyEnter:
+			if w.multiline && ev.Mods&input.Shift != 0 {
+				w.insert("\n")
+				w.showCursor()
+				w.changed()
+				return true
+			}
 			if w.onSubmit != nil {
 				w.onSubmit(w.value)
 				return true
@@ -273,12 +457,18 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			w.showCursor()
 			return true
 		case input.KeyUp:
+			if w.moveVertical(w.lastWidth, -1) {
+				return true
+			}
 			if ev.Mods&input.Ctrl != 0 {
 				w.cursor = 0
 				w.showCursor()
 				return true
 			}
 		case input.KeyDown:
+			if w.moveVertical(w.lastWidth, 1) {
+				return true
+			}
 			if ev.Mods&input.Ctrl != 0 {
 				w.cursor = len(w.value)
 				w.showCursor()

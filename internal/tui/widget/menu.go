@@ -62,6 +62,7 @@ type Menu struct {
 	disabledStyle screen.Style
 	keyStyle      screen.Style
 	borderStyle   screen.Style
+	vimNavigation bool
 
 	node layout.Node
 }
@@ -157,6 +158,14 @@ func (m *Menu) SetKeyStyle(s screen.Style) {
 func (m *Menu) SetBorderStyle(s screen.Style) {
 	if m != nil {
 		m.borderStyle = s
+	}
+}
+
+// SetVimNavigation opts the menu into j/k movement. Arrow navigation remains
+// available in every configuration.
+func (m *Menu) SetVimNavigation(enabled bool) {
+	if m != nil {
+		m.vimNavigation = enabled
 	}
 }
 
@@ -313,7 +322,16 @@ func (m *Menu) handleKey(ev input.KeyEvent) bool {
 	case input.KeyEnter:
 		m.activate(m.selected)
 	case input.KeyRune:
-		if ev.Rune == ' ' {
+		switch ev.Rune {
+		case 'j':
+			if m.vimNavigation {
+				m.step(+1)
+			}
+		case 'k':
+			if m.vimNavigation {
+				m.step(-1)
+			}
+		case ' ':
 			m.activate(m.selected)
 		}
 	case input.KeyEsc:
