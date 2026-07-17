@@ -873,7 +873,7 @@ func (a *App) handleRoleUpsert(guild discord.GuildID, role discord.Role) {
 // style). On success the reconciliation happens when the gateway echoes the
 // message back (matched by nonce), so no duplicate appears.
 func (a *App) Send(content string) {
-	if content == "" || a.activeChannel == 0 {
+	if strings.TrimSpace(content) == "" || a.activeChannel == 0 {
 		return
 	}
 	channel := a.activeChannel
@@ -905,7 +905,7 @@ func (a *App) SendSticker(id uint64) {
 
 // Reply sends content as a Discord inline reply to message.
 func (a *App) Reply(content string, message store.Message, mention bool) {
-	if content == "" || message.ChannelID == 0 || message.ID == 0 {
+	if strings.TrimSpace(content) == "" || message.ChannelID == 0 || message.ID == 0 {
 		return
 	}
 	nonce := newNonce()

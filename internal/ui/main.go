@@ -811,7 +811,7 @@ func (mv *MainView) resolver() markup.Resolver {
 }
 
 func (mv *MainView) onSend(content string) {
-	if content == "" || mv.composerReadOnly {
+	if strings.TrimSpace(content) == "" || mv.composerReadOnly {
 		return
 	}
 	if mv.composerMode == composerNormal && mv.onLocalCommand != nil && mv.onLocalCommand(content) {
