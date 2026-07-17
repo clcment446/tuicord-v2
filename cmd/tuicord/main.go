@@ -79,6 +79,10 @@ func run() error {
 	orch.OnError(func(err error) {
 		shell.ShowToast("Discord error", err)
 	})
+	if mgr := setupPlugins(orch, uiApp, shell, cfg); mgr != nil {
+		defer mgr.Close()
+	}
+
 	orch.RegisterHandlers()
 	orch.LoadGuilds(100)
 

@@ -1,0 +1,69 @@
+# tuicord Lua plugins
+
+tuicord embeds a Lua interpreter ([gopher-lua](https://github.com/yuin/gopher-lua),
+Lua 5.1) so you can extend the client without recompiling. Drop `.lua` files into
+your plugins directory and they load on startup.
+
+## Location
+
+Plugins live beside `config.toml`:
+
+```
+~/.config/tuicord-v2/plugins/          # honors XDG_CONFIG_HOME
+  hello.lua                            # a single-file plugin named "hello"
+  my-plugin/init.lua                   # a directory plugin named "my-plugin"
+```
+
+The directory is created for you on first run. See `hello.lua` in this folder
+for a working example.
+
+## The `tuicord` API
+
+A global `tuicord` table is available to every plugin.
+
+| Call | Purpose |
+| --- | --- |
+| `tuicord.on(event, fn)` | Subscribe to an event (see below). |
+| `tuicord.command(name, fn, help)` | Register a `;name` composer command; `fn` receives an args array. |
+| `tuicord.keymap(spec, fn)` | Bind a key (e.g. `"ctrl+g"`) to a callback. Fires only when no built-in binding or the composer consumes the key. |
+| `tuicord.send(content)` | Send to the active channel. |
+| `tuicord.send_to(channel_id, content)` | Send to a specific channel. |
+| `tuicord.reply(channel_id, message_id, content, mention)` | Reply to a message. |
+| `tuicord.react(channel_id, message_id, emoji)` | Add a reaction. |
+| `tuicord.notify(title, body)` | Show a transient notice. |
+| `tuicord.active_channel()` / `active_guild()` / `self_id()` | Current IDs (as strings). |
+| `tuicord.log(...)` | Write to `~/.config/tuicord-v2/plugin.log`. `print` is redirected here too. |
+
+### Events
+
+`ready`, `message.create`, `message.update`, `message.delete`, `reaction.add`,
+`reaction.remove`, `channel.switch`, `error`. Payloads are tables; see the
+constants in `internal/plugin/events.go` for each shape.
+
+### Identifiers
+
+Discord snowflake IDs exceed the range Lua numbers represent exactly, so **every
+ID is a decimal string** on the Lua side (`m.channel_id`, `tuicord.self_id()`,
+etc.). Pass them straight back to API calls.
+
+## Sandbox and grants
+
+Plugins run without `os`, `io`, `require`, or arbitrary code loading. Grant extra
+capabilities per plugin in `config.toml`:
+
+```toml
+[plugins.grants]
+my-plugin = ["fs", "net"]
+```
+
+- `fs` adds `tuicord.fs.read/write/list`, confined to the plugin's own data
+  directory (`~/.config/tuicord-v2/plugin-data/<name>/`).
+- `net` adds `tuicord.http.get(url)`.
+
+## Disabling
+
+```toml
+[plugins]
+enabled = false               # turn the whole system off
+disabled = ["hello"]          # or skip specific plugins by name
+```

@@ -23,6 +23,20 @@ import (
 	"awesomeProject/internal/tui/widget"
 )
 
+// PluginHost is the slice of the Lua plugin manager the Shell uses to dispatch
+// user input to plugins. It is optional; a nil host disables all plugin
+// dispatch. Implemented by *plugin.Manager.
+type PluginHost interface {
+	// RunCommand runs a plugin ;-command, reporting whether one is registered.
+	RunCommand(name string, args []string) bool
+	// RunKey runs a plugin key binding, reporting whether the spec is bound.
+	RunKey(spec string) bool
+	// KeySpecs lists the key specs plugins have bound.
+	KeySpecs() []string
+	// CommandNames lists registered plugin command names for help.
+	CommandNames() []string
+}
+
 // Shell is the root widget. It shows the main view and can swap in a
 // full-screen overlay (quick switcher or help). Overlays are implemented as a
 // tree swap rather than a z-ordered layer, which the toolkit supports directly:
@@ -33,6 +47,7 @@ type Shell struct {
 	app            *app.App
 	cfg            config.Config
 	styles         Styles
+	plugins        PluginHost
 	overlay        tui.Widget // nil = show the main view
 	popup          tui.Widget // small interactive layer drawn over current()
 	toast          *Toast
@@ -47,6 +62,9 @@ type Shell struct {
 	cancel         context.CancelFunc
 	node           layout.Node
 }
+
+// SetPluginHost registers the Lua plugin manager for command and key dispatch.
+func (s *Shell) SetPluginHost(host PluginHost) { s.plugins = host }
 
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
@@ -69,7 +87,13 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		s.ShowNotice("Local commands", ";help [command] · ;quit · ;switch <query> · ;settings")
+		detail := ";help [command] · ;quit · ;switch <query> · ;settings"
+		if s.plugins != nil {
+			if names := s.plugins.CommandNames(); len(names) > 0 {
+				detail += " · plugins: ;" + strings.Join(names, " ;")
+			}
+		}
+		s.ShowNotice("Local commands", detail)
 	case "quit":
 		s.prefetch.Stop()
 		if s.cancel != nil {
@@ -88,6 +112,9 @@ func (s *Shell) runLocalCommand(input string) bool {
 			s.openServerSettings(guild)
 		}
 	default:
+		if s.plugins != nil && s.plugins.RunCommand(command.name, command.args) {
+			return true
+		}
 		s.ShowNotice("Unknown local command", "Use ;help to list local commands")
 	}
 	return true
@@ -251,6 +278,17 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	if action, ok := s.mv.chat.TakeComponentAction(); ok {
 		s.dispatchComponentAction(action)
 		return true
+	}
+	// Plugin key bindings are a fallback: they fire only for keys no built-in
+	// binding or focused widget (including the composer) consumed, so a plugin
+	// cannot shadow core navigation or intercept text input.
+	if !handled && isKey && !key.Release && s.plugins != nil {
+		for _, spec := range s.plugins.KeySpecs() {
+			if keyMatches(key, spec) {
+				s.plugins.RunKey(spec)
+				return true
+			}
+		}
 	}
 	return handled
 }
