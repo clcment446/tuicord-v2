@@ -11,6 +11,7 @@ import (
 func NewHelpOverlay(cfg config.Config) tui.Widget {
 	lines := [][2]string{
 		{cfg.Keys.QuickSwitcher, "Quick switch channels"},
+		{cfg.Keys.Picker, "Open emoji / sticker picker"},
 		{cfg.Keys.Help, "Toggle this help"},
 		{cfg.Keys.NextPanel, "Cycle focus between panels"},
 		{cfg.Keys.FocusComposer, "Return focus to the composer / close overlays"},

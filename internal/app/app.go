@@ -20,7 +20,6 @@ import (
 	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
-	autobot "awesomeProject/user-scripts/autobot"
 
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
@@ -281,10 +280,6 @@ type App struct {
 	commandMu           sync.Mutex
 	commandCache        map[CommandContext]commandCacheEntry
 	now                 func() time.Time
-	autoBot             *autobot.Runtime
-	autoBotDMChannels   map[store.ChannelID]bool
-	autoBotChannel      store.ChannelID
-	autoBotBackground   bool
 
 	resourceMu       sync.Mutex
 	historyGate      loadGate[store.ChannelID]
@@ -332,97 +327,7 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		commandCache:        make(map[CommandContext]commandCacheEntry),
 		now:                 time.Now,
 	}
-	a.autoBot = autobot.New(sess, "", nil)
-	a.autoBotDMChannels = make(map[store.ChannelID]bool)
 	return a
-}
-
-// ToggleAutoBot starts or stops the local user-script in the active channel.
-func (a *App) ToggleAutoBot(background bool) (bool, error) {
-	if a == nil || a.autoBot == nil {
-		return false, fmt.Errorf("auto-bot plugin is unavailable")
-	}
-	if a.autoBot.Active() {
-		a.autoBot.Stop()
-		return false, nil
-	}
-	if err := a.validateAutoBotTarget(a.activeGuild, a.activeChannel); err != nil {
-		return false, err
-	}
-	if a.selfID == 0 || a.sessionID == "" {
-		return false, fmt.Errorf("auto-bot requires a ready Discord session")
-	}
-	guild := discord.GuildID(a.activeGuild)
-	if a.activeGuild == DirectMessagesGuildID {
-		guild = 0
-	}
-	a.autoBotChannel = a.activeChannel
-	a.autoBotBackground = background
-	a.autoBot.Start(discord.ChannelID(a.activeChannel), guild, discord.UserID(a.selfID), a.sessionID, "")
-	return true, nil
-}
-
-func (a *App) validateAutoBotTarget(guild store.GuildID, channel store.ChannelID) error {
-	if a == nil || a.store == nil || channel == 0 {
-		return fmt.Errorf("auto-bot requires an active channel")
-	}
-	target, ok := a.store.Channel(channel)
-	if !ok || target.Kind == store.ChannelVoice || target.Kind == store.ChannelCategory || target.Kind == store.ChannelForum {
-		return fmt.Errorf("auto-bot requires a message channel")
-	}
-	if target.Kind == store.ChannelDM || guild == DirectMessagesGuildID {
-		if a.autoBotDMChannels[channel] {
-			return nil
-		}
-		for _, message := range a.store.Messages(channel) {
-			if message.AuthorID == store.UserID(autobot.BotUserID) {
-				return nil
-			}
-		}
-		return fmt.Errorf("auto-bot can only start in a direct message with the game bot")
-	}
-	if target.GuildID == 0 || guild != target.GuildID {
-		return fmt.Errorf("the active server does not own this channel")
-	}
-	guild = target.GuildID
-	botID := store.UserID(autobot.BotUserID)
-	if _, ok := a.store.Member(guild, botID); ok {
-		return nil
-	}
-	for _, message := range a.store.Messages(channel) {
-		if message.AuthorID == botID {
-			return nil
-		}
-	}
-	return fmt.Errorf("the game bot is not present in this server")
-}
-
-func (a *App) rememberAutoBotDM(channel discord.Channel) {
-	if a.autoBotDMChannels == nil {
-		a.autoBotDMChannels = make(map[store.ChannelID]bool)
-	}
-	for _, recipient := range channel.DMRecipients {
-		if recipient.ID == autobot.BotUserID {
-			a.autoBotDMChannels[store.ChannelID(channel.ID)] = true
-			return
-		}
-	}
-}
-
-func (a *App) StopAutoBot() {
-	if a != nil && a.autoBot != nil {
-		a.autoBot.Stop()
-		a.autoBotChannel = 0
-		a.autoBotBackground = false
-	}
-}
-
-func (a *App) AutoBotActive() bool {
-	return a != nil && a.autoBot != nil && a.autoBot.Active()
-}
-
-func (a *App) AutoBotBackground() bool {
-	return a != nil && a.AutoBotActive() && a.autoBotBackground
 }
 
 // SubmitCommand dispatches a chat-input command in the active channel. The UI
@@ -593,9 +498,6 @@ func (a *App) SelfID() store.UserID { return a.selfID }
 // SetActive selects the guild/channel the chat view renders, clearing the newly
 // active channel's unread badge. Call on the UI goroutine.
 func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
-	if a.AutoBotActive() && !a.autoBotBackground && channel != a.autoBotChannel {
-		a.StopAutoBot()
-	}
 	a.activeGuild = guild
 	a.activeChannel = channel
 	if channel != 0 {
@@ -725,7 +627,6 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		}
 		for _, channel := range privateChannels {
 			channel.GuildID = discord.GuildID(DirectMessagesGuildID)
-			a.rememberAutoBotDM(channel)
 			ingestPrivateChannel(a.store, channel)
 		}
 		if a.onReady != nil {
@@ -949,7 +850,7 @@ func (a *App) Send(content string) {
 // send cannot be started. It is intended for closing opened files and removing
 // managed temporary clipboard uploads.
 func (a *App) SendFiles(content string, files []sendpart.File, optimistic []store.Attachment, cleanup func()) {
-	if a == nil || (content == "" && len(files) == 0) || a.activeChannel == 0 {
+	if a == nil || (strings.TrimSpace(content) == "" && len(files) == 0) || a.activeChannel == 0 {
 		if cleanup != nil {
 			cleanup()
 		}
@@ -992,7 +893,7 @@ func (a *App) SendSticker(id uint64) {
 
 // Reply sends content as a Discord inline reply to message.
 func (a *App) Reply(content string, message store.Message, mention bool) {
-	if content == "" || message.ChannelID == 0 || message.ID == 0 {
+	if strings.TrimSpace(content) == "" || message.ChannelID == 0 || message.ID == 0 {
 		return
 	}
 	nonce := newNonce()
@@ -1293,7 +1194,6 @@ func (a *App) loadGuilds(limit uint) {
 			a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
 			for _, channel := range privateChannels {
 				channel.GuildID = discord.GuildID(DirectMessagesGuildID)
-				a.rememberAutoBotDM(channel)
 				ingestPrivateChannel(a.store, channel)
 			}
 			a.markChannelsLoaded(DirectMessagesGuildID)

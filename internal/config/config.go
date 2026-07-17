@@ -99,6 +99,8 @@ type Keys struct {
 	Help          string `toml:"help"`
 	NextPanel     string `toml:"next_panel"`
 	FocusComposer string `toml:"focus_composer"`
+	// Picker opens the emoji/sticker picker over the composer.
+	Picker string `toml:"picker"`
 }
 
 // Nitro controls how the picker sends emoji and stickers the account cannot use
@@ -207,6 +209,7 @@ func Default() Config {
 			Help:          "ctrl+/",
 			NextPanel:     "tab",
 			FocusComposer: "esc",
+			Picker:        "ctrl+e",
 		},
 		Nitro:         Nitro{Fake: true},
 		Accessibility: Accessibility{MouseOn: true},
