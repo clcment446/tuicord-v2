@@ -133,6 +133,30 @@ func TestFocusableSplitsCanBeEnabledByAppOption(t *testing.T) {
 	}
 }
 
+func TestAltArrowsNavigateFocusHistory(t *testing.T) {
+	first := &handlingWidget{testWidget: *newTestWidget("first", true)}
+	second := &handlingWidget{testWidget: *newTestWidget("second", true)}
+	third := &handlingWidget{testWidget: *newTestWidget("third", true)}
+	root := &splitLikeWidget{children: []Widget{first, second, third}}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	app.Focus.Set(second)
+	app.Focus.Set(third)
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyLeft, Mods: input.Alt}) {
+		t.Fatal("Alt+Left was not handled")
+	}
+	if got := app.Focus.Focused(); got != second {
+		t.Fatalf("Alt+Left focused %v, want second", got)
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyRight, Mods: input.Alt}) {
+		t.Fatal("Alt+Right was not handled")
+	}
+	if got := app.Focus.Focused(); got != third {
+		t.Fatalf("Alt+Right focused %v, want third", got)
+	}
+}
+
 func TestOverlayDrawsAfterChildren(t *testing.T) {
 	child := &drawWidget{
 		testWidget: *newTestWidget("child", false),
@@ -152,6 +176,23 @@ func TestOverlayDrawsAfterChildren(t *testing.T) {
 	buf := New().Render(parent, Size{W: 1, H: 1})
 	if got := buf.Cell(0, 0).Content; got != "o" {
 		t.Fatalf("rendered cell = %q, want overlay drawn above child", got)
+	}
+}
+
+func TestEventOverlayPreemptsFocusedChild(t *testing.T) {
+	child := &handlingWidget{testWidget: *newTestWidget("child", true)}
+	root := &eventOverlayWidget{
+		overlayWidget: overlayWidget{drawWidget: drawWidget{testWidget: *newTestWidget("root", false)}},
+	}
+	root.node = &layout.Node{Children: []*layout.Node{child.node}}
+	root.children = []Widget{child}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'a'}) {
+		t.Fatal("event overlay did not consume key")
+	}
+	if child.handled != 0 || root.events != 1 {
+		t.Fatalf("child events = %d, overlay events = %d; want 0, 1", child.handled, root.events)
 	}
 }
 
@@ -207,6 +248,18 @@ func (w *drawWidget) Draw(r screen.Region) {
 type overlayWidget struct {
 	drawWidget
 	overlay string
+}
+
+type eventOverlayWidget struct {
+	overlayWidget
+	children []Widget
+	events   int
+}
+
+func (w *eventOverlayWidget) Children() []Widget { return w.children }
+func (w *eventOverlayWidget) HandleOverlay(Event) bool {
+	w.events++
+	return true
 }
 
 func (w *overlayWidget) DrawOverlay(r screen.Region) {

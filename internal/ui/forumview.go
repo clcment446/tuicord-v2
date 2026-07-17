@@ -68,11 +68,11 @@ func NewForumView(styles Styles, ascii bool, onOpen func(store.ChannelID), onLoa
 		onLoadArchived: onLoadArchived,
 		node:           layout.Node{Grow: 1},
 	}
-	fv.header.SetStyle(styles.Muted)
+	fv.header.SetStyle(styles.Cell("forum.header"))
 	fv.header.SetWrap(false)
-	fv.list.SetStyle(styles.Text)
-	fv.list.SetSelectedStyle(styles.Accent)
-	fv.list.SetBadgeStyle(styles.Accent)
+	fv.list.SetStyle(styles.Cell("forum.body"))
+	fv.list.SetSelectedStyle(styles.Cell("forum.selected"))
+	fv.list.SetBadgeStyle(styles.Cell("forum.badge"))
 	fv.list.OnSelect(fv.onSelect)
 	fv.setBody(nil)
 	return fv
@@ -141,15 +141,15 @@ func (fv *ForumView) rebuild(active, archived []store.Channel, unread func(store
 	if tag, ok := fv.activeFilter(); ok {
 		filterName = tag.Name
 	}
-	items = append(items, widget.Item{Label: "Filter tags… [" + filterName + "]", Style: fv.styles.Accent})
+	items = append(items, widget.Item{Label: "Filter tags… [" + filterName + "]", Style: fv.styles.Cell("forum.filter")})
 	fv.targets = append(fv.targets, forumTarget{kind: forumTargetFilter})
 	addPost := func(p store.Channel, dim bool) {
 		if !postMatchesFilter(p, filterID) {
 			return
 		}
-		style := fv.styles.Text
+		style := fv.styles.Cell("forum.body")
 		if dim {
-			style = fv.styles.Muted
+			style = fv.styles.Cell("forum.archived")
 		}
 		badge := ""
 		if unread != nil {
@@ -171,7 +171,7 @@ func (fv *ForumView) rebuild(active, archived []store.Channel, unread func(store
 	if fv.ascii {
 		loadLabel = "+ Load archived..."
 	}
-	items = append(items, widget.Item{Label: loadLabel, Style: fv.styles.Muted})
+	items = append(items, widget.Item{Label: loadLabel, Style: fv.styles.Cell("forum.archived")})
 	fv.targets = append(fv.targets, forumTarget{kind: forumTargetLoadArchived, channel: fv.forum.ID})
 
 	fv.list.SetItems(items)

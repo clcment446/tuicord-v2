@@ -30,8 +30,8 @@ func NewCommandPicker(commands []app.ApplicationCommand, styles Styles, query st
 		commands: append([]app.ApplicationCommand(nil), commands...), query: query,
 		list: widget.NewItemList(nil), onPick: onPick, onClose: onClose, node: layout.Node{Grow: 1},
 	}
-	p.list.SetStyle(styles.Text)
-	p.list.SetSelectedStyle(styles.Accent)
+	p.list.SetStyle(styles.Cell("picker"))
+	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
 	p.body = widget.Column(titled("Slash commands", p.list))
 	p.body.Children()[0].Layout().Grow = 1
 	p.refilter()

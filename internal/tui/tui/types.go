@@ -51,6 +51,12 @@ type Overlay interface {
 	DrawOverlay(screen.Region)
 }
 
+// EventOverlay optionally receives events before retained children. It is used
+// for transient popups that are drawn over, but are not part of, the tree.
+type EventOverlay interface {
+	HandleOverlay(Event) bool
+}
+
 // Focusable is implemented by widgets that can receive keyboard focus.
 type Focusable interface {
 	// CanFocus reports whether the widget should be present in the focus ring.

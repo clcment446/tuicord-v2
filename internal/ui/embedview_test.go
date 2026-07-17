@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"strings"
 	"testing"
 
 	"awesomeProject/internal/markup"
@@ -8,6 +9,38 @@ import (
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 )
+
+func TestEmbedTitleUsesMarkupAndHeaderStyles(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{Cells: map[string]screen.Style{
+		"messages.header1": {Fg: screen.RGB(1, 2, 3)},
+		"embeds.title":     {Fg: screen.RGB(4, 5, 6)},
+	}})
+	view.SetMedia(nil, media.Config{Enabled: false}, nil)
+	lines := view.renderEmbed(store.Message{}, store.Embed{Title: "# <:wave:123>"}, 0, 80, screen.Style{})
+	if len(lines) < 3 {
+		t.Fatalf("embed lines = %+v, want framed title", lines)
+	}
+	found := false
+	for _, line := range lines {
+		if strings.Contains(lineText(line), ":wave:") {
+			found = true
+			if len(line.segments) < 2 || line.segments[1].style.Fg != screen.RGB(1, 2, 3) {
+				t.Fatalf("title style = %+v, want heading override", line.segments)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("embed title did not render custom emoji: %+v", lines)
+	}
+}
+
+func lineText(line chatLine) string {
+	var b strings.Builder
+	for _, segment := range line.segments {
+		b.WriteString(segment.text)
+	}
+	return b.String()
+}
 
 func TestEmbedMediaSpecFakeNitroMediaUsesNativeCellBudgets(t *testing.T) {
 	emoji := embedMediaSpec(store.Embed{}, "https://cdn.discordapp.com/emojis/123.png?size=48", 80, 12)

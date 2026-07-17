@@ -67,7 +67,7 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 			return w.mediaLines(url, chip, messageMediaPlacementKey(m, "embed", index, url), base, embedMediaSpec(e, url, width, w.mediaMaxRows()))
 		}
 		if chip != "" {
-			return []chatLine{{segments: []chatSegment{{text: chip, style: mergeStyle(base, w.styles.Muted)}}}}
+			return []chatLine{{segments: []chatSegment{{text: chip, style: mergeStyle(base, w.styles.Cell("embeds.footer"))}}}}
 		}
 		return nil
 	}
@@ -88,27 +88,27 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 	}
 
 	if e.AuthorName != "" {
-		add(e.AuthorName, mergeStyle(contentBase, w.styles.Muted))
+		add(e.AuthorName, mergeStyle(contentBase, w.styles.Cell("embeds.author")))
 	}
 	if e.Title != "" {
-		title := contentBase
-		title.Attrs |= screen.Bold
+		title := mergeStyle(contentBase, w.styles.Cell("embeds.title"))
 		if e.URL != "" {
-			title.Attrs |= screen.Underline
+			title = mergeStyle(title, w.styles.Cell("embeds.title.link"))
 		}
-		add(e.Title, title)
+		for _, line := range w.renderContent(e.Title, inner, title) {
+			content = append(content, line)
+		}
 	}
 	for _, line := range w.renderContent(e.Description, inner, contentBase) {
 		content = append(content, line)
 	}
 	for _, f := range e.Fields {
-		name := contentBase
-		name.Attrs |= screen.Bold
+		name := mergeStyle(contentBase, w.styles.Cell("embeds.field.name"))
 		add(f.Name, name)
 		add(f.Value, contentBase)
 	}
 	if chip := embedMediaChip(e); chip != "" {
-		add(chip, mergeStyle(contentBase, w.styles.Muted))
+		add(chip, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))
 	}
 	if url, ok := embedMediaURL(e); ok {
 		for _, line := range w.mediaLines(url, embedMediaChip(e), messageMediaPlacementKey(m, "embed", index, url), contentBase, embedMediaSpec(e, url, inner, w.mediaMaxRows())) {
@@ -123,10 +123,10 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 		}
 	}
 	if e.FooterText != "" {
-		add(e.FooterText, mergeStyle(contentBase, w.styles.Muted))
+		add(e.FooterText, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))
 	}
 	if len(content) == 0 {
-		content = append(content, embedPlainLines("[embed]", inner, mergeStyle(contentBase, w.styles.Muted))...)
+		content = append(content, embedPlainLines("[embed]", inner, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))...)
 	}
 	return frameEmbedLines(content, inner, borderStyle, contentBase)
 }
@@ -143,19 +143,24 @@ func unadornedEmbed(e store.Embed) bool {
 }
 
 func (w *ChatView) embedAccent(e store.Embed) screen.Color {
-	if e.Color != 0 {
+	if !w.styles.HasCustom("embeds.border") && e.Color != 0 {
 		return rgbColor(e.Color)
 	}
-	if w.styles.Accent.Fg.Set() {
-		return w.styles.Accent.Fg
+	if configured := w.styles.Cell("embeds.border"); configured.Fg.Set() {
+		return configured.Fg
 	}
 	return screen.RGB(88, 101, 242)
 }
 
 func (w *ChatView) embedBackground(accent screen.Color, base screen.Style) screen.Color {
-	bg := screen.RGB(12, 14, 18)
+	bg := w.styles.Cell("embeds.background").Bg
+	if !bg.Set() {
+		bg = screen.RGB(12, 14, 18)
+	}
 	if base.Bg.Set() {
-		bg = base.Bg
+		if !w.styles.Cell("embeds.background").Bg.Set() {
+			bg = base.Bg
+		}
 	}
 	return mixColor(bg, accent, 18)
 }

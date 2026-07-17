@@ -139,6 +139,14 @@ func (w *TextInput) SetPlaceholderStyle(style screen.Style) {
 	w.placeholderStyle = style
 }
 
+// SetCursorStyle sets the style used for the focused cursor cell.
+func (w *TextInput) SetCursorStyle(style screen.Style) {
+	if w == nil {
+		return
+	}
+	w.cursorStyle = style
+}
+
 // OnSubmit registers a callback invoked with the current value when the user
 // presses Enter. Passing nil clears the callback.
 func (w *TextInput) OnSubmit(fn func(string)) {

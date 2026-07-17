@@ -30,6 +30,7 @@ type App struct {
 	escExits    int
 	mouseOn     bool
 	focusSplits bool
+	ttyColors   bool
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -60,6 +61,12 @@ func WithMouse(enabled bool) Option {
 // WithFocusableSplits controls whether split selectors enter the focus ring.
 func WithFocusableSplits(enabled bool) Option {
 	return func(a *App) { a.focusSplits = enabled }
+}
+
+// WithTTYColors restricts emitted UI colors to the terminal's standard
+// 16-color palette.
+func WithTTYColors(enabled bool) Option {
+	return func(a *App) { a.ttyColors = enabled }
 }
 
 // Post schedules fn to run on the App event loop.
@@ -180,6 +187,12 @@ func (a *App) RunContext(ctx context.Context, root Widget) error {
 
 func (a *App) handleMouse(ev input.MouseEvent) bool {
 	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
+		return true
+	}
+	a.mu.Lock()
 	hits := a.hits
 	a.mu.Unlock()
 
@@ -208,10 +221,29 @@ func localMouse(ev input.MouseEvent, hit Hit) input.MouseEvent {
 }
 
 func (a *App) handleKey(ev input.KeyEvent) bool {
+	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
+		return true
+	}
 	if a.Drag.Active() && ev.Key == input.KeyEsc && !ev.Release {
 		a.Drag.Cancel()
 		a.Invalidate()
 		return true
+	}
+	if !ev.Release && ev.Mods&input.Alt != 0 && ev.Mods&(input.Ctrl|input.Super) == 0 {
+		var focused Widget
+		switch ev.Key {
+		case input.KeyLeft:
+			focused = a.Focus.Back()
+		case input.KeyRight:
+			focused = a.Focus.Forward()
+		}
+		if focused != nil {
+			a.Invalidate()
+			return true
+		}
 	}
 	if ev.Key == input.KeyTab && !ev.Release {
 		if ev.Mods&input.Shift != 0 {
@@ -266,7 +298,16 @@ func (a *App) run(
 			return nil
 		}
 		next := a.Render(root, size)
-		frame := screen.Frame(prev, next, syncOutput(out))
+		var frame []byte
+		if a.ttyColors {
+			if palette, ok := terminalANSI16Palette(out); ok {
+				frame = screen.FrameWithPalette(prev, next, syncOutput(out), palette)
+			} else {
+				frame = screen.FrameWithColorMode(prev, next, syncOutput(out), screen.ColorModeTTY16)
+			}
+		} else {
+			frame = screen.Frame(prev, next, syncOutput(out))
+		}
 		if len(frame) > 0 {
 			if _, err := out.Write(frame); err != nil {
 				return err
@@ -377,6 +418,14 @@ type syncCapable interface {
 func syncOutput(w frameWriter) bool {
 	c, ok := w.(syncCapable)
 	return ok && c.Caps().SyncOutput
+}
+
+func terminalANSI16Palette(w frameWriter) (screen.Palette, bool) {
+	c, ok := w.(syncCapable)
+	if !ok || !c.Caps().ANSI16Known {
+		return screen.Palette{}, false
+	}
+	return c.Caps().ANSI16, true
 }
 
 func drawTree(buf *screen.Buffer, root Widget, hits HitIndex) {

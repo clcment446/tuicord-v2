@@ -116,6 +116,10 @@ func (f *fakeSender) CrosspostMessage(discord.ChannelID, discord.MessageID) (*di
 	return &discord.Message{}, f.err
 }
 
+func (f *fakeSender) React(discord.ChannelID, discord.MessageID, discord.APIEmoji) error {
+	return f.err
+}
+
 func (f *fakeSender) Messages(discord.ChannelID, uint) ([]discord.Message, error) {
 	f.mu.Lock()
 	f.historyN++

@@ -127,17 +127,17 @@ func (w *ChatView) renderComponentNode(ctx *componentRenderContext, m store.Mess
 	case store.ComponentTextDisplay:
 		return w.renderComponentText(node.Content, width, base, frame)
 	case store.ComponentThumbnail:
-		return []chatLine{componentTextLine(frame, componentMediaLabel(node, "thumbnail"), mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, componentMediaLabel(node, "thumbnail"), mergeStyle(base, w.styles.Cell("components.description")))}
 	case store.ComponentMediaGallery:
 		return w.renderComponentGallery(node, base, frame)
 	case store.ComponentFile:
-		return []chatLine{componentTextLine(frame, componentMediaLabel(node, "file"), mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, componentMediaLabel(node, "file"), mergeStyle(base, w.styles.Cell("components.description")))}
 	case store.ComponentSeparator:
 		return renderComponentSeparator(node, width, base, frame)
 	case store.ComponentUnknown:
-		return []chatLine{componentTextLine(frame, fmt.Sprintf("[unknown component type %d]", node.RawType), mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, fmt.Sprintf("[unknown component type %d]", node.RawType), mergeStyle(base, w.styles.Cell("components.disabled")))}
 	default:
-		return []chatLine{componentTextLine(frame, fmt.Sprintf("[component: %d]", node.RawType), mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, fmt.Sprintf("[component: %d]", node.RawType), mergeStyle(base, w.styles.Cell("components.disabled")))}
 	}
 }
 
@@ -148,10 +148,10 @@ func (w *ChatView) renderComponentLabel(ctx *componentRenderContext, m store.Mes
 		if node.Required {
 			label += " *"
 		}
-		lines = append(lines, componentTextLine(frame, label, mergeStyle(base, w.styles.Accent)))
+		lines = append(lines, componentTextLine(frame, label, mergeStyle(base, w.styles.Cell("components.label"))))
 	}
 	if node.Description != "" {
-		lines = append(lines, componentTextLine(frame, node.Description, mergeStyle(base, w.styles.Muted)))
+		lines = append(lines, componentTextLine(frame, node.Description, mergeStyle(base, w.styles.Cell("components.description"))))
 	}
 	for _, child := range node.Children {
 		lines = append(lines, w.renderComponentNode(ctx, m, child, width, base, frame)...)
@@ -171,26 +171,26 @@ func (w *ChatView) renderComponentContainer(ctx *componentRenderContext, m store
 
 	var lines []chatLine
 	if node.Spoiler {
-		lines = append(lines, componentTextLine(componentFrame{}, "[spoiler container]", mergeStyle(contentBase, w.styles.Muted)))
+		lines = append(lines, componentTextLine(componentFrame{}, "[spoiler container]", mergeStyle(contentBase, w.styles.Cell("components.description"))))
 	}
 	for _, child := range node.Children {
 		lines = append(lines, w.renderComponentNode(ctx, m, child, inner, contentBase, componentFrame{})...)
 	}
 	if len(lines) == 0 {
-		lines = append(lines, componentTextLine(componentFrame{}, "[container]", mergeStyle(contentBase, w.styles.Muted)))
+		lines = append(lines, componentTextLine(componentFrame{}, "[container]", mergeStyle(contentBase, w.styles.Cell("components.description"))))
 	}
 	return frameEmbedLines(lines, inner, borderStyle, contentBase)
 }
 
 func (w *ChatView) componentAccent(node store.ComponentNode, frame componentFrame) screen.Color {
-	if node.AccentColor != 0 {
+	if !w.styles.HasCustom("components.border") && node.AccentColor != 0 {
 		return rgbColor(node.AccentColor)
 	}
 	if frame.style.Fg.Set() {
 		return frame.style.Fg
 	}
-	if w.styles.Accent.Fg.Set() {
-		return w.styles.Accent.Fg
+	if configured := w.styles.Cell("components.border"); configured.Fg.Set() {
+		return configured.Fg
 	}
 	return screen.RGB(88, 101, 242)
 }
@@ -205,7 +205,7 @@ func (w *ChatView) renderComponentSection(ctx *componentRenderContext, m store.M
 	for i, child := range node.Children {
 		childLines := w.renderComponentNode(ctx, m, child, width, base, frame)
 		if i == 0 && accessory != "" && len(childLines) > 0 && width >= 42 {
-			childLines[0].segments = append(childLines[0].segments, chatSegment{text: "  " + accessory, style: mergeStyle(base, w.styles.Muted)})
+			childLines[0].segments = append(childLines[0].segments, chatSegment{text: "  " + accessory, style: mergeStyle(base, w.styles.Cell("components.description"))})
 		}
 		lines = append(lines, childLines...)
 	}
@@ -217,7 +217,7 @@ func (w *ChatView) renderComponentSection(ctx *componentRenderContext, m store.M
 		if node.Accessory.Kind == store.ComponentButton || node.Accessory.Kind == store.ComponentLinkButton || node.Accessory.Kind == store.ComponentSelect {
 			lines = append(lines, w.renderComponentNode(ctx, m, *node.Accessory, width, base, frame)...)
 		} else {
-			lines = append(lines, componentTextLine(frame, accessory, mergeStyle(base, w.styles.Muted)))
+			lines = append(lines, componentTextLine(frame, accessory, mergeStyle(base, w.styles.Cell("components.description"))))
 		}
 	}
 	return lines
@@ -237,7 +237,7 @@ func (w *ChatView) renderComponentText(content string, width int, base screen.St
 
 func (w *ChatView) renderComponentGallery(node store.ComponentNode, base screen.Style, frame componentFrame) []chatLine {
 	if len(node.Media) == 0 {
-		return []chatLine{componentTextLine(frame, "[media gallery]", mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, "[media gallery]", mergeStyle(base, w.styles.Cell("components.description")))}
 	}
 	var lines []chatLine
 	for i, media := range node.Media {
@@ -254,7 +254,7 @@ func (w *ChatView) renderComponentGallery(node store.ComponentNode, base screen.
 		if media.Spoiler {
 			label = "spoiler: " + label
 		}
-		lines = append(lines, componentTextLine(frame, fmt.Sprintf("▒▒ media %d/%d: %s ▒▒", i+1, len(node.Media), label), mergeStyle(base, w.styles.Muted)))
+		lines = append(lines, componentTextLine(frame, fmt.Sprintf("▒▒ media %d/%d: %s ▒▒", i+1, len(node.Media), label), mergeStyle(base, w.styles.Cell("components.description"))))
 	}
 	return lines
 }
@@ -354,28 +354,28 @@ func (w *ChatView) componentControlStyle(node store.ComponentNode, action compon
 	style := base
 	switch node.Style {
 	case 1:
-		style = mergeStyle(style, w.styles.Accent)
+		style = mergeStyle(style, w.styles.Cell("components.button"))
 	case 3:
-		style.Fg = screen.RGB(68, 180, 120)
+		style = mergeStyle(style, w.styles.Cell("components.success"))
 	case 4:
-		style = mergeStyle(style, w.styles.Error)
+		style = mergeStyle(style, w.styles.Cell("components.error"))
 	}
 	if node.Kind == store.ComponentLinkButton {
-		style.Attrs |= screen.Underline
+		style = mergeStyle(style, w.styles.Cell("components.link"))
 	}
 	if node.Disabled {
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("components.button.disabled"))
 	}
 	if w.componentFlashing(action) {
-		style = mergeStyle(style, w.styles.Muted)
+		style = mergeStyle(style, w.styles.Cell("components.disabled"))
 	}
 	switch node.State {
 	case store.ComponentStatePending:
-		style = mergeStyle(style, w.styles.Pending)
+		style = mergeStyle(style, w.styles.Cell("components.pending"))
 	case store.ComponentStateSuccess:
-		style.Fg = screen.RGB(68, 180, 120)
+		style = mergeStyle(style, w.styles.Cell("components.success"))
 	case store.ComponentStateError:
-		style = mergeStyle(style, w.styles.Error)
+		style = mergeStyle(style, w.styles.Cell("components.error"))
 	}
 	return style
 }
@@ -383,7 +383,7 @@ func (w *ChatView) componentControlStyle(node store.ComponentNode, action compon
 func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.Message, node store.ComponentNode, parent componentAction, base screen.Style, frame componentFrame) []chatLine {
 	options := componentOptions(node)
 	if len(options) == 0 {
-		return []chatLine{componentTextLine(frame, "  (no choices)", mergeStyle(base, w.styles.Muted))}
+		return []chatLine{componentTextLine(frame, "  (no choices)", mergeStyle(base, w.styles.Cell("components.description")))}
 	}
 	if w.componentMultiEnabled(parent.controlKey()) {
 		parent.multi = true
@@ -416,7 +416,7 @@ func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.M
 		content := "  " + marker + " " + label
 		style := base
 		if w.componentFlashing(action) {
-			style = mergeStyle(style, w.styles.Muted)
+			style = mergeStyle(style, w.styles.Cell("components.disabled"))
 		}
 		line := componentTextLine(frame, content, style)
 		start := text.Width(frame.prefix)

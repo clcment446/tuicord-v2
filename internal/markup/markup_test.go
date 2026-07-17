@@ -249,6 +249,20 @@ func TestParseHeaderStripsMarker(t *testing.T) {
 	assertSpans(t, spans, want)
 }
 
+func TestParseHeadersSupportsAllMarkdownLevels(t *testing.T) {
+	spans := Parse("# one\n## two\n### three\n#### four\n##### five\n###### six", Resolver{})
+	levels := []int{1, 2, 3, 4, 5, 6}
+	if len(spans) != len(levels)*2-1 {
+		t.Fatalf("spans = %+v, want six headers separated by newlines", spans)
+	}
+	for i, want := range levels {
+		span := spans[i*2]
+		if span.Kind != Kind_Header || span.HeaderLevel != want {
+			t.Errorf("header %d = %+v, want level %d", i+1, span, want)
+		}
+	}
+}
+
 func TestParseBlockquoteAddsGutter(t *testing.T) {
 	spans := Parse("> hi", Resolver{})
 	assertSpans(t, spans, []Span{
@@ -284,6 +298,16 @@ func TestHeaderMarkerOnlyAtLineStart(t *testing.T) {
 	spans := Parse("a # b", Resolver{})
 	if len(spans) != 1 || spans[0].Kind != Kind_Text || spans[0].Text != "a # b" {
 		t.Fatalf("mid-line # should be literal, got %+v", spans)
+	}
+}
+
+func TestParseSmallText(t *testing.T) {
+	spans := Parse("-# small title\nbody", Resolver{})
+	if len(spans) != 2 {
+		t.Fatalf("spans = %+v, want small text and body", spans)
+	}
+	if spans[0].Kind != Kind_Small || spans[0].Text != "small title" {
+		t.Fatalf("small span = %+v, want Kind_Small with title text", spans[0])
 	}
 }
 

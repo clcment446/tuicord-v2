@@ -19,6 +19,8 @@ import (
 
 	"golang.org/x/sys/unix"
 	xterm "golang.org/x/term"
+
+	"awesomeProject/internal/tui/screen"
 )
 
 const (
@@ -93,6 +95,10 @@ type Capabilities struct {
 	SyncOutput bool
 	// Color256 reports whether at least 256-color output is likely supported.
 	Color256 bool
+	// ANSI16 is Kitty's active ANSI palette when it was discovered.
+	ANSI16 screen.Palette
+	// ANSI16Known reports whether ANSI16 came from the active terminal theme.
+	ANSI16Known bool
 }
 
 // Terminal is an open raw-mode terminal session.

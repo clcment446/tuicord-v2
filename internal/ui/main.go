@@ -17,6 +17,7 @@ import (
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/term"
 	"awesomeProject/internal/tui/tui"
@@ -93,20 +94,20 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != ""}
 
 	mv.guildList = widget.NewItemList(nil)
-	mv.guildList.SetStyle(styles.Text)
-	mv.guildList.SetSelectedStyle(styles.Accent)
-	mv.guildList.SetBadgeStyle(styles.Error)
+	mv.guildList.SetStyle(styles.Cell("guilds"))
+	mv.guildList.SetSelectedStyle(styles.Cell("guilds.selected"))
+	mv.guildList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.guildList.OnSelect(mv.onGuildSelected)
 
 	mv.channelList = widget.NewItemList(nil)
-	mv.channelList.SetStyle(styles.Text)
-	mv.channelList.SetSelectedStyle(styles.Accent)
-	mv.channelList.SetBadgeStyle(styles.Error)
+	mv.channelList.SetStyle(styles.Cell("guilds.channels"))
+	mv.channelList.SetSelectedStyle(styles.Cell("guilds.selected"))
+	mv.channelList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.channelList.OnSelect(mv.onChannelSelected)
 	mv.channelList.OnHover(mv.onChannelHovered)
 
 	mv.memberList = widget.NewItemList(nil)
-	mv.memberList.SetStyle(styles.Text)
+	mv.memberList.SetStyle(styles.Cell("guilds.members"))
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
@@ -116,11 +117,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	}
 
 	mv.composerStatus = widget.NewText("")
-	mv.composerStatus.SetStyle(styles.Muted)
+	mv.composerStatus.SetStyle(styles.Cell("composer.status"))
 	mv.composerStatus.SetWrap(false)
 
 	mv.composer = widget.NewTextInput("Message")
-	mv.composer.SetStyle(styles.Text)
+	mv.composer.SetStyle(styles.Cell("composer"))
+	mv.composer.SetPlaceholderStyle(styles.Cell("composer.placeholder"))
+	mv.composer.SetCursorStyle(styles.Cell("composer.cursor"))
 	mv.composer.OnSubmit(mv.onSend)
 	mv.composer.OnChange(func(value string) {
 		if mv.onComposerChange != nil {
@@ -154,27 +157,59 @@ func (mv *MainView) compose() tui.Widget {
 	composerNode := chatColumn.Children()[1].Layout()
 	composerNode.Basis = 4
 	composerNode.Grow = 0
+	mv.cfg.Layout.Element("messages").Apply(mv.chatBorder.Layout(), layout.Column)
+	mv.cfg.Layout.Element("composer").Apply(mv.composerBorder.Layout(), layout.Column)
+
+	membersPolicy := mv.cfg.Layout.Element("members")
+	membersWidth := mv.cfg.Layout.MembersWidth
+	if membersPolicy.Width > 0 {
+		membersWidth = membersPolicy.Width
+	}
 
 	// chat | members split so members stays beside the messages/composer stack.
 	chatAndMembers := widget.NewSplit(chatColumn, members).
 		Basis(mv.termWidthMinusMembers()).
-		MinSecond(mv.cfg.Layout.MembersWidth).
+		MinSecond(membersWidth).
 		CollapsibleSecond().
 		Vertical()
 	membersNode := members.Layout()
+	membersPolicy.Apply(membersNode, layout.Row)
 	membersNode.HideBelow = mv.cfg.Layout.MembersHideBelow
+	if membersPolicy.Visible != nil {
+		chatAndMembers.HideSecond(!*membersPolicy.Visible)
+	}
+
+	channelsPolicy := mv.cfg.Layout.Element("channels")
+	channelsWidth := mv.cfg.Layout.ChannelsWidth
+	if channelsPolicy.Width > 0 {
+		channelsWidth = channelsPolicy.Width
+	}
 
 	channelsAndRest := widget.NewSplit(channels, chatAndMembers).
-		Basis(mv.cfg.Layout.ChannelsWidth).
+		Basis(channelsWidth).
 		MinFirst(12).
 		MaxFirst(40).
 		CollapsibleFirst()
+	channelsPolicy.Apply(channels.Layout(), layout.Row)
+	if channelsPolicy.Visible != nil {
+		channelsAndRest.HideFirst(!*channelsPolicy.Visible)
+	}
+
+	guildsPolicy := mv.cfg.Layout.Element("guilds")
+	guildsWidth := mv.cfg.Layout.GuildsWidth
+	if guildsPolicy.Width > 0 {
+		guildsWidth = guildsPolicy.Width
+	}
 
 	root := widget.NewSplit(guildRail, channelsAndRest).
-		Basis(mv.cfg.Layout.GuildsWidth).
+		Basis(guildsWidth).
 		MinFirst(3).
 		MaxFirst(24).
 		CollapsibleFirst()
+	guildsPolicy.Apply(guildRail.Layout(), layout.Row)
+	if guildsPolicy.Visible != nil {
+		root.HideFirst(!*guildsPolicy.Visible)
+	}
 	return root
 }
 
@@ -642,9 +677,7 @@ func (mv *MainView) onOpenPost(id store.ChannelID) {
 }
 
 func (mv *MainView) headerStyle() screen.Style {
-	s := mv.styles.Muted
-	s.Attrs |= screen.Bold
-	return s
+	return mv.styles.Cell("guilds.header")
 }
 
 // pinnedGuildIDs / pinnedChannelIDs / collapsedCategorySet convert the persisted
@@ -896,6 +929,9 @@ func (mv *MainView) CancelComposerMode() bool {
 	mv.composerMode = composerNormal
 	mv.composerTarget = store.Message{}
 	mv.replyMention = false
+	if mv.composer != nil {
+		mv.composer.SetValue("")
+	}
 	mv.updateComposerStatus()
 	return true
 }
@@ -931,7 +967,7 @@ func titled(title string, child tui.Widget) *widget.Border {
 
 func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
 	b := titled(title, child)
-	b.SetStyle(mv.styles.Border)
-	b.SetFocusStyle(mv.styles.Accent)
+	b.SetStyle(mv.styles.Cell("panels.border"))
+	b.SetFocusStyle(mv.styles.Cell("panels.focus"))
 	return b
 }

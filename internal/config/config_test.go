@@ -43,6 +43,26 @@ func TestLoadFromLayersOverDefault(t *testing.T) {
 	}
 }
 
+func TestLoadElementLayoutPolicy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[layout.elements.guilds]\nvisible = false\nwidth = 8\nmin_width = 3\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	policy := cfg.Layout.Element("guilds")
+	if policy.Visible == nil || *policy.Visible {
+		t.Fatalf("Visible = %v, want false", policy.Visible)
+	}
+	if policy.Width != 8 || policy.MinWidth != 3 {
+		t.Fatalf("policy = %+v, want width 8/min 3", policy)
+	}
+}
+
 func TestAuthPreferredModeRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	want := Default()
@@ -95,9 +115,9 @@ func TestParseColor(t *testing.T) {
 	}
 }
 
-func TestDefaultColorsUseVivianPalette(t *testing.T) {
+func TestDefaultColorsUseCatppuccinLattePalette(t *testing.T) {
 	styles := Default().Colors.Styles()
-	bg := screen.RGB(0x15, 0x25, 0x28) // miyabi (Terafox teal) background
+	bg := screen.RGB(0xef, 0xf1, 0xf5) // Catppuccin Latte base
 	if styles.Background != bg {
 		t.Errorf("default background = %+v, want %+v", styles.Background, bg)
 	}
@@ -115,6 +135,75 @@ func TestDefaultColorsUseVivianPalette(t *testing.T) {
 	}
 	if styles.Border.Bg != bg {
 		t.Errorf("default border bg = %+v, want the palette background", styles.Border.Bg)
+	}
+}
+
+func TestCustomColorsRequireExplicitOptIn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[colors]\naccent = \"#ff0000\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Colors.Accent == "#ff0000" {
+		t.Fatal("custom accent applied without colors.enabled = true")
+	}
+	if cfg.Colors.Accent != Default().Colors.Accent {
+		t.Fatalf("accent = %q, want built-in %q", cfg.Colors.Accent, Default().Colors.Accent)
+	}
+
+	if err := os.WriteFile(path, []byte(contents+"enabled = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Colors.Accent != "#ff0000" {
+		t.Fatalf("opted-in accent = %q, want #ff0000", cfg.Colors.Accent)
+	}
+}
+
+func TestLoadColorsConfUsesExactRuleOverWildcard(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(configPath, []byte(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	colorsPath := filepath.Join(dir, "colors.conf")
+	contents := "guilds.channels.bg_color=#ffffff\n" +
+		"guilds.channels.fg_color=#101010\n" +
+		"guilds.separators.*.bg=#ffffff\n" +
+		"guilds.separators.right.fg=#0000ff // blue separator\n" +
+		"guilds.separators.right,bg-color=#ff0000\n" +
+		"messages.header{n}.fg=#800080\n" +
+		"messages.bold.fg=#ff00ff\n" +
+		"messages.bold.attrs=bold|underline\n"
+	if err := os.WriteFile(colorsPath, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	styles := ApplyColorOverrides(Default().Colors.Styles(), cfg.ColorOverrides)
+	if styles.Text.Bg != screen.RGB(255, 255, 255) || styles.Text.Fg != screen.RGB(0x10, 0x10, 0x10) {
+		t.Fatalf("channel style = %+v, want configured fg/bg", styles.Text)
+	}
+	if styles.Border.Fg != screen.RGB(0, 0, 255) || styles.Border.Bg != screen.RGB(255, 0, 0) {
+		t.Fatalf("right separator style = %+v, want exact rule over wildcard", styles.Border)
+	}
+	cellStyles := CellStyles(Default().Colors.Styles(), cfg.ColorOverrides)
+	if cellStyles["messages.header1"].Fg != screen.RGB(0x80, 0, 0x80) || cellStyles["messages.header6"].Fg != screen.RGB(0x80, 0, 0x80) {
+		t.Fatalf("header styles = %+v / %+v, want header{n} override", cellStyles["messages.header1"], cellStyles["messages.header6"])
+	}
+	if cellStyles["messages.bold"].Fg != screen.RGB(255, 0, 255) || cellStyles["messages.bold"].Attrs != screen.Bold|screen.Underline {
+		t.Fatalf("bold cell style = %+v, want custom color and attrs", cellStyles["messages.bold"])
 	}
 }
 
@@ -141,6 +230,21 @@ func TestLoadFromAccessibilitySection(t *testing.T) {
 	}
 	if cfg.Accessibility.MouseOn || !cfg.Accessibility.FocusSplits {
 		t.Fatalf("accessibility = %+v, want mouse off and split focus on", cfg.Accessibility)
+	}
+}
+
+func TestLoadFromTTYColorsDisplayOption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[display]\ntty_colors = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if !cfg.Display.TTYColors {
+		t.Fatal("display.tty_colors was not loaded")
 	}
 }
 
@@ -183,7 +287,7 @@ func TestColorsStylesUseConfiguredColors(t *testing.T) {
 
 func TestLoadFromColorsSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	contents := "[colors]\naccent = \"#5865f2\"\n"
+	contents := "[colors]\nenabled = true\naccent = \"#5865f2\"\n"
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +303,7 @@ func TestLoadFromColorsSection(t *testing.T) {
 
 func TestLoadFromLegacyThemeSection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
-	contents := "[theme]\naccent = \"#5865f2\"\n"
+	contents := "[theme]\nenabled = true\naccent = \"#5865f2\"\n"
 	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}

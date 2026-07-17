@@ -56,7 +56,9 @@ func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode
 // remote-auth panel on the right.
 func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), cancel context.CancelFunc, preferredMode string, onModeSelected func(string)) tui.Widget {
 	tokenInput := widget.NewTextInput("Paste token, press Enter")
-	tokenInput.SetStyle(styles.Text)
+	tokenInput.SetStyle(styles.Cell("login.input"))
+	tokenInput.SetPlaceholderStyle(styles.Cell("login.placeholder"))
+	tokenInput.SetCursorStyle(styles.Cell("login.cursor"))
 	tokenInput.OnSubmit(setToken)
 
 	tokenPanel := widget.Column(

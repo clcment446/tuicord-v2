@@ -10,17 +10,59 @@ const (
 	syncEnd   = "\x1b[?2026l"
 )
 
+// ColorMode controls how explicit RGB colors are encoded in ANSI output.
+type ColorMode uint8
+
+// Palette is the terminal's ANSI color table for indexes 0 through 15.
+type Palette [16]Color
+
+const (
+	// ColorModeTrueColor preserves explicit RGB colors.
+	ColorModeTrueColor ColorMode = iota
+	// ColorModeTTY16 maps colors to the terminal's standard 16-color palette.
+	ColorModeTTY16
+)
+
 // Diff returns ANSI bytes that transform prev into next. It moves the cursor
 // only to changed runs and skips wide-cell continuations.
 func Diff(prev, next *Buffer) []byte {
+	return DiffWithColorMode(prev, next, ColorModeTrueColor)
+}
+
+// DiffWithColorMode returns ANSI bytes that transform prev into next using the
+// requested color encoding.
+func DiffWithColorMode(prev, next *Buffer, mode ColorMode) []byte {
 	var out bytes.Buffer
-	emitDiff(&out, prev, next)
+	emitDiff(&out, prev, next, mode, DefaultANSI16Palette())
+	return out.Bytes()
+}
+
+// DiffWithPalette emits ANSI16 output using the supplied terminal palette.
+func DiffWithPalette(prev, next *Buffer, palette Palette) []byte {
+	var out bytes.Buffer
+	emitDiff(&out, prev, next, ColorModeTTY16, palette)
 	return out.Bytes()
 }
 
 // Frame wraps Diff in synchronized output markers when sync is true.
 func Frame(prev, next *Buffer, sync bool) []byte {
-	diff := Diff(prev, next)
+	return FrameWithColorMode(prev, next, sync, ColorModeTrueColor)
+}
+
+// FrameWithColorMode wraps a color-mode-aware Diff in synchronized output
+// markers when sync is true.
+func FrameWithColorMode(prev, next *Buffer, sync bool, mode ColorMode) []byte {
+	diff := DiffWithColorMode(prev, next, mode)
+	return frameWithDiff(prev, next, sync, diff)
+}
+
+// FrameWithPalette emits a frame using the supplied terminal ANSI16 palette.
+func FrameWithPalette(prev, next *Buffer, sync bool, palette Palette) []byte {
+	diff := DiffWithPalette(prev, next, palette)
+	return frameWithDiff(prev, next, sync, diff)
+}
+
+func frameWithDiff(prev, next *Buffer, sync bool, diff []byte) []byte {
 	clears, graphics := GraphicDiff(prev, next)
 	if len(diff) == 0 && len(clears) == 0 && len(graphics) == 0 {
 		return nil
@@ -86,7 +128,7 @@ func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
 	return clears, graphics
 }
 
-func emitDiff(out *bytes.Buffer, prev, next *Buffer) {
+func emitDiff(out *bytes.Buffer, prev, next *Buffer, mode ColorMode, palette Palette) {
 	if next == nil {
 		return
 	}
@@ -106,9 +148,10 @@ func emitDiff(out *bytes.Buffer, prev, next *Buffer) {
 				if cell.continuation || equalCell(prevCell(prev, x, y), cell) {
 					break
 				}
-				if !styleSet || cell.Style != style {
-					sgr(out, cell.Style)
-					style = cell.Style
+				encodedStyle := encodeStyle(cell.Style, mode, palette)
+				if !styleSet || encodedStyle != style {
+					sgr(out, encodedStyle, mode, palette)
+					style = encodedStyle
 					styleSet = true
 				}
 				out.WriteString(cell.Content)
@@ -176,7 +219,49 @@ func move(out *bytes.Buffer, x, y int) {
 	out.WriteByte('H')
 }
 
-func sgr(out *bytes.Buffer, style Style) {
+func encodeStyle(style Style, mode ColorMode, palette Palette) Style {
+	if mode != ColorModeTTY16 {
+		return style
+	}
+	if style.Fg.Set() {
+		style.Fg = ansi16Color(style.Fg, palette)
+	}
+	if style.Bg.Set() {
+		style.Bg = ansi16Color(style.Bg, palette)
+	}
+	return style
+}
+
+// DefaultANSI16Palette returns the conventional xterm ANSI16 palette.
+func DefaultANSI16Palette() Palette {
+	return Palette{
+		RGB(0, 0, 0), RGB(128, 0, 0), RGB(0, 128, 0), RGB(128, 128, 0),
+		RGB(0, 0, 128), RGB(128, 0, 128), RGB(0, 128, 128), RGB(192, 192, 192),
+		RGB(128, 128, 128), RGB(255, 0, 0), RGB(0, 255, 0), RGB(255, 255, 0),
+		RGB(0, 0, 255), RGB(255, 0, 255), RGB(0, 255, 255), RGB(255, 255, 255),
+	}
+}
+
+func ansi16Color(c Color, palette Palette) Color {
+	best := palette[0]
+	bestDistance := colorDistance(c, best)
+	for _, candidate := range palette[1:] {
+		if distance := colorDistance(c, candidate); distance < bestDistance {
+			best = candidate
+			bestDistance = distance
+		}
+	}
+	return best
+}
+
+func colorDistance(a, b Color) int {
+	r := int(a.R) - int(b.R)
+	g := int(a.G) - int(b.G)
+	blue := int(a.B) - int(b.B)
+	return r*r + g*g + blue*blue
+}
+
+func sgr(out *bytes.Buffer, style Style, mode ColorMode, palette Palette) {
 	out.WriteString("\x1b[0")
 	if style.Attrs&Bold != 0 {
 		out.WriteString(";1")
@@ -197,14 +282,52 @@ func sgr(out *bytes.Buffer, style Style) {
 		out.WriteString(";9")
 	}
 	if style.Fg.Set() {
-		out.WriteString(";38;2;")
-		writeColor(out, style.Fg)
+		if mode == ColorModeTTY16 {
+			writeANSIColor(out, style.Fg, false, palette)
+		} else {
+			out.WriteString(";38;2;")
+			writeColor(out, style.Fg)
+		}
 	}
 	if style.Bg.Set() {
-		out.WriteString(";48;2;")
-		writeColor(out, style.Bg)
+		if mode == ColorModeTTY16 {
+			writeANSIColor(out, style.Bg, true, palette)
+		} else {
+			out.WriteString(";48;2;")
+			writeColor(out, style.Bg)
+		}
 	}
 	out.WriteByte('m')
+}
+
+func writeANSIColor(out *bytes.Buffer, c Color, background bool, palette Palette) {
+	index := ansi16Index(c, palette)
+	if index < 8 {
+		if background {
+			out.WriteString(";")
+			out.WriteString(strconv.Itoa(40 + int(index)))
+		} else {
+			out.WriteString(";")
+			out.WriteString(strconv.Itoa(30 + int(index)))
+		}
+		return
+	}
+	if background {
+		out.WriteString(";")
+		out.WriteString(strconv.Itoa(100 + int(index-8)))
+	} else {
+		out.WriteString(";")
+		out.WriteString(strconv.Itoa(90 + int(index-8)))
+	}
+}
+
+func ansi16Index(c Color, palette Palette) int {
+	for i, candidate := range palette {
+		if c == candidate {
+			return i
+		}
+	}
+	return 0
 }
 
 func writeColor(out *bytes.Buffer, c Color) {

@@ -99,6 +99,56 @@ func TestChatViewResolvesMarkup(t *testing.T) {
 	}
 }
 
+func TestChatViewRendersSmallMarkupWithSmallStyle(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{
+		Cells: map[string]screen.Style{
+			"messages.small": {Fg: screen.RGB(1, 2, 3)},
+		},
+	})
+	lines := view.renderContent("-# small title", 80, screen.Style{})
+	if len(lines) != 1 || len(lines[0].segments) == 0 {
+		t.Fatalf("small lines = %+v, want one styled line", lines)
+	}
+	if lines[0].segments[0].style.Fg != screen.RGB(1, 2, 3) {
+		t.Fatalf("small style = %+v, want configured small color", lines[0].segments[0].style)
+	}
+}
+
+func TestChatViewHeadersHaveLevelStylesAndCollapse(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 7, ChannelID: 1, Author: "alice", Content: "# one\ninside one\n## two\ninside two"})
+	styles := Styles{Cells: map[string]screen.Style{
+		"messages.header1": {Fg: screen.RGB(1, 2, 3), Attrs: screen.Bold},
+		"messages.header2": {Fg: screen.RGB(4, 5, 6), Attrs: screen.Underline},
+	}}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, styles)
+	buf := screen.NewBuffer(40, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if got := buf.Cell(2, 1).Style.Fg; got != screen.RGB(1, 2, 3) {
+		t.Fatalf("h1 color = %+v, want h1 style", got)
+	}
+	if got := buf.Cell(2, 4).Style.Fg; got != screen.RGB(4, 5, 6) {
+		t.Fatalf("h2 color = %+v, want h2 style", got)
+	}
+	headerY := -1
+	for y, line := range view.visibleLines {
+		if line.header != nil && line.header.level == 2 {
+			headerY = y
+			break
+		}
+	}
+	if headerY < 0 || !view.Handle(input.MouseEvent{Kind: input.MousePress, Btn: input.ButtonLeft, X: 0, Y: headerY}) {
+		t.Fatal("header collapse toggle was not handled")
+	}
+	view.Draw(buf.Clip(buf.Bounds()))
+	if !strings.Contains(rowsText(buf), "inside one") {
+		t.Fatal("collapsing h2 should preserve the preceding h1 body")
+	}
+	if strings.Contains(rowsText(buf), "inside two") {
+		t.Fatal("collapsed h2 body remained visible")
+	}
+}
+
 func TestChatViewMarkupPreservesBackgroundForQuoteAndEmoji(t *testing.T) {
 	base := screen.Style{Fg: screen.RGB(220, 220, 220), Bg: screen.RGB(40, 20, 10)}
 	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{Muted: screen.Style{Fg: screen.RGB(150, 150, 150), Bg: screen.RGB(1, 2, 3)}})
