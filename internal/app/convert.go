@@ -62,6 +62,15 @@ func convertChannel(c discord.Channel) store.Channel {
 		Overwrites:   convertOverwrites(c.Overwrites),
 		RecipientIDs: recipients,
 	}
+	if out.Kind == store.ChannelDM {
+		out.Recipients = make([]store.Member, 0, len(c.DMRecipients))
+		for _, recipient := range c.DMRecipients {
+			out.Recipients = append(out.Recipients, store.Member{
+				ID:   store.UserID(recipient.ID),
+				Name: recipient.DisplayOrUsername(),
+			})
+		}
+	}
 	if out.Kind == store.ChannelThread {
 		out.Thread = convertThreadMeta(c)
 	}
@@ -705,8 +714,11 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 func ingestPrivateChannel(s *store.Store, c discord.Channel) {
 	converted := convertChannel(c)
 	if c.Name == "" && len(c.DMRecipients) == 0 && converted.Kind == store.ChannelDM {
-		if existing, ok := s.Channel(converted.ID); ok && existing.Name != "" {
-			converted.Name = existing.Name
+		if existing, ok := s.Channel(converted.ID); ok {
+			if existing.Name != "" {
+				converted.Name = existing.Name
+			}
+			converted.Recipients = append([]store.Member(nil), existing.Recipients...)
 		}
 	}
 	s.UpsertChannel(converted)

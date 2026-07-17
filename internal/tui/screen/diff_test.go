@@ -25,6 +25,21 @@ func TestDiffSkipsUnchangedCells(t *testing.T) {
 	}
 }
 
+func TestDiffRepaintsEveryCellAfterResize(t *testing.T) {
+	prev := NewBuffer(3, 1)
+	prev.Set(0, 0, Cell{Content: "a"})
+	prev.Set(1, 0, Cell{Content: "b"})
+	next := NewBuffer(4, 1)
+	next.Set(0, 0, Cell{Content: "a"})
+	next.Set(1, 0, Cell{Content: "b"})
+
+	got := string(Diff(prev, next))
+	want := "\x1b[1;1H\x1b[0mab  \x1b[0m"
+	if got != want {
+		t.Fatalf("Diff() after resize = %q, want full repaint %q", got, want)
+	}
+}
+
 func TestDiffStyle(t *testing.T) {
 	next := NewBuffer(1, 1)
 	next.Set(0, 0, Cell{

@@ -39,6 +39,8 @@ type Shell struct {
 	forumPreview   *forumPreview
 	completionSync bool
 	commandLoading bool
+	inputMode      bool
+	focusRequest   tui.Widget
 	prefetch       *idleMediaPrefetcher
 	prefetchIdle   bool
 	lastActivity   time.Time
@@ -138,6 +140,17 @@ func (s *Shell) Layout() *layout.Node {
 	return &s.node
 }
 
+// TakeFocusRequest transfers an exact focus target after the current key has
+// finished routing. The TUI runtime polls this through tui.FocusRequester.
+func (s *Shell) TakeFocusRequest() tui.Widget {
+	if s == nil {
+		return nil
+	}
+	requested := s.focusRequest
+	s.focusRequest = nil
+	return requested
+}
+
 // Draw is a no-op; children draw themselves.
 func (s *Shell) Draw(screen.Region) {}
 
@@ -155,14 +168,16 @@ func (s *Shell) DrawOverlay(r screen.Region) {
 // else to the active subtree.
 func (s *Shell) Handle(ev tui.Event) bool {
 	if _, idle := ev.(input.TickEvent); idle {
-		if !s.prefetchIdle && prefetchEligible(s.lastActivity, time.Now()) {
+		if s.prefetch != nil && !s.prefetchIdle && prefetchEligible(s.lastActivity, time.Now()) {
 			s.prefetchIdle = true
 			s.prefetch.Start(mediaPrefetchURLs(s.app.Store(), s.app.ActiveGuild()))
 		}
 	} else if userActivity(ev) {
 		s.prefetchIdle = false
 		s.lastActivity = time.Now()
-		s.prefetch.Stop()
+		if s.prefetch != nil {
+			s.prefetch.Stop()
+		}
 	}
 	key, isKey := ev.(input.KeyEvent)
 
@@ -207,6 +222,11 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
+		case s.cfg.Accessibility.VimNavigation && !s.inputMode && key.Key == input.KeyRune && key.Rune == 'I' && key.Mods&input.Shift != 0:
+			s.inputMode = true
+			s.mv.SetInputMode(true)
+			s.focusRequest = s.mv.composer
+			return true
 		case key.Key == input.KeyRune && key.Rune == '+' && key.Mods == 0:
 			s.openHotSwitch()
 			return true
@@ -326,7 +346,7 @@ func (s *Shell) dispatchEntityAction(action markup.Action) {
 
 // openProfile uses the gateway member cache as the reliable offline fallback.
 func (s *Shell) openProfile(id store.UserID) {
-	m, ok := s.app.Store().Member(s.app.ActiveGuild(), id)
+	m, ok := memberForContext(s.app.Store(), s.app.ActiveGuild(), s.app.ActiveChannel(), id)
 	if !ok {
 		s.ShowNotice("Profile", "User "+strconv.FormatUint(uint64(id), 10))
 		return
@@ -412,7 +432,7 @@ func (s *Shell) openQuickSwitcher() {
 
 // openHotSwitch opens the lightweight + picker from any focused panel.
 func (s *Shell) openHotSwitch() {
-	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
+	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.ActiveChannel(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
 		'+', "", func(string) {}, nil, s.closeOverlay)
 	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
 		s.app.SetActive(guild, channel)
@@ -449,6 +469,18 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	if s.completionSync {
 		return
 	}
+	if s.cfg.Accessibility.VimNavigation && s.inputMode && strings.HasSuffix(value, ";q") {
+		s.completionSync = true
+		s.mv.composer.SetValue(strings.TrimSuffix(value, ";q"))
+		s.completionSync = false
+		s.inputMode = false
+		s.mv.SetInputMode(false)
+		s.focusRequest = s.mv.chat
+		if _, inline := s.overlay.(*InlinePicker); inline {
+			s.closeOverlay()
+		}
+		return
+	}
 	trigger, start, query, ok := completionToken(value, cursor)
 	if !ok {
 		if _, inline := s.overlay.(*InlinePicker); inline {
@@ -472,7 +504,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	if _, inline := s.overlay.(*InlinePicker); inline {
 		return
 	}
-	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
+	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.ActiveChannel(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
 		trigger, query,
 		func(insert string) {
 			s.replaceCompletion(start, insert)

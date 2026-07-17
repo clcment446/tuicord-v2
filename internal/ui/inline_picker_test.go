@@ -14,7 +14,7 @@ func TestInlinePickerEmojiFuzzyMatchAndFakeNitroInsert(t *testing.T) {
 	st.SetGuildEmojis(2, []store.GuildEmoji{{ID: 20, Name: "partyBlob", Animated: true}})
 
 	var inserted string
-	p := NewInlinePicker(st, Styles{}, 1, false, true, ':', "ptb",
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, ':', "ptb",
 		func(s string) { inserted = s }, nil, func() {})
 	if len(p.filtered) == 0 || !strings.Contains(p.filtered[0].label, "partyBlob") {
 		t.Fatalf("fuzzy emoji results = %+v", p.filtered)
@@ -34,14 +34,14 @@ func TestInlinePickerCapsLargeCatalog(t *testing.T) {
 		emojis[i] = store.GuildEmoji{ID: uint64(i + 1), Name: fmt.Sprintf("blob-%03d", i)}
 	}
 	st.SetGuildEmojis(1, emojis)
-	p := NewInlinePicker(st, Styles{}, 1, false, true, ':', "blob", func(string) {}, nil, func() {})
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, ':', "blob", func(string) {}, nil, func() {})
 	if len(p.filtered) != maxPickerResults {
 		t.Fatalf("results = %d, want cap %d", len(p.filtered), maxPickerResults)
 	}
 }
 
 func TestInlinePickerRefreshPreservesSelection(t *testing.T) {
-	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, false, true, ':', "", func(string) {}, nil, func() {})
+	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, 0, false, true, ':', "", func(string) {}, nil, func() {})
 	p.list.SetSelectedSilent(2)
 	p.refilter()
 	if got := p.list.Selected(); got != 2 {
@@ -68,7 +68,7 @@ func TestInlinePickerMentionForms(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(string(tt.trigger), func(t *testing.T) {
 			var inserted string
-			p := NewInlinePicker(st, Styles{}, 1, false, true, tt.trigger, tt.query,
+			p := NewInlinePicker(st, Styles{}, 1, 0, false, true, tt.trigger, tt.query,
 				func(s string) { inserted = s }, nil, func() {})
 			p.Handle(input.KeyEvent{Key: input.KeyEnter})
 			if inserted != tt.want {
@@ -81,7 +81,7 @@ func TestInlinePickerMentionForms(t *testing.T) {
 func TestInlinePickerNativeStickerSelectsSticker(t *testing.T) {
 	st := newTestPickerStore()
 	var selected uint64
-	p := NewInlinePicker(st, Styles{}, 1, false, true, '%', "hel", func(string) {},
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, '%', "hel", func(string) {},
 		func(id uint64) { selected = id }, func() {})
 	p.Handle(input.KeyEvent{Key: input.KeyEnter})
 	if selected != 99 {
@@ -95,7 +95,7 @@ func TestInlinePickerOrdersCustomEmojiByFavoriteThenActiveGuild(t *testing.T) {
 	st.UpsertGuild(store.Guild{ID: 2, Name: "Other"})
 	st.SetGuildEmojis(1, []store.GuildEmoji{{ID: 10, Name: "blob-local"}})
 	st.SetGuildEmojis(2, []store.GuildEmoji{{ID: 20, Name: "blob-favorite"}, {ID: 30, Name: "blob-other"}})
-	p := NewInlinePicker(st, Styles{}, 1, false, true, ':', "blob", func(string) {}, nil, func() {})
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, ':', "blob", func(string) {}, nil, func() {})
 	p.SetFavorites([]string{"e:20"}, nil)
 
 	got := []string{p.filtered[0].label, p.filtered[1].label, p.filtered[2].label}
@@ -111,7 +111,7 @@ func TestInlinePickerOrdersStickersByFavoriteThenActiveGuild(t *testing.T) {
 	st.UpsertGuild(store.Guild{ID: 2, Name: "Other"})
 	st.SetGuildStickers(1, []store.GuildSticker{{ID: 10, Name: "blob-local"}})
 	st.SetGuildStickers(2, []store.GuildSticker{{ID: 20, Name: "blob-favorite"}, {ID: 30, Name: "blob-other"}})
-	p := NewInlinePicker(st, Styles{}, 1, false, true, '%', "blob", func(string) {}, nil, func() {})
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, '%', "blob", func(string) {}, nil, func() {})
 	p.SetFavorites(nil, []uint64{20})
 
 	got := []string{p.filtered[0].label, p.filtered[1].label, p.filtered[2].label}
@@ -147,7 +147,7 @@ func TestCompletionToken(t *testing.T) {
 func TestInlinePickerBackspaceAtEmptyRemovesTrigger(t *testing.T) {
 	removed := false
 	closed := false
-	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, false, true, '&', "", func(string) {}, nil, func() { closed = true })
+	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, 0, false, true, '&', "", func(string) {}, nil, func() { closed = true })
 	p.SetTriggerDelete(func() { removed = true })
 	p.Handle(input.KeyEvent{Key: input.KeyBackspace})
 	if !removed || !closed {
@@ -161,5 +161,54 @@ func TestFuzzyScoreTreatsStarAsWildcard(t *testing.T) {
 	}
 	if _, ok := fuzzyScore("green-cult", "cult*gr"); ok {
 		t.Fatal("wildcard must preserve fragment order")
+	}
+}
+
+func TestInlinePickerMentionUsesActiveDMRecipients(t *testing.T) {
+	const dmGuild = ^store.GuildID(0)
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: dmGuild, Name: "Direct Messages"})
+	st.UpsertChannel(store.Channel{ID: 90, GuildID: dmGuild, Name: "Ada", Kind: store.ChannelDM,
+		Recipients: []store.Member{{ID: 20, Name: "Ada Lovelace"}}})
+
+	var inserted string
+	p := NewInlinePicker(st, Styles{}, dmGuild, 90, false, true, '@', "adl",
+		func(s string) { inserted = s }, nil, func() {})
+	p.Handle(input.KeyEvent{Key: input.KeyEnter})
+	if inserted != "<@20>" {
+		t.Fatalf("DM mention inserted = %q, want recipient mention", inserted)
+	}
+}
+
+func TestMemberForContextResolvesSentDMValue(t *testing.T) {
+	const dmGuild = ^store.GuildID(0)
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 90, GuildID: dmGuild, Kind: store.ChannelDM,
+		Recipients: []store.Member{{ID: 20, Name: "Ada Lovelace"}}})
+
+	m, ok := memberForContext(st, dmGuild, 90, 20)
+	if !ok || m.Name != "Ada Lovelace" {
+		t.Fatalf("DM mention resolution = %+v,%v, want Ada Lovelace", m, ok)
+	}
+}
+
+func TestHotSwitchStructuredServerAndChannelSearch(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Cult of the Green"})
+	st.UpsertGuild(store.Guild{ID: 2, Name: "Gaming Lounge"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertChannel(store.Channel{ID: 11, GuildID: 1, Name: "photos", Kind: store.ChannelText})
+	st.UpsertChannel(store.Channel{ID: 20, GuildID: 2, Name: "general", Kind: store.ChannelText})
+
+	p := NewInlinePicker(st, Styles{}, 1, 10, false, true, '+', `\cult gr#pho`, func(string) {}, nil, func() {})
+	if len(p.filtered) != 1 || p.filtered[0].switchChannel != 11 {
+		t.Fatalf("structured results = %+v, want Cult/photos", p.filtered)
+	}
+
+	// Ordinary search remains a fuzzy match against the full display label.
+	p.query = "gaming gen"
+	p.refilter()
+	if len(p.filtered) != 1 || p.filtered[0].switchChannel != 20 {
+		t.Fatalf("ordinary results = %+v, want Gaming/general", p.filtered)
 	}
 }

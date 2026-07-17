@@ -235,6 +235,42 @@ func TestSendAppendsOptimisticPending(t *testing.T) {
 	<-fs.done // deliver goroutine ran
 }
 
+func TestSendIgnoresWhitespaceOnlyContent(t *testing.T) {
+	fs := &fakeSender{}
+	a := newTestApp(fs)
+	a.SetActive(1, 42)
+
+	for _, content := range []string{" ", "\t", "\n \t"} {
+		a.Send(content)
+	}
+
+	if messages := a.store.Messages(42); len(messages) != 0 {
+		t.Fatalf("whitespace sends created optimistic messages: %+v", messages)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.sent != 0 {
+		t.Fatalf("whitespace sends made %d REST calls, want 0", fs.sent)
+	}
+}
+
+func TestReplyIgnoresWhitespaceOnlyContent(t *testing.T) {
+	fs := &fakeSender{}
+	a := newTestApp(fs)
+	target := store.Message{ID: 7, ChannelID: 42}
+
+	a.Reply(" \n\t", target, true)
+
+	if messages := a.store.Messages(42); len(messages) != 0 {
+		t.Fatalf("whitespace reply created optimistic messages: %+v", messages)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.sent != 0 {
+		t.Fatalf("whitespace reply made %d REST calls, want 0", fs.sent)
+	}
+}
+
 func TestSendFilesSendsMultipartOptimisticallyAndCleansUp(t *testing.T) {
 	fs := &fakeSender{done: make(chan struct{})}
 	a := newTestApp(fs)
@@ -540,10 +576,11 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
 	a.store.UpsertChannel(store.Channel{
-		ID:      91,
-		GuildID: DirectMessagesGuildID,
-		Kind:    store.ChannelDM,
-		Name:    "alice",
+		ID:         91,
+		GuildID:    DirectMessagesGuildID,
+		Kind:       store.ChannelDM,
+		Name:       "alice",
+		Recipients: []store.Member{{ID: 100, Name: "alice"}},
 	})
 
 	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{{
@@ -553,6 +590,10 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 
 	if name, ok := a.store.ChannelName(91); !ok || name != "alice" {
 		t.Fatalf("preserved DM ChannelName = %q,%v, want alice,true", name, ok)
+	}
+	channel, ok := a.store.Channel(91)
+	if !ok || len(channel.Recipients) != 1 || channel.Recipients[0].ID != 100 {
+		t.Fatalf("preserved DM recipients = %+v,%v, want alice (100)", channel.Recipients, ok)
 	}
 }
 
@@ -818,11 +859,16 @@ func TestLoadGuildsLoadsDirectoryAndUsesSessionCache(t *testing.T) {
 	}
 	a := newTestApp(fs)
 	ready := false
-	a.OnReady(func() { ready = true })
+	readyDone := make(chan struct{})
+	a.OnReady(func() {
+		ready = true
+		close(readyDone)
+	})
 
 	a.LoadGuilds(100)
 	<-fs.guildsDone
 	a.LoadGuilds(100)
+	<-readyDone
 
 	fs.mu.Lock()
 	guildCalls := fs.guildsN
@@ -847,10 +893,13 @@ func TestLoadChannelsLoadsGuildChannelsAndUsesSessionCache(t *testing.T) {
 		channelsDone: make(chan struct{}),
 	}
 	a := newTestApp(fs)
+	loaded := make(chan struct{})
+	a.OnChange(func() { close(loaded) })
 
 	a.LoadChannels(1)
 	<-fs.channelsDone
 	a.LoadChannels(1)
+	<-loaded
 
 	fs.mu.Lock()
 	channelCalls := fs.channelsN

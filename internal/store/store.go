@@ -107,6 +107,10 @@ type Channel struct {
 	// Thread is non-nil when Kind is [ChannelThread], carrying thread-specific
 	// metadata (archive/lock state, counts, membership).
 	Thread *ThreadMeta
+	// Recipients contains the users participating in a direct or group DM.
+	// Discord may omit it from later sparse channel payloads, so ingestion must
+	// preserve an already hydrated value in that case.
+	Recipients []Member
 	// Forum is non-nil when Kind is [ChannelForum], carrying the available tag
 	// set and default sort order. A forum post is a [ChannelThread] whose
 	// ThreadMeta.AppliedTags references these tags.
@@ -706,6 +710,21 @@ func (s *Store) MemberName(guild GuildID, user UserID) (string, bool) {
 		return m.Name, true
 	}
 	return "", false
+}
+
+// ChannelRecipient returns a user from a direct or group DM's participant
+// list. Guild channels do not carry recipients and return ok=false.
+func (s *Store) ChannelRecipient(channel ChannelID, user UserID) (Member, bool) {
+	c, ok := s.channels[channel]
+	if !ok || c.Kind != ChannelDM {
+		return Member{}, false
+	}
+	for _, recipient := range c.Recipients {
+		if recipient.ID == user {
+			return recipient, true
+		}
+	}
+	return Member{}, false
 }
 
 // UpsertRole inserts or updates a guild role.
