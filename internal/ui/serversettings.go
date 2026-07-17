@@ -22,8 +22,8 @@ func NewServerSettings(st *store.Store, guild store.GuildID, styles Styles, chan
 		channelItems[i] = widget.Item{Label: c.Name}
 	}
 	cl := widget.NewItemList(channelItems)
-	cl.SetStyle(styles.Text)
-	cl.SetSelectedStyle(styles.Accent)
+	cl.SetStyle(styles.Cell("settings"))
+	cl.SetSelectedStyle(styles.Cell("settings.selected"))
 	cl.OnSelect(func(i int) {
 		if i >= 0 && i < len(channels) && channel != nil {
 			channel(channels[i])
@@ -35,18 +35,18 @@ func NewServerSettings(st *store.Store, guild store.GuildID, styles Styles, chan
 		roleItems[i] = widget.Item{Label: r.Name}
 	}
 	rl := widget.NewItemList(roleItems)
-	rl.SetStyle(styles.Text)
-	rl.SetSelectedStyle(styles.Accent)
+	rl.SetStyle(styles.Cell("settings"))
+	rl.SetSelectedStyle(styles.Cell("settings.selected"))
 	rl.OnSelect(func(i int) {
 		if i >= 0 && i < len(roles) && role != nil {
 			role(roles[i])
 		}
 	})
 	tabs := widget.NewTabs([]widget.Tab{{Label: "Channels", Content: cl}, {Label: "Roles", Content: rl}})
-	tabs.SetStyle(styles.Muted)
-	tabs.SetActiveStyle(styles.Accent)
+	tabs.SetStyle(styles.Cell("settings.tab"))
+	tabs.SetActiveStyle(styles.Cell("settings.tab.active"))
 	root := titled("Server settings · Enter options · ←/→ tabs · Esc close", tabs)
-	root.SetStyle(styles.Border)
+	root.SetStyle(styles.Cell("panels.border"))
 	return &ServerSettings{tabs: tabs, root: root, node: layout.Node{Grow: 1}}
 }
 func (s *ServerSettings) Children() []tui.Widget      { return []tui.Widget{s.root} }

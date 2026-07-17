@@ -111,11 +111,10 @@ func (a *App) CreateThreadFromMessage(channel store.ChannelID, message store.Mes
 		return
 	}
 	data := api.StartThreadData{Name: name, AutoArchiveDuration: discord.OneDayArchive}
-	go func() {
-		if _, err := a.threads.StartThreadWithMessage(discord.ChannelID(channel), discord.MessageID(message), data); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		_, err := a.threads.StartThreadWithMessage(discord.ChannelID(channel), discord.MessageID(message), data)
+		return err
+	})
 }
 
 // JoinThread adds the logged-in account to a thread. The membership flip arrives
@@ -124,11 +123,9 @@ func (a *App) JoinThread(thread store.ChannelID) {
 	if a == nil || a.threads == nil || thread == 0 {
 		return
 	}
-	go func() {
-		if err := a.threads.JoinThread(discord.ChannelID(thread)); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.threads.JoinThread(discord.ChannelID(thread))
+	})
 }
 
 // LeaveThread removes the logged-in account from a thread.
@@ -136,11 +133,9 @@ func (a *App) LeaveThread(thread store.ChannelID) {
 	if a == nil || a.threads == nil || thread == 0 {
 		return
 	}
-	go func() {
-		if err := a.threads.LeaveThread(discord.ChannelID(thread)); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		return a.threads.LeaveThread(discord.ChannelID(thread))
+	})
 }
 
 // SetThreadArchived archives or unarchives a thread via a channel edit. The
@@ -171,11 +166,10 @@ func (a *App) Publish(channel store.ChannelID, message store.MessageID) {
 	if a == nil || a.send == nil || channel == 0 || message == 0 {
 		return
 	}
-	go func() {
-		if _, err := a.send.CrosspostMessage(discord.ChannelID(channel), discord.MessageID(message)); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		_, err := a.send.CrosspostMessage(discord.ChannelID(channel), discord.MessageID(message))
+		return err
+	})
 }
 
 // forumThreadPayload is the raw body for creating a forum post: a thread name,
@@ -205,11 +199,10 @@ func (a *App) CreateForumPost(forum store.ChannelID, title, body string, tagIDs 
 	for _, id := range tagIDs {
 		payload.AppliedTags = append(payload.AppliedTags, strconv.FormatUint(id, 10))
 	}
-	go func() {
-		if _, err := a.forum.postForumThread(forum, payload); err != nil {
-			a.reportError(err)
-		}
-	}()
+	a.runInBackground(func() error {
+		_, err := a.forum.postForumThread(forum, payload)
+		return err
+	})
 }
 
 // restForumPoster posts a forum-thread create payload through the session's REST
@@ -231,55 +224,38 @@ func (a *App) markThreadsLoaded(guild store.GuildID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.threadsLoaded[guild] = struct{}{}
-	delete(a.threadsPending, guild)
+	a.threadsGate.markLoaded(guild)
 }
 
 func (a *App) beginThreadLoad(guild store.GuildID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.threadsLoaded[guild]; ok {
-		return false
-	}
-	if _, ok := a.threadsPending[guild]; ok {
-		return false
-	}
-	a.threadsPending[guild] = struct{}{}
-	return true
+	return a.threadsGate.begin(guild)
 }
 
 func (a *App) finishThreadLoad(guild store.GuildID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.threadsPending, guild)
-	if ok {
-		a.threadsLoaded[guild] = struct{}{}
-	}
+	a.threadsGate.finish(guild, ok)
 }
 
 func (a *App) beginArchivedLoad(channel store.ChannelID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.archivedLoaded[channel]; ok {
-		return false
-	}
-	if _, ok := a.archivedPending[channel]; ok {
-		return false
-	}
-	a.archivedPending[channel] = struct{}{}
-	return true
+	return a.archivedGate.begin(channel)
 }
 
 func (a *App) finishArchivedLoad(channel store.ChannelID, ok, more bool, before discord.Timestamp) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.archivedPending, channel)
-	if ok && !more {
-		a.archivedLoaded[channel] = struct{}{}
+	if !more {
+		a.archivedGate.finish(channel, ok)
+	} else {
+		a.archivedGate.finishOlder(channel, false)
 	}
 	if ok && more {
 		a.archivedBefore[channel] = before

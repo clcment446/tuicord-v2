@@ -64,6 +64,7 @@ func run() error {
 		tui.WithTheme(theme(cfg)),
 		tui.WithMouse(cfg.Accessibility.MouseOn),
 		tui.WithFocusableSplits(cfg.Accessibility.FocusSplits),
+		tui.WithTTYColors(cfg.Display.TTYColors),
 	)
 	st := store.New(0)
 	orch := app.New(sess, st, uiApp)
@@ -95,26 +96,30 @@ func run() error {
 // uiStyles resolves the configured colors into the palette the widgets draw with.
 func uiStyles(cfg config.Config) ui.Styles {
 	s := cfg.Colors.Styles()
+	cells := config.CellStyles(s, cfg.ColorOverrides)
+	custom := config.CustomCellKeys(cells, cfg.ColorOverrides)
 	return ui.Styles{
-		Text:    s.Text,
-		Muted:   s.Muted,
-		Accent:  s.Accent,
-		Border:  s.Border,
-		Pending: s.Muted,
-		Error:   s.Error,
+		Text:    cells["messages.content"],
+		Muted:   cells["muted"],
+		Accent:  cells["accent"],
+		Border:  cells["panels.border"],
+		Pending: cells["pending"],
+		Error:   cells["error"],
+		Cells:   cells, Custom: custom, Overrides: cfg.ColorOverrides,
 	}
 }
 
 // theme maps the configured palette onto the toolkit's Theme carrier.
 func theme(cfg config.Config) tui.Theme {
 	s := cfg.Colors.Styles()
+	cells := config.CellStyles(s, cfg.ColorOverrides)
 	return tui.Theme{
-		Background: s.Background,
-		Text:       s.Text,
-		Muted:      s.Muted,
-		Accent:     s.Accent,
-		Selection:  s.Selection,
-		Border:     s.Border,
-		Error:      s.Error,
+		Background: cells["background"].Bg,
+		Text:       cells["text"],
+		Muted:      cells["muted"],
+		Accent:     cells["accent"],
+		Selection:  cells["guilds.selected"],
+		Border:     cells["panels.border"],
+		Error:      cells["error"],
 	}
 }

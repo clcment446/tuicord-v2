@@ -16,7 +16,7 @@ import (
 // images are disabled or unavailable.
 func (w *ChatView) renderMedia(m store.Message, width int, base screen.Style) []chatLine {
 	var lines []chatLine
-	muted := mergeStyle(base, w.styles.Muted)
+	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
 	for i, a := range m.Attachments {
 		if url, ok := attachmentMediaURL(a); ok {
 			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()))...)
@@ -130,7 +130,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 	if len(reactions) == 0 {
 		return chatLine{}, false
 	}
-	base := mergeStyle(w.styles.Text, w.styles.Muted)
+	base := mergeStyle(w.styles.Cell("messages.content"), w.styles.Cell("messages.reaction"))
 	segs := []chatSegment{{text: "⤷ ", style: base}}
 	used := uitext.Width("⤷ ")
 	var inline []positionedInlineMedia
@@ -142,7 +142,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 		}
 		style := base
 		if r.Me {
-			style.Attrs |= screen.Reverse
+			style = mergeStyle(style, w.styles.Cell("messages.reaction.selected"))
 		}
 		if r.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
 			const emojiCols = 2

@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
+	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // syncPoster runs posted closures immediately, as if already on the UI goroutine.
@@ -29,6 +31,8 @@ type fakeSender struct {
 	pinned        int
 	unpinned      int
 	crossposted   int
+	reacted       int
+	reaction      discord.APIEmoji
 	err           error
 	done          chan struct{}
 	history       []discord.Message
@@ -114,6 +118,17 @@ func (f *fakeSender) CrosspostMessage(discord.ChannelID, discord.MessageID) (*di
 		close(f.done)
 	}
 	return &discord.Message{}, f.err
+}
+
+func (f *fakeSender) React(_ discord.ChannelID, _ discord.MessageID, emoji discord.APIEmoji) error {
+	f.mu.Lock()
+	f.reacted++
+	f.reaction = emoji
+	f.mu.Unlock()
+	if f.done != nil {
+		close(f.done)
+	}
+	return f.err
 }
 
 func (f *fakeSender) Messages(discord.ChannelID, uint) ([]discord.Message, error) {
@@ -256,6 +271,57 @@ func TestReplyIgnoresWhitespaceOnlyContent(t *testing.T) {
 	}
 }
 
+func TestSendFilesSendsMultipartOptimisticallyAndCleansUp(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+	a.SetActive(1, 42)
+
+	cleaned := make(chan struct{})
+	attachments := []store.Attachment{{Filename: "report.txt", ContentType: "text/plain", Size: 6}}
+	a.SendFiles("", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, attachments, func() { close(cleaned) })
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 || !msgs[0].Pending || msgs[0].Content != "" {
+		t.Fatalf("optimistic file-only message = %+v", msgs)
+	}
+	if got := msgs[0].Attachments; len(got) != 1 || got[0].Filename != "report.txt" || got[0].Size != 6 {
+		t.Fatalf("optimistic attachments = %+v", got)
+	}
+
+	<-fs.done
+	<-cleaned
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.lastSend.Content != "" || len(fs.lastSend.Files) != 1 || fs.lastSend.Files[0].Name != "report.txt" {
+		t.Fatalf("send data = %+v", fs.lastSend)
+	}
+}
+
+func TestSendFilesCleansUpWhenNoSendCanStart(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	cleaned := false
+	a.SendFiles("", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { cleaned = true })
+	if !cleaned {
+		t.Fatal("cleanup was not called when there was no active channel")
+	}
+}
+
+func TestSendFilesCleansUpAfterFailedDelivery(t *testing.T) {
+	fs := &fakeSender{err: errors.New("upload failed"), done: make(chan struct{})}
+	a := newTestApp(fs)
+	a.SetActive(1, 42)
+	cleaned := make(chan struct{})
+
+	a.SendFiles("note", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { close(cleaned) })
+
+	<-fs.done
+	<-cleaned
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 || !msgs[0].Failed || msgs[0].Pending {
+		t.Fatalf("failed upload echo = %+v", msgs)
+	}
+}
+
 func TestDeliverMarksFailedOnError(t *testing.T) {
 	fs := &fakeSender{err: errors.New("boom")}
 	a := newTestApp(fs)
@@ -365,6 +431,20 @@ func TestDeleteMessageWaitsForGatewayRemoval(t *testing.T) {
 	}
 }
 
+func TestAddReactionCallsREST(t *testing.T) {
+	fs := &fakeSender{done: make(chan struct{})}
+	a := newTestApp(fs)
+
+	a.AddReaction(42, 9, "👍")
+	<-fs.done
+
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.reacted != 1 || fs.reaction != "👍" {
+		t.Fatalf("reaction calls = %d emoji = %q, want 1 thumbs-up", fs.reacted, fs.reaction)
+	}
+}
+
 func TestSetPinnedPatchesCacheAfterSuccess(t *testing.T) {
 	fs := &fakeSender{done: make(chan struct{})}
 	a := newTestApp(fs)
@@ -442,8 +522,8 @@ func TestReadyEventLoadsDiscordGuildData(t *testing.T) {
 		t.Fatalf("loaded member = %q,%v, want ali,true", name, ok)
 	}
 	member, ok := a.store.Member(1, 100)
-	if !ok || len(member.RoleIDs) != 2 || member.RoleIDs[0] != 200 || member.RoleIDs[1] != 201 {
-		t.Fatalf("loaded member roles = %+v,%v, want 200,201", member, ok)
+	if !ok || member.Username != "alice" || member.Nick != "ali" || len(member.RoleIDs) != 2 || member.RoleIDs[0] != 200 || member.RoleIDs[1] != 201 {
+		t.Fatalf("loaded member identity/roles = %+v,%v, want alice, ali, 200,201", member, ok)
 	}
 	role, ok := a.store.Role(1, 200)
 	if !ok || role.Name != "admin" || !role.Hoist || !role.Mentionable {
@@ -813,10 +893,13 @@ func TestLoadChannelsLoadsGuildChannelsAndUsesSessionCache(t *testing.T) {
 		channelsDone: make(chan struct{}),
 	}
 	a := newTestApp(fs)
+	loaded := make(chan struct{})
+	a.OnChange(func() { close(loaded) })
 
 	a.LoadChannels(1)
 	<-fs.channelsDone
 	a.LoadChannels(1)
+	<-loaded
 
 	fs.mu.Lock()
 	channelCalls := fs.channelsN

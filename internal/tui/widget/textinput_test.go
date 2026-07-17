@@ -163,3 +163,76 @@ func TestTextInputCursorBlinksOnTick(t *testing.T) {
 		t.Fatal("typing did not restore the cursor")
 	}
 }
+
+func TestTextInputMultilineShiftEnterAndSubmit(t *testing.T) {
+	w := NewTextInput("")
+	w.SetMultiline(4)
+	var submitted string
+	w.OnSubmit(func(value string) { submitted = value })
+
+	w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'a'})
+	w.Handle(input.KeyEvent{Key: input.KeyEnter, Mods: input.Shift})
+	w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'b'})
+	if got, want := w.Value(), "a\nb"; got != want {
+		t.Fatalf("value = %q, want %q", got, want)
+	}
+	w.Handle(input.KeyEvent{Key: input.KeyEnter})
+	if got, want := submitted, "a\nb"; got != want {
+		t.Fatalf("submitted = %q, want %q", got, want)
+	}
+}
+
+func TestTextInputMultilineHandlesEncodedShiftEnter(t *testing.T) {
+	w := NewTextInput("")
+	w.SetMultiline(4)
+	w.SetValue("a")
+	submitted := false
+	w.OnSubmit(func(string) { submitted = true })
+
+	parser := input.NewParser()
+	for _, event := range parser.Feed([]byte("\x1b[13;2u")) {
+		w.Handle(event)
+	}
+	if submitted || w.Value() != "a\n" {
+		t.Fatalf("encoded Shift+Enter produced value %q submitted=%v, want newline without submit", w.Value(), submitted)
+	}
+}
+
+func TestTextInputFocusCanBeDisabledWithoutMakingItReadOnly(t *testing.T) {
+	w := NewTextInput("Message")
+	w.SetInputFocusEnabled(false)
+	if w.CanFocus() {
+		t.Fatal("normal-mode composer remained focusable")
+	}
+	if w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '-'}) {
+		t.Fatal("focus-disabled composer swallowed normal-mode dash")
+	}
+	if w.Value() != "" {
+		t.Fatalf("focus-disabled composer value = %q", w.Value())
+	}
+	w.SetInputFocusEnabled(true)
+	if !w.CanFocus() || !w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '-'}) || w.Value() != "-" {
+		t.Fatalf("input-mode composer = focusable %v value %q", w.CanFocus(), w.Value())
+	}
+}
+
+func TestTextInputMultilineWrapAndVerticalCursor(t *testing.T) {
+	w := NewTextInput("")
+	w.SetMultiline(3)
+	w.SetValue("abcd")
+	w.SetCursor(len("abc"))
+
+	buf := screen.NewBuffer(2, 3)
+	w.Draw(buf.Clip(buf.Bounds()))
+	if got := buf.Cell(0, 1).Content; got != "c" {
+		t.Fatalf("wrapped row begins with %q, want c", got)
+	}
+	w.Handle(input.KeyEvent{Key: input.KeyUp})
+	if got, want := w.Cursor(), 1; got != want {
+		t.Fatalf("cursor after up = %d, want %d", got, want)
+	}
+	w.Handle(input.KeyEvent{Key: input.KeyDown})
+	if got, want := w.Cursor(), 3; got != want {
+		t.Fatalf("cursor after down = %d, want %d", got, want)
+	}
+}

@@ -125,3 +125,41 @@ func TestItemListNavigationDoesNotActivateRows(t *testing.T) {
 		t.Fatalf("scrolling activated rows: %v", selected)
 	}
 }
+
+func TestItemListVimJKMovesWithoutActivating(t *testing.T) {
+	list := NewItemList([]Item{{Label: "first"}, {Label: "second"}})
+	if list.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) {
+		t.Fatal("j was handled before Vim navigation was enabled")
+	}
+	list.SetVimNavigation(true)
+	activated := 0
+	list.OnSelect(func(int) { activated++ })
+	if !list.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || list.Selected() != 1 {
+		t.Fatal("j did not move down")
+	}
+	if !list.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) || list.Selected() != 0 {
+		t.Fatal("k did not move up")
+	}
+	if activated != 0 {
+		t.Fatalf("Vim navigation activated %d rows", activated)
+	}
+}
+
+func TestItemListVimFocusCanConsumeCollapsedRow(t *testing.T) {
+	list := NewItemList([]Item{{Label: "collapsed"}})
+	list.SetVimNavigation(true)
+	calls := 0
+	list.OnVimFocus(func(forward bool) bool {
+		calls++
+		return forward
+	})
+	if !list.HandleVimFocus(true) {
+		t.Fatal("forward Vim focus did not consume local unfold")
+	}
+	if list.HandleVimFocus(false) {
+		t.Fatal("backward Vim focus should have fallen through")
+	}
+	if calls != 2 {
+		t.Fatalf("callback calls = %d, want 2", calls)
+	}
+}

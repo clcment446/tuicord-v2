@@ -29,6 +29,8 @@ type Split struct {
 	collapsibleSecond bool
 	collapsedFirst    bool
 	collapsedSecond   bool
+	hiddenFirst       bool
+	hiddenSecond      bool
 	expandedBasis     int
 
 	node layout.Node
@@ -121,6 +123,24 @@ func (w *Split) MinSecond(cells int) *Split {
 	}
 	w.minSecond = maxInt(cells, 0)
 	w.rebuild()
+	return w
+}
+
+// HideFirst controls whether the first pane participates in layout.
+func (w *Split) HideFirst(hidden bool) *Split {
+	if w != nil {
+		w.hiddenFirst = hidden
+		w.rebuild()
+	}
+	return w
+}
+
+// HideSecond controls whether the second pane participates in layout.
+func (w *Split) HideSecond(hidden bool) *Split {
+	if w != nil {
+		w.hiddenSecond = hidden
+		w.rebuild()
+	}
 	return w
 }
 
@@ -360,7 +380,7 @@ func (w *Split) rebuild() {
 		w.expandedBasis = w.basis
 	}
 	if w.collapsedFirst {
-		first := &layout.Node{Basis: 1, Min: 1, Max: 1}
+		first := &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenFirst}
 		second := &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond}
 		if w.second != nil {
 			second.Children = []*layout.Node{stretchNode(w.second.Layout())}
@@ -370,15 +390,15 @@ func (w *Split) rebuild() {
 	}
 	if w.collapsedSecond {
 		first := &layout.Node{Grow: 1, Min: 1}
-		second := &layout.Node{Basis: 1, Min: 1, Max: 1}
+		second := &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenSecond}
 		if w.first != nil {
 			first.Children = []*layout.Node{stretchNode(w.first.Layout())}
 		}
 		w.node = layout.Node{Dir: w.dir, Grow: 1, Gap: 0, Children: []*layout.Node{first, second}}
 		return
 	}
-	first := &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max}
-	second := &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond}
+	first := &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max, Hidden: w.hiddenFirst}
+	second := &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, Hidden: w.hiddenSecond}
 	if w.first != nil {
 		first.Children = []*layout.Node{stretchNode(w.first.Layout())}
 	}
