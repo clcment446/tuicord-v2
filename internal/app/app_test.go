@@ -220,6 +220,42 @@ func TestSendAppendsOptimisticPending(t *testing.T) {
 	<-fs.done // deliver goroutine ran
 }
 
+func TestSendIgnoresWhitespaceOnlyContent(t *testing.T) {
+	fs := &fakeSender{}
+	a := newTestApp(fs)
+	a.SetActive(1, 42)
+
+	for _, content := range []string{" ", "\t", "\n \t"} {
+		a.Send(content)
+	}
+
+	if messages := a.store.Messages(42); len(messages) != 0 {
+		t.Fatalf("whitespace sends created optimistic messages: %+v", messages)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.sent != 0 {
+		t.Fatalf("whitespace sends made %d REST calls, want 0", fs.sent)
+	}
+}
+
+func TestReplyIgnoresWhitespaceOnlyContent(t *testing.T) {
+	fs := &fakeSender{}
+	a := newTestApp(fs)
+	target := store.Message{ID: 7, ChannelID: 42}
+
+	a.Reply(" \n\t", target, true)
+
+	if messages := a.store.Messages(42); len(messages) != 0 {
+		t.Fatalf("whitespace reply created optimistic messages: %+v", messages)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if fs.sent != 0 {
+		t.Fatalf("whitespace reply made %d REST calls, want 0", fs.sent)
+	}
+}
+
 func TestDeliverMarksFailedOnError(t *testing.T) {
 	fs := &fakeSender{err: errors.New("boom")}
 	a := newTestApp(fs)
