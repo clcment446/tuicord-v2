@@ -3,6 +3,7 @@ package plugin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -24,8 +25,16 @@ type captureHost struct {
 	sentTo  chan [2]string
 	react   chan [3]string
 	notify  chan [2]string
+	reply   chan replyCall
 	style   chan styleCall
 	overlay chan overlayCall
+}
+
+type replyCall struct {
+	channel uint64
+	message uint64
+	content string
+	mention bool
 }
 
 type styleCall struct {
@@ -44,6 +53,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		sentTo:  make(chan [2]string, 8),
 		react:   make(chan [3]string, 8),
 		notify:  make(chan [2]string, 8),
+		reply:   make(chan replyCall, 8),
 		style:   make(chan styleCall, 8),
 		overlay: make(chan overlayCall, 8),
 	}
@@ -52,6 +62,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		SendTo:        func(ch uint64, content string) { c.sentTo <- [2]string{u(ch), content} },
 		React:         func(ch, msg uint64, emoji string) { c.react <- [3]string{u(ch), u(msg), emoji} },
 		Notify:        func(title, body string) { c.notify <- [2]string{title, body} },
+		Reply:         func(ch, msg uint64, content string, mention bool) { c.reply <- replyCall{ch, msg, content, mention} },
 		Style:         func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
 		OpenOverlay:   func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
 		ActiveChannel: func() uint64 { return 111 },
@@ -59,18 +70,6 @@ func newCaptureHost() (*captureHost, *Host) {
 		SelfID:        func() uint64 { return 333 },
 	}
 	return c, h
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 func u(v uint64) string {
@@ -268,20 +267,162 @@ func TestFSAbsentWithoutGrant(t *testing.T) {
 	}
 }
 
-func TestExamplePluginLoads(t *testing.T) {
-	// The shipped sample must stay valid against the live API.
+func TestExamplePluginsLoad(t *testing.T) {
+	// The shipped samples must stay valid against the live API.
 	_, h := newCaptureHost()
 	m := NewManager(Options{Dir: filepath.Join("..", "..", "examples", "plugins"), Host: h})
 	defer m.Close()
 	if errs := m.Load(); len(errs) != 0 {
-		t.Fatalf("example plugin failed to load: %v", errs)
+		t.Fatalf("example plugins failed to load: %v", errs)
 	}
-	if got, want := m.CommandNames(), []string{"about", "hi", "red-authors"}; !equalStrings(got, want) {
-		t.Fatalf("example commands = %v, want %v", got, want)
+	loaded := m.Loaded()
+	if !contains(loaded, "hello") || !contains(loaded, "everything") {
+		t.Fatalf("expected both example plugins loaded, got %v", loaded)
 	}
-	if specs := m.KeySpecs(); len(specs) != 1 || specs[0] != "ctrl+g" {
-		t.Fatalf("example keymap not registered: %v", specs)
+	for _, want := range []string{"hi", "about", "status", "echo", "paint", "fscheck"} {
+		if !contains(m.CommandNames(), want) {
+			t.Fatalf("example command %q not registered; have %v", want, m.CommandNames())
+		}
 	}
+}
+
+// TestEverythingPluginExercisesAllSurfaces loads the shipped everything.lua in
+// isolation (with the fs grant) and drives every command, asserting each API
+// surface reaches the host. It is the closest automated stand-in for a manual
+// run of the plugin system.
+func TestEverythingPluginExercisesAllSurfaces(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "examples", "plugins", "everything.lua"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "everything.lua"), src, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := t.TempDir()
+
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:     dir,
+		DataDir: dataDir,
+		Host:    h,
+		Grants:  map[string][]string{"everything": {CapFS}},
+	})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("everything.lua failed to load: %v", errs)
+	}
+
+	const chanID = uint64(555)
+	const msgID = uint64(9007199254740993) // > 2^53, must survive as a string
+
+	// A message.create event records the last message for reply/react below.
+	m.Emit(EventMessageCreate, map[string]any{
+		"channel_id": chanID, "id": msgID, "content": "hi", "bot": false,
+	})
+
+	// ;echo -> tuicord.send
+	m.RunCommand("echo", []string{"hello", "world"})
+	if got := recvStr(t, c.sent); got != "hello world" {
+		t.Fatalf("echo/send = %q", got)
+	}
+
+	// ;dm -> tuicord.send_to
+	m.RunCommand("dm", []string{"555", "yo", "there"})
+	select {
+	case got := <-c.sentTo:
+		if got != [2]string{"555", "yo there"} {
+			t.Fatalf("dm/send_to = %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out on send_to")
+	}
+
+	// ;quote -> tuicord.reply against the recorded last message (string-safe id)
+	m.RunCommand("quote", []string{"nice"})
+	select {
+	case got := <-c.reply:
+		if got.channel != chanID || got.message != msgID || got.content != "nice" || got.mention {
+			t.Fatalf("quote/reply = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out on reply")
+	}
+
+	// ;thumbsup -> tuicord.react with the 👍 emoji
+	m.RunCommand("thumbsup", nil)
+	select {
+	case got := <-c.react:
+		if got[0] != "555" || got[1] != "9007199254740993" || got[2] != "\U0001F44D" {
+			t.Fatalf("thumbsup/react = %v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out on react")
+	}
+
+	// ;paint -> tuicord.style
+	m.RunCommand("paint", nil)
+	select {
+	case got := <-c.style:
+		if got.selector != "messages.author" || got.props["fg"] != "#ff0000" || got.props["bold"] != "true" {
+			t.Fatalf("paint/style = %+v", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out on style")
+	}
+	if got := recv2(t, c.notify); got[0] != "theme" {
+		t.Fatalf("paint notify = %v", got)
+	}
+
+	// ;status -> tuicord.overlay, populated with the live accessors
+	m.RunCommand("status", nil)
+	select {
+	case got := <-c.overlay:
+		if got.title != "Plugin self-test" {
+			t.Fatalf("status overlay title = %q", got.title)
+		}
+		if !anyContains(got.lines, "active channel: 111") || !anyContains(got.lines, "self id:        333") {
+			t.Fatalf("status overlay missing accessor lines: %v", got.lines)
+		}
+		if !anyContains(got.lines, "message.create: 1") {
+			t.Fatalf("status overlay missing event count: %v", got.lines)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out on overlay")
+	}
+
+	// ;fscheck -> fs grant round-trip, reports the value it read back
+	m.RunCommand("fscheck", nil)
+	if got := recv2(t, c.notify); got[0] != "fs" || got[1] != "wrote and read back: 1" {
+		t.Fatalf("fscheck notify = %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "everything", "counter.txt")); err != nil {
+		t.Fatalf("fs grant did not write into the data dir: %v", err)
+	}
+
+	// ;netcheck -> net not granted here, so it reports that (no network hit)
+	m.RunCommand("netcheck", nil)
+	if got := recv2(t, c.notify); got[0] != "net" || !anyContains([]string{got[1]}, "not granted") {
+		t.Fatalf("netcheck notify = %v", got)
+	}
+}
+
+func contains(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+func anyContains(lines []string, sub string) bool {
+	for _, l := range lines {
+		if strings.Contains(l, sub) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestStyleBinding(t *testing.T) {
