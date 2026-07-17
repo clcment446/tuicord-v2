@@ -46,15 +46,16 @@ type InlinePicker struct {
 	post             func(func())
 	media            map[string]*pickerMediaState
 	active           store.GuildID
+	activeChannel    store.ChannelID
 	favoriteEmojis   map[string]bool
 	favoriteStickers map[uint64]bool
 }
 
 // NewInlinePicker creates a composer autocomplete menu. active is the current
 // guild, which controls native emoji and sticker availability.
-func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, nitro, fakeNitro bool, trigger rune, query string, onInsert func(string), onSticker func(uint64), onClose func()) *InlinePicker {
+func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activeChannel store.ChannelID, nitro, fakeNitro bool, trigger rune, query string, onInsert func(string), onSticker func(uint64), onClose func()) *InlinePicker {
 	p := &InlinePicker{
-		styles: styles, trigger: trigger, query: query, active: active, onInsert: onInsert,
+		styles: styles, trigger: trigger, query: query, active: active, activeChannel: activeChannel, onInsert: onInsert,
 		onSticker: onSticker, onClose: onClose, list: widget.NewItemList(nil),
 		header: widget.NewText(""), hint: widget.NewText(""), node: layout.Node{Grow: 1},
 	}
@@ -65,8 +66,13 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, nitro
 	p.hint.SetStyle(styles.Muted)
 	p.hint.SetWrap(false)
 	p.hint.SetContent("↑/↓ move · enter insert · esc close")
-	p.entries = inlineEntries(st, active, nitro, fakeNitro, trigger)
-	p.body = widget.Column(titled("Autocomplete", p.header), titled("Matches", p.list), p.hint)
+	title := "Autocomplete"
+	if trigger == '+' {
+		title = "Jump to channel"
+		p.hint.SetContent(`fuzzy search · \server · \server#channel · ↑/↓ move · enter jump`)
+	}
+	p.entries = inlineEntries(st, active, activeChannel, nitro, fakeNitro, trigger)
+	p.body = widget.Column(titled(title, p.header), titled("Matches", p.list), p.hint)
 	p.body.Children()[0].Layout().Basis = 3
 	p.body.Children()[0].Layout().Grow = 0
 	p.body.Children()[1].Layout().Grow = 1
@@ -76,7 +82,7 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, nitro
 	return p
 }
 
-func inlineEntries(st *store.Store, active store.GuildID, nitro, fakeNitro bool, trigger rune) []searchEntry {
+func inlineEntries(st *store.Store, active store.GuildID, activeChannel store.ChannelID, nitro, fakeNitro bool, trigger rune) []searchEntry {
 	var entries []searchEntry
 	switch trigger {
 	case ':':
@@ -95,6 +101,9 @@ func inlineEntries(st *store.Store, active store.GuildID, nitro, fakeNitro bool,
 		}
 	case '@':
 		members := st.Members(active)
+		if channel, ok := st.Channel(activeChannel); ok && channel.Kind == store.ChannelDM {
+			members = append([]store.Member(nil), channel.Recipients...)
+		}
 		sort.Slice(members, func(i, j int) bool { return strings.ToLower(members[i].Name) < strings.ToLower(members[j].Name) })
 		for _, m := range members {
 			entries = append(entries, searchEntry{key: strings.ToLower(m.Name), entry: pickerEntry{label: "@" + m.Name, insert: "<@" + idString(uint64(m.ID)) + ">", usable: true}})
@@ -111,9 +120,12 @@ func inlineEntries(st *store.Store, active store.GuildID, nitro, fakeNitro bool,
 				}
 				label := g.Name + " › #" + c.Name
 				if c.Kind == store.ChannelDM {
-					label = "DM › " + c.Name
+					label = "@" + c.Name
 				}
-				entries = append(entries, searchEntry{key: strings.ToLower(label), entry: pickerEntry{label: label, usable: true, switchGuild: g.ID, switchChannel: c.ID}})
+				entries = append(entries, searchEntry{
+					key: strings.ToLower(label), guildKey: strings.ToLower(g.Name), channelKey: strings.ToLower(c.Name),
+					entry: pickerEntry{label: label, usable: true, switchGuild: g.ID, switchChannel: c.ID},
+				})
 			}
 		}
 	}
@@ -131,7 +143,7 @@ func (p *InlinePicker) refilter() {
 	q := strings.ToLower(strings.TrimSpace(p.query))
 	matches := make([]scored, 0, len(p.entries))
 	for _, candidate := range p.entries {
-		if score, ok := fuzzyScore(candidate.key, q); ok {
+		if score, ok := p.matchEntry(candidate, q); ok {
 			matches = append(matches, scored{candidate.entry, score})
 		}
 	}
@@ -171,6 +183,29 @@ func (p *InlinePicker) refilter() {
 	p.list.SetItems(items)
 	p.list.SetSelectedSilent(selected)
 	p.header.SetContent(string(p.trigger) + p.query + "▏")
+}
+
+// matchEntry keeps ordinary fuzzy search unchanged. A leading backslash opts
+// into server-aware matching: \server matches the server name, while
+// \server#channel requires independent fuzzy matches for both parts.
+func (p *InlinePicker) matchEntry(candidate searchEntry, query string) (int, bool) {
+	if p.trigger != '+' || !strings.HasPrefix(query, `\`) {
+		return fuzzyScore(candidate.key, query)
+	}
+	structured := strings.TrimSpace(strings.TrimPrefix(query, `\`))
+	serverQuery, channelQuery, hasChannel := strings.Cut(structured, "#")
+	serverScore, ok := fuzzyScore(candidate.guildKey, strings.TrimSpace(serverQuery))
+	if !ok {
+		return 0, false
+	}
+	if !hasChannel {
+		return serverScore, true
+	}
+	channelScore, ok := fuzzyScore(candidate.channelKey, strings.TrimSpace(channelQuery))
+	if !ok {
+		return 0, false
+	}
+	return serverScore + channelScore, true
 }
 
 // SetFavorites supplies the persisted favorite catalogs used to prioritize

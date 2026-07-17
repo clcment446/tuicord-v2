@@ -460,10 +460,11 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
 	a.store.UpsertChannel(store.Channel{
-		ID:      91,
-		GuildID: DirectMessagesGuildID,
-		Kind:    store.ChannelDM,
-		Name:    "alice",
+		ID:         91,
+		GuildID:    DirectMessagesGuildID,
+		Kind:       store.ChannelDM,
+		Name:       "alice",
+		Recipients: []store.Member{{ID: 100, Name: "alice"}},
 	})
 
 	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{{
@@ -473,6 +474,10 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 
 	if name, ok := a.store.ChannelName(91); !ok || name != "alice" {
 		t.Fatalf("preserved DM ChannelName = %q,%v, want alice,true", name, ok)
+	}
+	channel, ok := a.store.Channel(91)
+	if !ok || len(channel.Recipients) != 1 || channel.Recipients[0].ID != 100 {
+		t.Fatalf("preserved DM recipients = %+v,%v, want alice (100)", channel.Recipients, ok)
 	}
 }
 
@@ -738,11 +743,16 @@ func TestLoadGuildsLoadsDirectoryAndUsesSessionCache(t *testing.T) {
 	}
 	a := newTestApp(fs)
 	ready := false
-	a.OnReady(func() { ready = true })
+	readyDone := make(chan struct{})
+	a.OnReady(func() {
+		ready = true
+		close(readyDone)
+	})
 
 	a.LoadGuilds(100)
 	<-fs.guildsDone
 	a.LoadGuilds(100)
+	<-readyDone
 
 	fs.mu.Lock()
 	guildCalls := fs.guildsN

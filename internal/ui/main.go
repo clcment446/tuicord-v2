@@ -790,9 +790,11 @@ func (mv *MainView) refreshMembers(guild store.GuildID) {
 func (mv *MainView) resolver() markup.Resolver {
 	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()
+	channel := mv.app.ActiveChannel()
 	return markup.Resolver{
 		Member: func(id uint64) (string, bool) {
-			return st.MemberName(guild, store.UserID(id))
+			m, ok := memberForContext(st, guild, channel, store.UserID(id))
+			return m.Name, ok
 		},
 		Channel: func(id uint64) (string, bool) {
 			return st.ChannelName(store.ChannelID(id))
@@ -808,6 +810,15 @@ func (mv *MainView) resolver() markup.Resolver {
 			return st.GuildName(store.GuildID(id))
 		},
 	}
+}
+
+// memberForContext resolves guild members normally and falls back to the
+// active conversation's participant list for direct and group DMs.
+func memberForContext(st *store.Store, guild store.GuildID, channel store.ChannelID, id store.UserID) (store.Member, bool) {
+	if m, ok := st.Member(guild, id); ok {
+		return m, true
+	}
+	return st.ChannelRecipient(channel, id)
 }
 
 func (mv *MainView) onSend(content string) {
