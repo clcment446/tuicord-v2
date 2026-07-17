@@ -723,9 +723,7 @@ func (mv *MainView) recentStickers() []uint64 {
 
 func (mv *MainView) recordRecentSticker(id uint64) {
 	mv.state.RecordRecentSticker(id)
-	if err := mv.state.Save(); err != nil && mv.reportErr != nil {
-		mv.reportErr(err)
-	}
+	mv.persist()
 }
 
 func (mv *MainView) favoriteEmojis() []string {

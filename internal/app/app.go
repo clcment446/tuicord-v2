@@ -20,6 +20,7 @@ import (
 	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
+	autobot "awesomeProject/user-scripts/autobot"
 
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
@@ -43,6 +44,7 @@ type sender interface {
 	PinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	UnpinMessage(discord.ChannelID, discord.MessageID, api.AuditLogReason) error
 	CrosspostMessage(discord.ChannelID, discord.MessageID) (*discord.Message, error)
+	React(discord.ChannelID, discord.MessageID, discord.APIEmoji) error
 }
 
 // threadClient is the slice of the arikawa client used to list and mutate
@@ -278,21 +280,18 @@ type App struct {
 	commandMu           sync.Mutex
 	commandCache        map[CommandContext]commandCacheEntry
 	now                 func() time.Time
+	autoBot             *autobot.Runtime
+	autoBotDMChannels   map[store.ChannelID]bool
+	autoBotChannel      store.ChannelID
+	autoBotBackground   bool
 
 	resourceMu       sync.Mutex
-	historyLoaded    map[store.ChannelID]struct{}
-	historyPending   map[store.ChannelID]struct{}
-	historyExhausted map[store.ChannelID]struct{}
-	rolesLoaded      map[store.GuildID]struct{}
-	rolesPending     map[store.GuildID]struct{}
-	guildsLoaded     bool
-	guildsPending    bool
-	channelsLoaded   map[store.GuildID]struct{}
-	channelsPending  map[store.GuildID]struct{}
-	threadsLoaded    map[store.GuildID]struct{}
-	threadsPending   map[store.GuildID]struct{}
-	archivedLoaded   map[store.ChannelID]struct{}
-	archivedPending  map[store.ChannelID]struct{}
+	historyGate      loadGate[store.ChannelID]
+	rolesGate        loadGate[store.GuildID]
+	guildsGate       singleLoadGate
+	channelsGate     loadGate[store.GuildID]
+	threadsGate      loadGate[store.GuildID]
+	archivedGate     loadGate[store.ChannelID]
 	archivedBefore   map[store.ChannelID]discord.Timestamp
 	forumMetaPending map[store.ChannelID]struct{}
 
@@ -310,7 +309,7 @@ type App struct {
 
 // New returns an orchestrator over the given session, store, and UI runtime.
 func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
-	return &App{
+	a := &App{
 		store:               st,
 		ui:                  ui,
 		send:                sess,
@@ -332,6 +331,97 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		commandCache:        make(map[CommandContext]commandCacheEntry),
 		now:                 time.Now,
 	}
+	a.autoBot = autobot.New(sess, "", nil)
+	a.autoBotDMChannels = make(map[store.ChannelID]bool)
+	return a
+}
+
+// ToggleAutoBot starts or stops the local user-script in the active channel.
+func (a *App) ToggleAutoBot(background bool) (bool, error) {
+	if a == nil || a.autoBot == nil {
+		return false, fmt.Errorf("auto-bot plugin is unavailable")
+	}
+	if a.autoBot.Active() {
+		a.autoBot.Stop()
+		return false, nil
+	}
+	if err := a.validateAutoBotTarget(a.activeGuild, a.activeChannel); err != nil {
+		return false, err
+	}
+	if a.selfID == 0 || a.sessionID == "" {
+		return false, fmt.Errorf("auto-bot requires a ready Discord session")
+	}
+	guild := discord.GuildID(a.activeGuild)
+	if a.activeGuild == DirectMessagesGuildID {
+		guild = 0
+	}
+	a.autoBotChannel = a.activeChannel
+	a.autoBotBackground = background
+	a.autoBot.Start(discord.ChannelID(a.activeChannel), guild, discord.UserID(a.selfID), a.sessionID, "")
+	return true, nil
+}
+
+func (a *App) validateAutoBotTarget(guild store.GuildID, channel store.ChannelID) error {
+	if a == nil || a.store == nil || channel == 0 {
+		return fmt.Errorf("auto-bot requires an active channel")
+	}
+	target, ok := a.store.Channel(channel)
+	if !ok || target.Kind == store.ChannelVoice || target.Kind == store.ChannelCategory || target.Kind == store.ChannelForum {
+		return fmt.Errorf("auto-bot requires a message channel")
+	}
+	if target.Kind == store.ChannelDM || guild == DirectMessagesGuildID {
+		if a.autoBotDMChannels[channel] {
+			return nil
+		}
+		for _, message := range a.store.Messages(channel) {
+			if message.AuthorID == store.UserID(autobot.BotUserID) {
+				return nil
+			}
+		}
+		return fmt.Errorf("auto-bot can only start in a direct message with the game bot")
+	}
+	if target.GuildID == 0 || guild != target.GuildID {
+		return fmt.Errorf("the active server does not own this channel")
+	}
+	guild = target.GuildID
+	botID := store.UserID(autobot.BotUserID)
+	if _, ok := a.store.Member(guild, botID); ok {
+		return nil
+	}
+	for _, message := range a.store.Messages(channel) {
+		if message.AuthorID == botID {
+			return nil
+		}
+	}
+	return fmt.Errorf("the game bot is not present in this server")
+}
+
+func (a *App) rememberAutoBotDM(channel discord.Channel) {
+	if a.autoBotDMChannels == nil {
+		a.autoBotDMChannels = make(map[store.ChannelID]bool)
+	}
+	for _, recipient := range channel.DMRecipients {
+		if recipient.ID == autobot.BotUserID {
+			a.autoBotDMChannels[store.ChannelID(channel.ID)] = true
+			return
+		}
+	}
+}
+
+func (a *App) StopAutoBot() {
+	if a != nil && a.autoBot != nil {
+		a.autoBot.Stop()
+		a.autoBotChannel = 0
+		a.autoBotBackground = false
+	}
+}
+
+func (a *App) AutoBotActive() bool {
+	return a != nil && a.autoBot != nil && a.autoBot.Active()
+}
+
+func (a *App) AutoBotBackground() bool {
+	return a != nil && a.AutoBotActive() && a.autoBotBackground
 }
 
 // SubmitCommand dispatches a chat-input command in the active channel. The UI
@@ -467,39 +557,11 @@ func (a *App) SearchGIFs(query string, done func([]clientdiscord.GIFResult, erro
 }
 
 func (a *App) ensureResourceMaps() {
-	if a.historyLoaded == nil {
-		a.historyLoaded = map[store.ChannelID]struct{}{}
-	}
-	if a.historyPending == nil {
-		a.historyPending = map[store.ChannelID]struct{}{}
-	}
-	if a.historyExhausted == nil {
-		a.historyExhausted = map[store.ChannelID]struct{}{}
-	}
-	if a.rolesLoaded == nil {
-		a.rolesLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.rolesPending == nil {
-		a.rolesPending = map[store.GuildID]struct{}{}
-	}
-	if a.channelsLoaded == nil {
-		a.channelsLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.channelsPending == nil {
-		a.channelsPending = map[store.GuildID]struct{}{}
-	}
-	if a.threadsLoaded == nil {
-		a.threadsLoaded = map[store.GuildID]struct{}{}
-	}
-	if a.threadsPending == nil {
-		a.threadsPending = map[store.GuildID]struct{}{}
-	}
-	if a.archivedLoaded == nil {
-		a.archivedLoaded = map[store.ChannelID]struct{}{}
-	}
-	if a.archivedPending == nil {
-		a.archivedPending = map[store.ChannelID]struct{}{}
-	}
+	a.historyGate.ensure()
+	a.rolesGate.ensure()
+	a.channelsGate.ensure()
+	a.threadsGate.ensure()
+	a.archivedGate.ensure()
 	if a.archivedBefore == nil {
 		a.archivedBefore = map[store.ChannelID]discord.Timestamp{}
 	}
@@ -530,6 +592,9 @@ func (a *App) SelfID() store.UserID { return a.selfID }
 // SetActive selects the guild/channel the chat view renders, clearing the newly
 // active channel's unread badge. Call on the UI goroutine.
 func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
+	if a.AutoBotActive() && !a.autoBotBackground && channel != a.autoBotChannel {
+		a.StopAutoBot()
+	}
 	a.activeGuild = guild
 	a.activeChannel = channel
 	if channel != 0 {
@@ -659,6 +724,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		}
 		for _, channel := range privateChannels {
 			channel.GuildID = discord.GuildID(DirectMessagesGuildID)
+			a.rememberAutoBotDM(channel)
 			ingestPrivateChannel(a.store, channel)
 		}
 		if a.onReady != nil {
@@ -1038,6 +1104,19 @@ func (a *App) DeleteMessage(channel store.ChannelID, id store.MessageID) {
 	}()
 }
 
+// AddReaction applies the current user's reaction and lets the gateway update
+// the local reaction count.
+func (a *App) AddReaction(channel store.ChannelID, id store.MessageID, emoji string) {
+	if channel == 0 || id == 0 || emoji == "" {
+		return
+	}
+	go func() {
+		if err := a.send.React(discord.ChannelID(channel), discord.MessageID(id), discord.APIEmoji(emoji)); err != nil {
+			a.reportError(err)
+		}
+	}()
+}
+
 // SetPinned pins or unpins a message. Discord's pin event omits the message ID,
 // so the cached flag is patched after the REST call succeeds.
 func (a *App) SetPinned(channel store.ChannelID, id store.MessageID, pinned bool) {
@@ -1199,6 +1278,7 @@ func (a *App) loadGuilds(limit uint) {
 			a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
 			for _, channel := range privateChannels {
 				channel.GuildID = discord.GuildID(DirectMessagesGuildID)
+				a.rememberAutoBotDM(channel)
 				ingestPrivateChannel(a.store, channel)
 			}
 			a.markChannelsLoaded(DirectMessagesGuildID)
@@ -1335,138 +1415,89 @@ func (a *App) markRolesLoaded(guild store.GuildID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.rolesLoaded[guild] = struct{}{}
-	delete(a.rolesPending, guild)
+	a.rolesGate.markLoaded(guild)
 }
 
 func (a *App) markChannelsLoaded(guild store.GuildID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.channelsLoaded[guild] = struct{}{}
-	delete(a.channelsPending, guild)
+	a.channelsGate.markLoaded(guild)
 }
 
 func (a *App) beginGuildLoad() bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	if a.guildsLoaded || a.guildsPending {
-		return false
-	}
-	a.guildsPending = true
-	return true
+	return a.guildsGate.begin()
 }
 
 func (a *App) finishGuildLoad(ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	a.guildsPending = false
-	if ok {
-		a.guildsLoaded = true
-	}
+	a.guildsGate.finish(ok)
 }
 
 func (a *App) beginHistoryLoad(channel store.ChannelID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.historyLoaded[channel]; ok {
-		return false
-	}
-	if _, ok := a.historyPending[channel]; ok {
-		return false
-	}
-	a.historyPending[channel] = struct{}{}
-	return true
+	return a.historyGate.begin(channel)
 }
 
 func (a *App) finishHistoryLoad(channel store.ChannelID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.historyPending, channel)
-	if ok {
-		a.historyLoaded[channel] = struct{}{}
-	}
+	a.historyGate.finish(channel, ok)
 }
 
 func (a *App) beginOlderHistoryLoad(channel store.ChannelID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.historyPending[channel]; ok {
-		return false
-	}
-	if _, ok := a.historyExhausted[channel]; ok {
-		return false
-	}
-	a.historyPending[channel] = struct{}{}
-	return true
+	return a.historyGate.beginOlder(channel)
 }
 
 func (a *App) finishOlderHistory(channel store.ChannelID, exhausted bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.historyPending, channel)
-	if exhausted {
-		a.historyExhausted[channel] = struct{}{}
-	}
+	a.historyGate.finishOlder(channel, exhausted)
 }
 
 func (a *App) markHistoryExhausted(channel store.ChannelID) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	a.historyExhausted[channel] = struct{}{}
+	a.historyGate.markExhausted(channel)
 }
 
 func (a *App) beginRoleLoad(guild store.GuildID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.rolesLoaded[guild]; ok {
-		return false
-	}
-	if _, ok := a.rolesPending[guild]; ok {
-		return false
-	}
-	a.rolesPending[guild] = struct{}{}
-	return true
+	return a.rolesGate.begin(guild)
 }
 
 func (a *App) finishRoleLoad(guild store.GuildID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.rolesPending, guild)
-	if ok {
-		a.rolesLoaded[guild] = struct{}{}
-	}
+	a.rolesGate.finish(guild, ok)
 }
 
 func (a *App) beginChannelLoad(guild store.GuildID) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	if _, ok := a.channelsLoaded[guild]; ok {
-		return false
-	}
-	if _, ok := a.channelsPending[guild]; ok {
-		return false
-	}
-	a.channelsPending[guild] = struct{}{}
-	return true
+	return a.channelsGate.begin(guild)
 }
 
 func (a *App) finishChannelLoad(guild store.GuildID, ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	delete(a.channelsPending, guild)
-	if ok {
-		a.channelsLoaded[guild] = struct{}{}
-	}
+	a.channelsGate.finish(guild, ok)
 }
 
 // Connect opens the gateway and blocks until ctx is canceled.
