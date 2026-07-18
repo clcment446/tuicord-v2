@@ -194,7 +194,7 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 }
 
 // pasteNoticeTTL is how long paste confirmations stay before auto-dismissing.
-const pasteNoticeTTL = 5 * time.Second
+const pasteNoticeTTL = 2 * time.Second
 
 // runThemeCommand applies a plugin-registered theme by name, or lists the
 // available themes when called without an argument.
