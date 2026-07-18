@@ -134,6 +134,19 @@ func TestParseLink(t *testing.T) {
 	if spans[1].Text != "docs" || spans[1].URL != "https://example.com" {
 		t.Errorf("link span = %+v", spans[1])
 	}
+	if spans[1].Action == nil || spans[1].Action.Kind != ActionOpenURL || spans[1].Action.Target != spans[1].URL {
+		t.Errorf("link action = %+v, want browser action", spans[1].Action)
+	}
+}
+
+func TestParseBareWebLink(t *testing.T) {
+	target := "https://example.com/watch?v=1"
+	spans := Parse("open "+target, Resolver{})
+	want := []Span{
+		{Kind: Kind_Text, Text: "open "},
+		{Kind: Kind_Link, Text: target, URL: target, Action: &Action{Kind: ActionOpenURL, Target: target}},
+	}
+	assertSpans(t, spans, want)
 }
 
 func TestParseMarkedFakeNitroLinks(t *testing.T) {
@@ -162,7 +175,7 @@ func TestParseMarkerLookingOrdinaryLinks(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			spans := Parse(tt.input, Resolver{})
-			assertSpans(t, spans, []Span{{Kind: Kind_Link, Text: tt.label, URL: tt.url}})
+			assertSpans(t, spans, []Span{{Kind: Kind_Link, Text: tt.label, URL: tt.url, Action: &Action{Kind: ActionOpenURL, Target: tt.url}}})
 		})
 	}
 }

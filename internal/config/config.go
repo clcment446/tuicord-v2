@@ -105,6 +105,11 @@ type Keys struct {
 	// ctrl+v; terminals' text paste is ctrl+shift+v, so this does not shadow it.
 	// Also available as the ;paste command.
 	PasteImage string `toml:"paste_image"`
+	// Video player controls, active only while its overlay is open.
+	VideoPause        string `toml:"video_pause"`
+	VideoSeekBackward string `toml:"video_seek_backward"`
+	VideoSeekForward  string `toml:"video_seek_forward"`
+	VideoReplay       string `toml:"video_replay"`
 }
 
 // Nitro controls how the picker sends emoji and stickers the account cannot use
@@ -189,14 +194,14 @@ type Plugins struct {
 
 // Config is the full user configuration.
 type Config struct {
-	Layout         Layout          `toml:"layout"`
-	Keys           Keys            `toml:"keys"`
-	Colors         Colors          `toml:"colors"`
-	Nitro          Nitro           `toml:"nitro"`
-	Display        Display         `toml:"display"`
-	Auth           Auth            `toml:"auth"`
-	Accessibility  Accessibility   `toml:"accessibility"`
-	Integrations   Integrations    `toml:"integrations"`
+	Layout        Layout        `toml:"layout"`
+	Keys          Keys          `toml:"keys"`
+	Colors        Colors        `toml:"colors"`
+	Nitro         Nitro         `toml:"nitro"`
+	Display       Display       `toml:"display"`
+	Auth          Auth          `toml:"auth"`
+	Accessibility Accessibility `toml:"accessibility"`
+	Integrations  Integrations  `toml:"integrations"`
 	// Plugins is held by pointer so Config stays comparable (its Disabled slice
 	// and Grants map are not). A nil pointer means "plugins enabled, none
 	// disabled, no grants" — see PluginsEnabled/PluginDisabled/PluginGrants.
@@ -254,12 +259,16 @@ func Default() Config {
 			MembersHideBelow: 120,
 		},
 		Keys: Keys{
-			QuickSwitcher: "ctrl+k",
-			Help:          "ctrl+/",
-			NextPanel:     "tab",
-			FocusComposer: "esc",
-			Picker:        "ctrl+e",
-			PasteImage:    "ctrl+v",
+			QuickSwitcher:     "ctrl+k",
+			Help:              "ctrl+/",
+			NextPanel:         "tab",
+			FocusComposer:     "esc",
+			Picker:            "ctrl+e",
+			PasteImage:        "ctrl+v",
+			VideoPause:        "space",
+			VideoSeekBackward: "left",
+			VideoSeekForward:  "right",
+			VideoReplay:       "r",
 		},
 		Nitro:         Nitro{Fake: true},
 		Accessibility: Accessibility{MouseOn: true},
@@ -509,6 +518,11 @@ focus_composer = "esc"
 # Attach an image from the clipboard (also available as ;paste). Set empty to
 # disable; text paste (ctrl+shift+v) is unaffected either way.
 paste_image = "ctrl+v"
+# Video overlay controls.
+video_pause = "space"
+video_seek_backward = "left"
+video_seek_forward = "right"
+video_replay = "r"
 
 [colors]
 # Custom palette values are opt-in. Set enabled = true to use them.

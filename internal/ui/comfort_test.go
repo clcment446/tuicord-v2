@@ -22,6 +22,9 @@ func TestKeyMatches(t *testing.T) {
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}, "k", false}, // unwanted ctrl
 		{input.KeyEvent{Key: input.KeyEsc}, "esc", true},
 		{input.KeyEvent{Key: input.KeyTab}, "tab", true},
+		{input.KeyEvent{Key: input.KeyRune, Rune: ' '}, "space", true},
+		{input.KeyEvent{Key: input.KeyLeft}, "left", true},
+		{input.KeyEvent{Key: input.KeyRight}, "right", true},
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl, Release: true}, "ctrl+k", false},
 	}
 	for _, tt := range tests {

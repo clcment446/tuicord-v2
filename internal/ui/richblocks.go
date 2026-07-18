@@ -19,14 +19,20 @@ func (w *ChatView) renderMedia(m store.Message, width int, base screen.Style) []
 	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
 	for i, a := range m.Attachments {
 		if url, ok := attachmentMediaURL(a); ok {
-			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()))...)
+			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()), attachmentAnimated(a, url))...)
+			continue
+		}
+		if vurl, ok := attachmentVideoURL(a); ok {
+			// A video attachment has no poster image; reserve a play region and
+			// stream the file inline on select-to-play.
+			lines = append(lines, w.mediaLinesVideo("", vurl, attachmentChip(a), messageMediaPlacementKey(m, "video", i, vurl), base, attachmentVideoSpec(a, width, w.mediaMaxRows()), false)...)
 			continue
 		}
 		lines = append(lines, chatLine{segments: []chatSegment{{text: attachmentChip(a), style: muted}}})
 	}
 	for i, s := range m.Stickers {
 		if url, ok := stickerMediaURL(s); ok {
-			lines = append(lines, w.mediaLines(url, stickerChip(s), messageMediaPlacementKey(m, "sticker", i, url), base, stickerMediaSpec(width))...)
+			lines = append(lines, w.mediaLines(url, stickerChip(s), messageMediaPlacementKey(m, "sticker", i, url), base, stickerMediaSpec(width), s.Format == store.StickerGIF)...)
 			continue
 		}
 		lines = append(lines, chatLine{segments: []chatSegment{{text: stickerChip(s), style: muted}}})
@@ -51,6 +57,40 @@ func attachmentMediaURL(a store.Attachment) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// attachmentVideoURL returns the direct URL to play for a video attachment.
+// The unproxied URL is used because mpv fetches the media itself.
+func attachmentVideoURL(a store.Attachment) (string, bool) {
+	if a.URL == "" {
+		return "", false
+	}
+	if strings.HasPrefix(a.ContentType, "video/") || media.ClassifyURL(a.URL) == media.ClassVideo {
+		return a.URL, true
+	}
+	return "", false
+}
+
+// attachmentVideoSpec sizes a video attachment's play region from its declared
+// dimensions, falling back to 16:9 when they are absent.
+func attachmentVideoSpec(a store.Attachment, width, maxRows int) mediaSpec {
+	sourceW, sourceH := a.W, a.H
+	if sourceW <= 0 || sourceH <= 0 {
+		sourceW, sourceH = 16, 9
+	}
+	return mediaSpec{
+		maxCols: max(width, 1),
+		maxRows: max(maxRows, 1),
+		sourceW: sourceW,
+		sourceH: sourceH,
+	}
+}
+
+// attachmentAnimated reports whether an attachment should play as an animated
+// GIF rather than a still. Discord tags GIF attachments as image/gif; the URL
+// classifier is the fallback when the content type is absent.
+func attachmentAnimated(a store.Attachment, url string) bool {
+	return a.ContentType == "image/gif" || media.ClassifyURL(url) == media.ClassGIF
 }
 
 func stickerMediaURL(s store.Sticker) (string, bool) {
@@ -147,7 +187,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 		if r.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
 			const emojiCols = 2
 			emojiURL := customEmojiURLParts(r.EmojiID, r.EmojiName, r.Animated)
-			state := w.ensureMedia(emojiURL)
+			state := w.ensureMedia(emojiURL, false)
 			placeholder := "  "
 			if state != nil && state.loading {
 				placeholder = mediaSpinner(w.spinner) + " "

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image"
 	"os"
 	"strconv"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
@@ -66,6 +68,8 @@ type Shell struct {
 	lastActivity   time.Time
 	cancel         context.CancelFunc
 	node           layout.Node
+	video          *media.VideoPlayer
+	videoRegion    media.Rect
 }
 
 // SetPluginHost registers the Lua plugin manager for command and key dispatch.
@@ -98,6 +102,10 @@ func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel
 	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), node: layout.Node{Grow: 1}}
 	mediaCfg := chatMediaConfig()
 	s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
+	s.video = media.NewVideoPlayer(mediaCfg)
+	mv.chat.OnPlayVideo(s.playVideo)
+	mv.chat.OnStopVideo(s.teardownVideo)
+	mv.chat.OnOpenMedia(s.openMediaViewer)
 	mv.onNewForumPost = s.openForumPostPrompt
 	mv.onForumFilter = s.openForumFilterMenu
 	mv.onForumHover = s.setForumHover
@@ -123,6 +131,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 		s.ShowNotice("Local commands", detail)
 	case "quit":
 		s.prefetch.Stop()
+		s.teardownVideo()
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -149,6 +158,145 @@ func (s *Shell) runLocalCommand(input string) bool {
 		s.ShowNotice("Unknown local command", "Use ;help to list local commands")
 	}
 	return true
+}
+
+// playVideo plays url in the full-screen media viewer. The region argument (the
+// inline poster's rect) is ignored: true in-place inline playback is not
+// feasible with mpv — it clears its whole terminal each frame and its output is
+// not coordinate-translated when forwarded — so playback runs full-screen in an
+// overlay, where mpv's black backdrop reads as the intended player. The inline
+// poster + ▶ stays as the trigger.
+func (s *Shell) playVideo(url string, _ media.Rect) {
+	if s.video == nil || !s.video.Available() {
+		s.ShowNotice("Video", "Install mpv to play videos inline")
+		return
+	}
+	sz, err := term.ProbeSize()
+	if err != nil {
+		s.ShowToast("Video error", err)
+		return
+	}
+	full := videoRectForSize(sz.Width, sz.Height)
+	v := newMediaViewer(s.styles, "▶ playing", url, nil, nil, s.closeOverlay)
+	v.setVideoControls(
+		func() {
+			if err := s.video.TogglePause(); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		func() {
+			if err := s.video.Replay(); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		func(percent float64) {
+			if err := s.video.SeekPercent(percent); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		s.video.Status,
+	)
+	v.setVideoKeys(
+		s.cfg.Keys.VideoPause,
+		s.cfg.Keys.VideoSeekBackward,
+		s.cfg.Keys.VideoSeekForward,
+		s.cfg.Keys.VideoReplay,
+		func(seconds float64) {
+			if err := s.video.SeekRelative(seconds); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+	)
+	v.width, v.height = sz.Width, sz.Height
+	v.setVideoResize(func(width, height int) {
+		s.app.Post(func() {
+			if s.overlay != v || s.video == nil {
+				return
+			}
+			region := videoRectForSize(width, height)
+			if err := s.video.Resize(region); err != nil {
+				s.ShowToast("Video resize", err)
+				return
+			}
+			s.videoRegion = region
+		})
+	})
+	s.overlay = v
+	s.videoRegion = full
+	onExit := func() { s.app.Post(s.closeOverlay) }
+	if err := s.video.Play(url, full, s.app.WriteRaw, onExit); err != nil {
+		s.overlay = nil
+		s.videoRegion = media.Rect{}
+		s.ShowToast("Video error", err)
+		return
+	}
+	s.app.Invalidate()
+}
+
+func videoRectForSize(width, height int) media.Rect {
+	return media.Rect{
+		X:    mediaViewerPadding,
+		Y:    mediaViewerPadding,
+		Cols: max(width-mediaViewerPadding*2, 1),
+		Rows: max(height-videoControlRows-mediaViewerPadding*2, 1),
+	}
+}
+
+// openMediaViewer shows an already-loaded image or GIF frame enlarged in the
+// full-screen viewer.
+func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Frame) {
+	v := newMediaViewer(s.styles, "Esc to close", url, img, frames, s.closeOverlay)
+	s.overlay = v
+	s.app.Invalidate()
+
+	// Inline media is deliberately downscaled before caching. The full-screen
+	// viewer refetches from the raw disk cache (or network) with no pixel cap so
+	// enlargement does not magnify a thumbnail.
+	cache, err := media.NewCache(0, "")
+	if err != nil {
+		return
+	}
+	fetcher := &media.Fetcher{Cache: cache}
+	animated := len(frames) > 1 || media.ClassifyURL(url) == media.ClassGIF
+	go func() {
+		if animated {
+			fullFrames, err := fetcher.FetchGIF(context.Background(), url)
+			if err != nil || len(fullFrames) == 0 {
+				return
+			}
+			s.app.Post(func() {
+				if s.overlay == v {
+					v.setFrames(fullFrames)
+				}
+			})
+			return
+		}
+		full, err := fetcher.Fetch(context.Background(), url)
+		if err != nil {
+			return
+		}
+		s.app.Post(func() {
+			if s.overlay == v {
+				v.setImage(full)
+			}
+		})
+	}()
+}
+
+// teardownVideo stops the current playback and erases mpv's final frame from the
+// screen (mpv leaves it behind because it runs with alt-screen off).
+func (s *Shell) teardownVideo() {
+	if s.video == nil {
+		return
+	}
+	s.video.Stop()
+	if !s.videoRegion.Empty() {
+		// mpv owns an untracked Kitty image. Delete it after stopping; closeOverlay
+		// requests a force repaint, and the event loop drains this raw command
+		// before restoring the widget tree.
+		s.app.WriteRaw(media.KittyDeleteAllImages())
+		s.videoRegion = media.Rect{}
+	}
 }
 
 // pasteImage attaches a clipboard image, reporting an empty/text-only clipboard
@@ -293,6 +441,18 @@ func (s *Shell) DrawOverlay(r screen.Region) {
 
 // Handle routes global shortcuts and overlay dismissal, delegating everything
 // else to the active subtree.
+// Animating reports whether the chat has a visible inline animation (a GIF),
+// letting the runtime raise the tick cadence only while one is on screen.
+func (s *Shell) Animating() bool {
+	if s == nil {
+		return false
+	}
+	if animator, ok := s.overlay.(tui.Animator); ok {
+		return animator.Animating()
+	}
+	return s.mv != nil && s.mv.chat.Animating()
+}
+
 func (s *Shell) Handle(ev tui.Event) bool {
 	if _, idle := ev.(input.TickEvent); idle {
 		if s.prefetch != nil && !s.prefetchIdle && prefetchEligible(s.lastActivity, time.Now()) {
@@ -494,6 +654,12 @@ func drawPreviewText(r screen.Region, x, y int, value string, width int, style s
 }
 
 func (s *Shell) dispatchEntityAction(action markup.Action) {
+	if action.Kind == markup.ActionOpenURL {
+		if err := term.OpenURL(action.Target); err != nil {
+			s.ShowToast("Open link", err)
+		}
+		return
+	}
 	id, err := strconv.ParseUint(action.Target, 10, 64)
 	if err != nil {
 		return
@@ -1058,7 +1224,17 @@ func (s *Shell) canManageMessages(channel store.ChannelID) bool {
 	return false
 }
 
-func (s *Shell) closeOverlay() { s.overlay = nil }
+func (s *Shell) closeOverlay() {
+	playingVideo := !s.videoRegion.Empty()
+	if playingVideo {
+		s.teardownVideo()
+	}
+	s.overlay = nil
+	if playingVideo {
+		// mpv painted over the screen outside our frame diff; re-emit everything.
+		s.app.ForceRepaint()
+	}
+}
 
 func (s *Shell) closePopup() { s.popup = nil }
 

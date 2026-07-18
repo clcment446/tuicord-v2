@@ -69,8 +69,9 @@ func markedFakeNitroEmbed(e store.Embed, markedMedia map[string]bool) bool {
 func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width int, base screen.Style) []chatLine {
 	if pureMediaEmbed(e) {
 		chip := embedMediaChip(e)
-		if url, ok := embedMediaURL(e); ok {
-			return w.mediaLines(url, chip, messageMediaPlacementKey(m, "embed", index, url), base, embedMediaSpec(e, url, width, w.mediaMaxRows()))
+		posterURL, _ := embedMediaURL(e)
+		if posterURL != "" {
+			return w.mediaLinesLink(posterURL, embedThumbnailLink(e, posterURL), chip, messageMediaPlacementKey(m, "embed", index, posterURL), base, embedMediaSpec(e, posterURL, width, w.mediaMaxRows()), media.ClassifyURL(posterURL) == media.ClassGIF)
 		}
 		if chip != "" {
 			return []chatLine{{segments: []chatSegment{{text: chip, style: mergeStyle(base, w.styles.Cell("embeds.footer"))}}}}
@@ -116,8 +117,8 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 	if chip := embedMediaChip(e); chip != "" {
 		add(chip, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))
 	}
-	if url, ok := embedMediaURL(e); ok {
-		for _, line := range w.mediaLines(url, embedMediaChip(e), messageMediaPlacementKey(m, "embed", index, url), contentBase, embedMediaSpec(e, url, inner, w.mediaMaxRows())) {
+	if posterURL, ok := embedMediaURL(e); ok {
+		for _, line := range w.mediaLinesLink(posterURL, embedThumbnailLink(e, posterURL), embedMediaChip(e), messageMediaPlacementKey(m, "embed", index, posterURL), contentBase, embedMediaSpec(e, posterURL, inner, w.mediaMaxRows()), media.ClassifyURL(posterURL) == media.ClassGIF) {
 			if line.media != nil {
 				content = append(content, line)
 				continue
@@ -135,6 +136,20 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 		content = append(content, embedPlainLines("[embed]", inner, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))...)
 	}
 	return frameEmbedLines(content, inner, borderStyle, contentBase)
+}
+
+func embedOpenURL(e store.Embed) string {
+	if e.URL != "" {
+		return e.URL
+	}
+	return e.VideoURL
+}
+
+func embedThumbnailLink(e store.Embed, posterURL string) string {
+	if e.Kind == store.EmbedGIFV || media.ClassifyURL(posterURL) == media.ClassGIF {
+		return ""
+	}
+	return embedOpenURL(e)
 }
 
 func pureMediaEmbed(e store.Embed) bool {

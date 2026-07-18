@@ -14,23 +14,36 @@ import (
 
 const tickInterval = 500 * time.Millisecond
 
+// animationTickInterval is the faster cadence used while a widget reports it is
+// animating (e.g. an inline GIF). The runtime raises the tick rate only for the
+// duration of the animation, keeping the idle app at tickInterval.
+const animationTickInterval = 50 * time.Millisecond
+
+// Animator is an optional Widget capability. A root that implements it lets the
+// runtime switch to animationTickInterval while Animating reports true.
+type Animator interface {
+	Animating() bool
+}
+
 // Option configures an App.
 type Option func(*App)
 
 // App is the runtime coordinator for a retained widget tree.
 type App struct {
-	mu          sync.Mutex
-	root        Widget
-	size        Size
-	hits        HitIndex
-	dirty       bool
-	posts       []func()
-	wake        chan struct{}
-	theme       Theme
-	escExits    int
-	mouseOn     bool
-	focusSplits bool
-	ttyColors   bool
+	mu           sync.Mutex
+	root         Widget
+	size         Size
+	hits         HitIndex
+	dirty        bool
+	forceRepaint bool
+	posts        []func()
+	wake         chan struct{}
+	rawWrites    chan []byte
+	theme        Theme
+	escExits     int
+	mouseOn      bool
+	focusSplits  bool
+	ttyColors    bool
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -41,10 +54,11 @@ type App struct {
 // New returns an App with default runtime state.
 func New(opts ...Option) *App {
 	a := &App{
-		dirty:    true,
-		wake:     make(chan struct{}, 1),
-		escExits: 5,
-		mouseOn:  true,
+		dirty:     true,
+		wake:      make(chan struct{}, 1),
+		rawWrites: make(chan []byte, 8),
+		escExits:  5,
+		mouseOn:   true,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -83,6 +97,20 @@ func (a *App) Post(fn func()) {
 	a.signal()
 }
 
+// WriteRaw queues raw bytes to be written to the terminal between frame renders,
+// on the event-loop goroutine. It is the seam for terminal output produced
+// outside the widget tree — currently mpv's inline video graphics. Serializing
+// through the loop keeps these bytes from interleaving mid-escape with the cell
+// diff. It is safe to call from any goroutine and blocks only if the loop is
+// briefly behind.
+func (a *App) WriteRaw(b []byte) {
+	if a == nil || len(b) == 0 {
+		return
+	}
+	a.rawWrites <- b
+	a.signal()
+}
+
 // Invalidate marks the current frame dirty so the next event-loop turn redraws.
 func (a *App) Invalidate() {
 	if a == nil {
@@ -94,6 +122,34 @@ func (a *App) Invalidate() {
 	a.signal()
 }
 
+// ForceRepaint schedules a full repaint that re-emits every cell and graphic on
+// the next render, discarding the diff baseline. Use after external output (mpv
+// video) has drawn over the screen so the widget tree cleanly repaints.
+func (a *App) ForceRepaint() {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.forceRepaint = true
+	a.dirty = true
+	a.mu.Unlock()
+	a.signal()
+}
+
+func (a *App) takeForceRepaint() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	f := a.forceRepaint
+	a.forceRepaint = false
+	return f
+}
+
+func (a *App) forceRepaintPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.forceRepaint
+}
+
 // Dirty reports whether the app currently needs to redraw.
 func (a *App) Dirty() bool {
 	if a == nil {
@@ -102,6 +158,20 @@ func (a *App) Dirty() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.dirty
+}
+
+// animating reports whether the root widget wants the faster animation tick.
+func (a *App) animating() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	if an, ok := root.(Animator); ok {
+		return an.Animating()
+	}
+	return false
 }
 
 // Render draws root at size and refreshes the hit-test and focus indexes.
@@ -337,11 +407,29 @@ func (a *App) run(
 	prev := (*screen.Buffer)(nil)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
+	writeAll := func(data []byte) error {
+		for len(data) > 0 {
+			n, err := out.Write(data)
+			if err != nil {
+				return err
+			}
+			if n <= 0 {
+				return io.ErrShortWrite
+			}
+			data = data[n:]
+		}
+		return nil
+	}
 
 	render := func() error {
-		a.drainPosts()
 		if !a.Dirty() {
 			return nil
+		}
+		if a.takeForceRepaint() {
+			// Discard the diff baseline so every cell and graphic is re-emitted.
+			// Used after raw output (mpv video) has painted over the screen
+			// outside our knowledge, so the widget tree fully repaints on return.
+			prev = nil
 		}
 		next := a.Render(root, size)
 		var frame []byte
@@ -355,15 +443,42 @@ func (a *App) run(
 			frame = screen.Frame(prev, next, syncOutput(out))
 		}
 		if len(frame) > 0 {
-			if _, err := out.Write(frame); err != nil {
+			if err := writeAll(frame); err != nil {
 				return err
 			}
 		}
 		prev = next
 		return nil
 	}
+	flushRaw := func(limit int) error {
+		for i := 0; i < limit; i++ {
+			select {
+			case b := <-a.rawWrites:
+				if err := writeAll(b); err != nil {
+					return err
+				}
+			default:
+				return nil
+			}
+		}
+		return nil
+	}
 	a.Invalidate()
+	fastTick := false
 	for {
+		// Posts may stop mpv and request a force repaint. Flush every raw Kitty
+		// command they queued before rendering, so mpv's final global delete can
+		// never run after the restored frame.
+		a.drainPosts()
+		rawLimit := 1
+		if a.forceRepaintPending() {
+			// The video reader has stopped before requesting restoration, so this
+			// backlog is finite and must be completely ordered before the repaint.
+			rawLimit = int(^uint(0) >> 1)
+		}
+		if err := flushRaw(rawLimit); err != nil {
+			return err
+		}
 		if err := render(); err != nil {
 			// Canceling a prompt closes the terminal input to unblock its read.
 			// A final render can race that close; cancellation is still a clean
@@ -373,6 +488,16 @@ func (a *App) run(
 			}
 			return err
 		}
+		// Match the tick cadence to whether the tree is animating. Render just
+		// ran, so a.animating() reflects the frame the user is about to see.
+		if want := a.animating(); want != fastTick {
+			fastTick = want
+			if fastTick {
+				ticker.Reset(animationTickInterval)
+			} else {
+				ticker.Reset(tickInterval)
+			}
+		}
 		select {
 		case <-ctx.Done():
 			if errors.Is(ctx.Err(), context.Canceled) {
@@ -380,6 +505,13 @@ func (a *App) run(
 			}
 			return ctx.Err()
 		case <-a.wake:
+		case b := <-a.rawWrites:
+			// Flush queued raw bytes (mpv video) after the current frame, draining
+			// the whole backlog so playback stays smooth without one render per
+			// chunk. These bytes place graphics the widget tree does not own.
+			if err := writeAll(b); err != nil {
+				return err
+			}
 		case <-ticker.C:
 			if a.Handle(input.TickEvent{}) {
 				a.Invalidate()
