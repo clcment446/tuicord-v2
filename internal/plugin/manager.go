@@ -211,12 +211,12 @@ func (m *Manager) Emit(name string, payload map[string]any) {
 	if !m.rt.submit(func() {
 		m.events.dispatch(m.rt.context(), m.opts.CallbackTimeout, name, payload, m.onCallbackError)
 	}) {
-		m.logf("dropped event %q (plugin queue full)", name)
+		m.logf("dropped event %q (plugin queue full or runtime stopping)", name)
 	}
 }
 
-// RunCommand runs a plugin-registered ;-command by name. It reports whether a
-// command with that name exists (so the caller can fall through to "unknown"),
+// RunCommand runs a plugin-registered ;-command by name. It reports whether
+// the callback was accepted (so the caller can fall through when it was not)
 // and dispatches the handler asynchronously on the plugin goroutine.
 func (m *Manager) RunCommand(name string, args []string) bool {
 	if m == nil {
@@ -226,7 +226,7 @@ func (m *Manager) RunCommand(name string, args []string) bool {
 	if !ok {
 		return false
 	}
-	m.rt.submit(func() {
+	if !m.rt.submit(func() {
 		argsTbl := h.L.NewTable()
 		for _, a := range args {
 			argsTbl.Append(lua.LString(a))
@@ -234,7 +234,10 @@ func (m *Manager) RunCommand(name string, args []string) bool {
 		if err := safeCall(m.rt.context(), h.L, h.fn, m.opts.CallbackTimeout, argsTbl); err != nil {
 			m.onCallbackError(h.plugin, err)
 		}
-	})
+	}) {
+		m.logf("dropped command %q (plugin queue full or runtime stopping)", name)
+		return false
+	}
 	return true
 }
 
@@ -271,7 +274,8 @@ func (m *Manager) KeySpecs() []string {
 	return m.keys.specs()
 }
 
-// RunKey runs a plugin-bound key handler. It reports whether the spec is bound.
+// RunKey runs a plugin-bound key handler. It reports whether the callback was
+// accepted for asynchronous execution.
 func (m *Manager) RunKey(spec string) bool {
 	if m == nil {
 		return false
@@ -280,11 +284,14 @@ func (m *Manager) RunKey(spec string) bool {
 	if !ok {
 		return false
 	}
-	m.rt.submit(func() {
+	if !m.rt.submit(func() {
 		if err := safeCall(m.rt.context(), h.L, h.fn, m.opts.CallbackTimeout); err != nil {
 			m.onCallbackError(h.plugin, err)
 		}
-	})
+	}) {
+		m.logf("dropped key %q (plugin queue full or runtime stopping)", spec)
+		return false
+	}
 	return true
 }
 

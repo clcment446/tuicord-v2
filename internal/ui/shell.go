@@ -34,9 +34,9 @@ import (
 // user input to plugins. It is optional; a nil host disables all plugin
 // dispatch. Implemented by *plugin.Manager.
 type PluginHost interface {
-	// RunCommand runs a plugin ;-command, reporting whether one is registered.
+	// RunCommand runs a plugin ;-command, reporting whether dispatch was accepted.
 	RunCommand(name string, args []string) bool
-	// RunKey runs a plugin key binding, reporting whether the spec is bound.
+	// RunKey runs a plugin key binding, reporting whether dispatch was accepted.
 	RunKey(spec string) bool
 	// KeySpecs lists the key specs plugins have bound.
 	KeySpecs() []string
@@ -755,8 +755,7 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	// cannot shadow core navigation or intercept text input.
 	if !handled && isKey && !key.Release && s.plugins != nil {
 		for _, spec := range s.plugins.KeySpecs() {
-			if keyMatches(key, spec) {
-				s.plugins.RunKey(spec)
+			if keyMatches(key, spec) && s.plugins.RunKey(spec) {
 				return true
 			}
 		}
