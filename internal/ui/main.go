@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,10 @@ type MainView struct {
 	composerBorder   *widget.Border
 	composerStatus   *widget.Text
 	composerFiles    *widget.Text
+	composerPreview  *widget.Node
+	composerNode     *layout.Node
+	previewCellW     int
+	previewCellH     int
 	composer         *widget.TextInput
 	attachments      []queuedAttachment
 	composerMode     composerMode
@@ -137,6 +142,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.composerFiles.SetStyle(styles.Cell("messages.attachment"))
 	mv.composerFiles.SetWrap(true)
 
+	// Inline image thumbnails render above the composer; size them against the
+	// terminal's cell pixel geometry so Kitty graphics are crisp.
+	mv.previewCellW, mv.previewCellH = chatMediaConfig().CellPixels()
+	mv.composerPreview = widget.Column()
+	mv.composerPreview.Layout().Grow = 0
+	mv.composerPreview.Layout().Hidden = true
+
 	mv.composer = widget.NewTextInput("Message")
 	mv.composer.SetPreferredFocus(!cfg.Accessibility.VimNavigation)
 	mv.composer.SetInputFocusEnabled(!cfg.Accessibility.VimNavigation)
@@ -161,13 +173,15 @@ func (mv *MainView) compose() tui.Widget {
 	channels := mv.titled("Channels", mv.channelList)
 	members := mv.titled("Members", mv.memberList)
 
-	composerArea := widget.Column(mv.composerStatus, mv.composerFiles, mv.composer)
+	// Order: status, image thumbnails, filename chips, then the input — so a
+	// pasted image previews above its caption and the text field.
+	composerArea := widget.Column(mv.composerStatus, mv.composerPreview, mv.composerFiles, mv.composer)
 	composerArea.Children()[0].Layout().Basis = 1
 	composerArea.Children()[0].Layout().Grow = 0
-	composerArea.Children()[1].Layout().Basis = 1
-	composerArea.Children()[1].Layout().Grow = 0
-	composerArea.Children()[2].Layout().Basis = 4
+	composerArea.Children()[2].Layout().Basis = 1
 	composerArea.Children()[2].Layout().Grow = 0
+	composerArea.Children()[3].Layout().Basis = 4
+	composerArea.Children()[3].Layout().Grow = 0
 
 	mv.chatBorder = mv.titled("Messages", mv.chat)
 	mv.composerBorder = mv.titled("Composer", composerArea)
@@ -179,8 +193,9 @@ func (mv *MainView) compose() tui.Widget {
 	// a compact attachment-chip line.
 	chatColumn.Children()[0].Layout().Grow = 1
 	composerNode := chatColumn.Children()[1].Layout()
-	composerNode.Basis = 8
+	composerNode.Basis = composerBaseBasis
 	composerNode.Grow = 0
+	mv.composerNode = composerNode
 	mv.cfg.Layout.Element("messages").Apply(mv.chatBorder.Layout(), layout.Column)
 	mv.cfg.Layout.Element("composer").Apply(mv.composerBorder.Layout(), layout.Column)
 
@@ -1017,7 +1032,59 @@ func (mv *MainView) openAttachments() ([]sendpart.File, []store.Attachment, func
 	return files, optimistic, cleanup, nil
 }
 
+// StageTempImage queues a temporary file (e.g. an image read from the system
+// clipboard) as an attachment. The file is owned by the composer: it is deleted
+// once the message is sent or the attachments are cleared. It returns an error
+// if the file exceeds the upload limit, in which case the caller should remove
+// the temp file.
+func (mv *MainView) StageTempImage(path, filename string, size int64) error {
+	if size > MaxUploadBytes {
+		return fmt.Errorf("image is larger than the %d MiB upload limit", MaxUploadBytes/(1024*1024))
+	}
+	if mv.composerReadOnly {
+		return fmt.Errorf("this channel does not accept attachments")
+	}
+	if mv.hasAttachment(path) {
+		return nil
+	}
+	mv.attachments = append(mv.attachments, queuedAttachment{
+		path: path,
+		meta: store.Attachment{Filename: filename, Size: size},
+		temp: true,
+	})
+	mv.updateAttachmentChips()
+	return nil
+}
+
+// imageAttachments returns the staged attachments whose filename looks like an
+// image, for previewing.
+func (mv *MainView) imageAttachments() []queuedAttachment {
+	var out []queuedAttachment
+	for _, attachment := range mv.attachments {
+		if isImageFilename(attachment.meta.Filename) {
+			out = append(out, attachment)
+		}
+	}
+	return out
+}
+
+// isImageFilename reports whether name has a raster image extension the client
+// can decode for a preview.
+func isImageFilename(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+		return true
+	default:
+		return false
+	}
+}
+
 func (mv *MainView) clearAttachments() {
+	for _, attachment := range mv.attachments {
+		if attachment.temp {
+			_ = os.Remove(attachment.path)
+		}
+	}
 	mv.attachments = nil
 	mv.updateAttachmentChips()
 }
@@ -1031,6 +1098,7 @@ func (mv *MainView) updateAttachmentChips() {
 		chips = append(chips, attachment.meta.Filename+" ("+formatAttachmentSize(attachment.meta.Size)+")")
 	}
 	mv.composerFiles.SetContent(strings.Join(chips, " · "))
+	mv.updateComposerPreview()
 }
 
 func formatAttachmentSize(size int64) string {

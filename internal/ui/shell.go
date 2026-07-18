@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -113,7 +114,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		detail := ";help [command] · ;quit · ;switch <query> · ;settings · ;theme [name]"
+		detail := ";help · ;quit · ;switch · ;settings · ;theme [name] · ;paste"
 		if s.plugins != nil {
 			if names := s.plugins.CommandNames(); len(names) > 0 {
 				detail += " · plugins: ;" + strings.Join(names, " ;")
@@ -139,6 +140,8 @@ func (s *Shell) runLocalCommand(input string) bool {
 		}
 	case "theme":
 		s.runThemeCommand(command.args)
+	case "paste", "img":
+		s.pasteImage()
 	default:
 		if s.plugins != nil && s.plugins.RunCommand(command.name, command.args) {
 			return true
@@ -147,6 +150,51 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	return true
 }
+
+// pasteImage attaches a clipboard image, reporting an empty/text-only clipboard
+// as a toast. It is the explicit trigger (ctrl+v / ;paste).
+func (s *Shell) pasteImage() { s.tryPasteImage(false) }
+
+// tryPasteImage reads an image from the system clipboard, writes it to a
+// temporary file, and stages it as a composer attachment, then opens a preview.
+// Text paste is unaffected: this only touches the clipboard's image data. When
+// quiet is true an empty/text-only clipboard is a silent no-op (used for the
+// bracketed-paste hook); otherwise it surfaces as a toast. It reports whether an
+// image was attached.
+func (s *Shell) tryPasteImage(quiet bool) bool {
+	data, ext, err := term.ReadClipboardImage()
+	if err != nil {
+		if quiet && errors.Is(err, term.ErrNoClipboardImage) {
+			return false
+		}
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+		return false
+	}
+	f, err := os.CreateTemp("", "tuicord-paste-*."+ext)
+	if err != nil {
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+		return false
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(f.Name())
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+		return false
+	}
+	f.Close()
+	filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
+	if err := s.mv.StageTempImage(f.Name(), filename, int64(len(data))); err != nil {
+		_ = os.Remove(f.Name())
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+		return false
+	}
+	// The staged image previews inline above the composer via updateAttachmentChips.
+	s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
+	return true
+}
+
+// pasteNoticeTTL is how long paste confirmations stay before auto-dismissing.
+const pasteNoticeTTL = 2 * time.Second
 
 // runThemeCommand applies a plugin-registered theme by name, or lists the
 // available themes when called without an argument.
@@ -260,6 +308,16 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	}
 	key, isKey := ev.(input.KeyEvent)
 
+	// Auto-dismiss an expired toast. On a tick, short-circuit so the runtime
+	// invalidates and repaints without it; on real input, drop it and let the
+	// event process normally (it triggers its own repaint).
+	if s.toast != nil && s.toast.expired(time.Now()) {
+		s.toast = nil
+		if _, isTick := ev.(input.TickEvent); isTick {
+			return true
+		}
+	}
+
 	if s.toast != nil && s.toast.Handle(ev) {
 		if s.toast.wantsDismiss(ev) {
 			s.toast = nil
@@ -282,6 +340,17 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			return true
 		}
 		return s.overlay.Handle(ev)
+	}
+
+	// A bracketed paste carrying no text is what terminals emit when the
+	// clipboard holds an image and the user hits their native paste bind (e.g.
+	// ctrl+shift+v): the text target is empty. Treat it as an image paste so the
+	// default paste shortcut attaches images too. A real image-less empty paste
+	// is a harmless no-op.
+	if paste, ok := ev.(input.PasteEvent); ok && strings.TrimSpace(paste.Text) == "" {
+		if s.tryPasteImage(true) {
+			return true
+		}
 	}
 
 	if mouse, ok := ev.(input.MouseEvent); ok && mouse.Kind == input.MousePress && mouse.Btn == input.ButtonRight {
@@ -316,6 +385,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			return true
 		case keyMatches(key, s.cfg.Keys.Picker):
 			s.openPicker()
+			return true
+		case s.cfg.Keys.PasteImage != "" && keyMatches(key, s.cfg.Keys.PasteImage):
+			s.pasteImage()
 			return true
 		case keyMatches(key, s.cfg.Keys.Help):
 			s.overlay = NewHelpOverlay(s.cfg)
@@ -1004,6 +1076,15 @@ func (s *Shell) ShowNotice(title, detail string) {
 		return
 	}
 	s.toast = NewToast(title, detail, s.styles)
+}
+
+// ShowTimedNotice shows a notice that auto-dismisses after ttl (unless the user
+// expands it). Used for low-importance confirmations like image paste.
+func (s *Shell) ShowTimedNotice(title, detail string, ttl time.Duration) {
+	if s == nil {
+		return
+	}
+	s.toast = NewToast(title, detail, s.styles).SetTTL(ttl)
 }
 
 // Toast returns the current popup, if any.

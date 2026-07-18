@@ -422,6 +422,13 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 		}
 		switch ev.Key {
 		case input.KeyRune:
+			// A Ctrl/Super-modified rune is a shortcut (e.g. ctrl+v, ctrl+k),
+			// not text. Decline it so it bubbles from the focused input up to
+			// the app's global key handling instead of inserting the letter.
+			// Alt is left alone so AltGr-composed characters still type.
+			if ev.Mods&(input.Ctrl|input.Super) != 0 {
+				return false
+			}
 			w.insert(string(ev.Rune))
 			w.showCursor()
 			w.changed()
