@@ -4,11 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestBrowserExchangeResultDecodesJSONString(t *testing.T) {
@@ -106,6 +111,91 @@ func TestSessionCloseNeverRemovesCallerProfile(t *testing.T) {
 	if _, err := os.Stat(profile); err != nil {
 		t.Fatalf("caller profile was removed: %v", err)
 	}
+}
+
+func TestCommandHonorsCallerContextWhileResponseIsBlocked(t *testing.T) {
+	s, received := newBlockedBiDiSession(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+
+	started := time.Now()
+	err := s.command(ctx, "test.blocked", map[string]any{}, nil)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("command error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("command returned after %v; caller context was not prompt", elapsed)
+	}
+	select {
+	case <-received:
+	default:
+		t.Fatal("server did not receive command")
+	}
+}
+
+func TestSessionCloseInterruptsBlockedCommand(t *testing.T) {
+	s, received := newBlockedBiDiSession(t)
+	commandDone := make(chan error, 1)
+	go func() {
+		commandDone <- s.command(context.Background(), "test.blocked", map[string]any{}, nil)
+	}()
+	select {
+	case <-received:
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive command")
+	}
+
+	started := time.Now()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("Close returned after %v; blocked read was not interrupted", elapsed)
+	}
+	select {
+	case err := <-commandDone:
+		if err == nil {
+			t.Fatal("blocked command succeeded after Close")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("blocked command did not return after Close")
+	}
+}
+
+func newBlockedBiDiSession(t *testing.T) (*Session, <-chan struct{}) {
+	t.Helper()
+	received := make(chan struct{})
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var request map[string]any
+		if err := conn.ReadJSON(&request); err != nil {
+			return
+		}
+		close(received)
+		// Wait for the client to close instead of replying.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		server.Close()
+		t.Fatal(err)
+	}
+	s := &Session{conn: conn}
+	t.Cleanup(func() {
+		_ = s.Close()
+		server.Close()
+	})
+	return s, received
 }
 
 func TestFirefoxProcessHelper(t *testing.T) {

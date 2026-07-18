@@ -44,20 +44,52 @@ func ReadClipboardImage() ([]byte, string, error) {
 // ReadClipboardImageContext reads an image with cancellation and an exact output
 // cap. Both MIME discovery and extraction use CommandContext and max+1 reads.
 func ReadClipboardImageContext(ctx context.Context, maxBytes int64) ([]byte, string, error) {
+	return readClipboardImageContext(ctx, maxBytes, toolAvailable, commandOutput)
+}
+
+type clipboardImageOutput func(context.Context, int64, string, ...string) ([]byte, error)
+
+func readClipboardImageContext(ctx context.Context, maxBytes int64, available func(string) bool, output clipboardImageOutput) ([]byte, string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if maxBytes <= 0 {
 		maxBytes = defaultClipboardImageMaxBytes
 	}
-	switch {
-	case toolAvailable("wl-paste"):
-		return readImageWithListContext(ctx, maxBytes, "wl-paste",
+	installed := false
+	lastErr := error(ErrNoClipboardImage)
+	try := func(name string, read func() ([]byte, string, error)) ([]byte, string, bool, error) {
+		if !available(name) {
+			return nil, "", false, nil
+		}
+		installed = true
+		data, ext, err := read()
+		if err == nil {
+			return data, ext, true, nil
+		}
+		lastErr = err
+		if errors.Is(err, ErrClipboardImageTooLarge) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, "", true, err
+		}
+		return nil, "", false, nil
+	}
+
+	if data, ext, done, err := try("wl-paste", func() ([]byte, string, error) {
+		return readImageWithListCommand(ctx, maxBytes, "wl-paste",
 			[]string{"--list-types"},
-			func(mime string) []string { return []string{"--type", mime, "--no-newline"} })
-	case toolAvailable("xclip"):
-		return readImageWithListContext(ctx, maxBytes, "xclip",
+			func(mime string) []string { return []string{"--type", mime, "--no-newline"} }, output)
+	}); done {
+		return data, ext, err
+	}
+	if data, ext, done, err := try("xclip", func() ([]byte, string, error) {
+		return readImageWithListCommand(ctx, maxBytes, "xclip",
 			[]string{"-selection", "clipboard", "-t", "TARGETS", "-o"},
-			func(mime string) []string { return []string{"-selection", "clipboard", "-t", mime, "-o"} })
-	case toolAvailable("pngpaste"):
-		out, err := commandOutput(ctx, maxBytes, "pngpaste", "-")
+			func(mime string) []string { return []string{"-selection", "clipboard", "-t", mime, "-o"} }, output)
+	}); done {
+		return data, ext, err
+	}
+	if data, ext, done, err := try("pngpaste", func() ([]byte, string, error) {
+		out, err := output(ctx, maxBytes, "pngpaste", "-")
 		if err != nil {
 			return nil, "", clipboardCommandError(err)
 		}
@@ -65,9 +97,13 @@ func ReadClipboardImageContext(ctx context.Context, maxBytes int64) ([]byte, str
 			return nil, "", ErrNoClipboardImage
 		}
 		return out, "png", nil
-	default:
+	}); done {
+		return data, ext, err
+	}
+	if !installed {
 		return nil, "", ErrNoClipboardImageTool
 	}
+	return nil, "", lastErr
 }
 
 // readImageWithList is retained for package tests and compatibility.
@@ -78,7 +114,11 @@ func readImageWithList(tool string, listArgs []string, readArgs func(string) []s
 }
 
 func readImageWithListContext(ctx context.Context, maxBytes int64, tool string, listArgs []string, readArgs func(string) []string) ([]byte, string, error) {
-	listed, err := commandOutput(ctx, clipboardTypeListMaxBytes, tool, listArgs...)
+	return readImageWithListCommand(ctx, maxBytes, tool, listArgs, readArgs, commandOutput)
+}
+
+func readImageWithListCommand(ctx context.Context, maxBytes int64, tool string, listArgs []string, readArgs func(string) []string, output clipboardImageOutput) ([]byte, string, error) {
+	listed, err := output(ctx, clipboardTypeListMaxBytes, tool, listArgs...)
 	if err != nil {
 		return nil, "", clipboardCommandError(err)
 	}
@@ -86,7 +126,7 @@ func readImageWithListContext(ctx context.Context, maxBytes int64, tool string, 
 	if !ok {
 		return nil, "", ErrNoClipboardImage
 	}
-	out, err := commandOutput(ctx, maxBytes, tool, readArgs(mime)...)
+	out, err := output(ctx, maxBytes, tool, readArgs(mime)...)
 	if err != nil {
 		return nil, "", clipboardCommandError(err)
 	}

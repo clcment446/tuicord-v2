@@ -45,13 +45,22 @@ type Challenge struct {
 // CAPTCHA surface. It intentionally exposes only screenshots and genuine user
 // input actions; it has no synthetic-motion or CAPTCHA-solving helpers.
 type Session struct {
+	mu          sync.Mutex
 	conn        *websocket.Conn
 	cmd         *exec.Cmd
 	profile     string
 	ownsProfile bool
-	mu          sync.Mutex
 	next        int
 	ctx         string
+	pending     map[int]chan bidiReply
+	gateOnce    sync.Once
+	commandGate chan struct{}
+	readerOnce  sync.Once
+}
+
+type bidiReply struct {
+	message bidiMessage
+	err     error
 }
 
 type bidiMessage struct {
@@ -313,57 +322,121 @@ func (s *Session) Close() error {
 	if s == nil {
 		return nil
 	}
+
+	// Detach the connection while holding only the state lock, then close it
+	// outside the lock. The reader owns ReadJSON, so Close never waits behind a
+	// command whose server response has stalled.
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn != nil {
-		_ = s.conn.WriteJSON(map[string]any{"id": s.next + 1, "method": "session.end", "params": map[string]any{}})
-		_ = s.conn.Close()
-		s.conn = nil
-	}
-	if s.cmd != nil {
-		cmd := s.cmd
-		s.cmd = nil
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-			// Wait releases the process handle before profile removal, which is
-			// required on Windows and prevents zombies on Unix.
-			_ = cmd.Wait()
-		}
-	}
-	if !s.ownsProfile {
-		s.profile = ""
-		return nil
-	}
-	if err := os.RemoveAll(s.profile); err != nil {
-		return fmt.Errorf("remove temporary Firefox profile: %w", err)
-	}
+	conn := s.conn
+	s.conn = nil
+	cmd := s.cmd
+	s.cmd = nil
+	pending := s.pending
+	s.pending = nil
+	profile := s.profile
+	ownsProfile := s.ownsProfile
 	s.profile = ""
 	s.ownsProfile = false
+	s.mu.Unlock()
+
+	if conn != nil {
+		_ = conn.Close()
+	}
+	closedErr := errors.New("Firefox BiDi session is closed")
+	for _, reply := range pending {
+		reply <- bidiReply{err: closedErr}
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+		// Wait releases the process handle before profile removal, which is
+		// required on Windows and prevents zombies on Unix.
+		_ = cmd.Wait()
+	}
+	if !ownsProfile {
+		return nil
+	}
+	if err := os.RemoveAll(profile); err != nil {
+		return fmt.Errorf("remove temporary Firefox profile: %w", err)
+	}
 	return nil
 }
 
 func (s *Session) command(ctx context.Context, method string, params map[string]any, result any) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Keep browser commands ordered, but make waiting for the previous command
+	// context-aware. Responses are read independently so cancellation and Close
+	// never have to acquire this gate to interrupt a blocked command.
+	s.gateOnce.Do(func() {
+		s.commandGate = make(chan struct{}, 1)
+		s.commandGate <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.commandGate:
+	}
+	defer func() { s.commandGate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.conn == nil {
+	conn := s.conn
+	if conn == nil {
+		s.mu.Unlock()
 		return errors.New("Firefox BiDi session is closed")
 	}
 	s.next++
 	id := s.next
-	if err := s.conn.WriteJSON(map[string]any{"id": id, "method": method, "params": params}); err != nil {
+	reply := make(chan bidiReply, 1)
+	if s.pending == nil {
+		s.pending = make(map[int]chan bidiReply)
+	}
+	s.pending[id] = reply
+	s.readerOnce.Do(func() { go s.readLoop(conn) })
+	s.mu.Unlock()
+
+	deadline, _ := ctx.Deadline()
+	if err := conn.SetWriteDeadline(deadline); err != nil {
+		s.removePending(id, reply)
 		return err
 	}
-	for {
-		if err := s.conn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
-			return err
+	stopInterrupt := context.AfterFunc(ctx, func() {
+		_ = conn.SetWriteDeadline(time.Now())
+	})
+	writeErr := conn.WriteJSON(map[string]any{"id": id, "method": method, "params": params})
+	stopInterrupt()
+	if writeErr != nil {
+		s.removePending(id, reply)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		var msg bidiMessage
-		if err := s.conn.ReadJSON(&msg); err != nil {
-			return err
+		return writeErr
+	}
+
+	select {
+	case <-ctx.Done():
+		s.removePending(id, reply)
+		return ctx.Err()
+	case response := <-reply:
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		if msg.ID != id {
-			continue
+		if response.err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return response.err
 		}
+		msg := response.message
 		if msg.Error != "" {
 			if msg.Message != "" {
 				return fmt.Errorf("%s: %s", msg.Error, msg.Message)
@@ -374,6 +447,50 @@ func (s *Session) command(ctx context.Context, method string, params map[string]
 			return nil
 		}
 		return json.Unmarshal(msg.Result, result)
+	}
+}
+
+func (s *Session) removePending(id int, reply chan bidiReply) {
+	s.mu.Lock()
+	if s.pending[id] == reply {
+		delete(s.pending, id)
+	}
+	s.mu.Unlock()
+}
+
+func (s *Session) readLoop(conn *websocket.Conn) {
+	for {
+		var msg bidiMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			s.failConnection(conn, err)
+			return
+		}
+		if msg.ID == 0 {
+			continue
+		}
+		s.mu.Lock()
+		reply := s.pending[msg.ID]
+		delete(s.pending, msg.ID)
+		s.mu.Unlock()
+		if reply != nil {
+			reply <- bidiReply{message: msg}
+		}
+	}
+}
+
+func (s *Session) failConnection(conn *websocket.Conn, err error) {
+	s.mu.Lock()
+	if s.conn != conn {
+		s.mu.Unlock()
+		return
+	}
+	s.conn = nil
+	pending := s.pending
+	s.pending = nil
+	s.mu.Unlock()
+	_ = conn.Close()
+	for _, reply := range pending {
+		reply <- bidiReply{err: err}
 	}
 }
 

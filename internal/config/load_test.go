@@ -62,4 +62,28 @@ func TestWriteDefaultExistingFileIsNoError(t *testing.T) {
 	if err := writeDefault(path); err != nil {
 		t.Errorf("writeDefault over existing file: %v", err)
 	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "[layout]\n" {
+		t.Fatalf("existing config was replaced: %q", contents)
+	}
+}
+
+func TestWriteColorsTemplatePreservesExistingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "colors.conf")
+	if err := os.WriteFile(path, []byte("custom"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeColorsTemplate(path); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "custom" {
+		t.Fatalf("existing colors template was replaced: %q", contents)
+	}
 }

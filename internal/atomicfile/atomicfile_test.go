@@ -31,6 +31,49 @@ func TestWriteCreatesParentAndFile(t *testing.T) {
 	}
 }
 
+func TestWriteSyncsParentAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.toml")
+	synced := false
+	if err := write(path, 0o600, func(w io.Writer) error {
+		_, err := io.WriteString(w, "durable")
+		return err
+	}, func(gotDir string) error {
+		if gotDir != dir {
+			t.Fatalf("synced directory = %q, want %q", gotDir, dir)
+		}
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("destination was not renamed before directory sync: %v", err)
+		}
+		if string(contents) != "durable" {
+			t.Fatalf("contents at directory sync = %q", contents)
+		}
+		synced = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !synced {
+		t.Fatal("parent directory was not synced")
+	}
+}
+
+func TestWriteReportsParentSyncFailure(t *testing.T) {
+	wantErr := errors.New("directory sync failed")
+	path := filepath.Join(t.TempDir(), "state.toml")
+	err := write(path, 0o600, func(w io.Writer) error {
+		_, err := io.WriteString(w, "renamed")
+		return err
+	}, func(string) error { return wantErr })
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Write error = %v, want %v", err, wantErr)
+	}
+	if contents, readErr := os.ReadFile(path); readErr != nil || string(contents) != "renamed" {
+		t.Fatalf("renamed destination = %q, %v", contents, readErr)
+	}
+}
+
 func TestWriteReplacesExistingFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.toml")
 	if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
