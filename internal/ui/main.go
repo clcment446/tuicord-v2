@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"image"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -1039,6 +1040,29 @@ func (mv *MainView) StageTempImage(path, filename string, size int64) error {
 	})
 	mv.updateAttachmentChips()
 	return nil
+}
+
+// imageAttachments returns the staged attachments whose filename looks like an
+// image, for previewing.
+func (mv *MainView) imageAttachments() []queuedAttachment {
+	var out []queuedAttachment
+	for _, attachment := range mv.attachments {
+		if isImageFilename(attachment.meta.Filename) {
+			out = append(out, attachment)
+		}
+	}
+	return out
+}
+
+// isImageFilename reports whether name has a raster image extension the client
+// can decode for a preview.
+func isImageFilename(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+		return true
+	default:
+		return false
+	}
 }
 
 func (mv *MainView) clearAttachments() {

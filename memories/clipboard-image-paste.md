@@ -29,6 +29,15 @@ clipboard.go. It lists advertised MIME types and picks png>jpeg>gif>webp>bmp
   `os.CreateTemp` file; `clearAttachments` deletes temp files (on send and on
   cancel). On Linux the send path opens the FD before clear unlinks it, so the
   in-flight upload still reads it.
+- **Wayland/native paste bind:** a bracketed `input.PasteEvent` with empty text
+  (what terminals emit when the clipboard holds an image and the user hits
+  ctrl+shift+v — no text target) triggers a quiet image-paste attempt in
+  `Shell.Handle`. Real image-less empty pastes are no-ops.
+- **Preview:** `Shell.openAttachmentPreview` decodes staged image attachments
+  (`media.Decode` + `media.Downscale`) and shows them in an overlay via
+  `widget.NewKittyImageFrom` — the same Kitty path (with cell fallback) as inline
+  chat media (chatview.go:456). Opens automatically after a paste and via
+  `;preview`.
 - **Live E2E:** `TestReadClipboardImageRoundTrip` (term, gated by
   `TUICORD_CLIP_E2E=1`) wl-copies a PNG and reads it back byte-identical.
 
