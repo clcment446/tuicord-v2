@@ -32,6 +32,7 @@ type TextInput struct {
 	onSubmit         func(string)
 	onChange         func(string)
 	onPaste          func(string) bool
+	onBackspaceEmpty func()
 	node             layout.Node
 }
 
@@ -97,6 +98,15 @@ func (w *TextInput) SetCursor(offset int) {
 	}
 	w.cursor = tuitext.PrevBoundary(w.value, tuitext.NextBoundary(w.value, offset))
 	w.showCursor()
+}
+
+// OnBackspaceEmpty registers a callback for Backspace when the input is empty.
+// Modal owners use this to leave input mode without stealing ordinary editing
+// behavior from the text field.
+func (w *TextInput) OnBackspaceEmpty(fn func()) {
+	if w != nil {
+		w.onBackspaceEmpty = fn
+	}
 }
 
 // SetFocused controls whether Draw renders the cursor.
@@ -490,6 +500,9 @@ func (w *TextInput) Handle(ev tui.Event) bool {
 			w.showCursor()
 			return true
 		case input.KeyBackspace:
+			if w.value == "" && w.onBackspaceEmpty != nil {
+				w.onBackspaceEmpty()
+			}
 			prev := tuitext.PrevBoundary(w.value, w.cursor)
 			if ev.Mods&input.Ctrl != 0 {
 				prev = previousWordBoundary(w.value, w.cursor)

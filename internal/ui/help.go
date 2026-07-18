@@ -26,12 +26,16 @@ func NewHelpOverlay(cfg config.Config) tui.Widget {
 	}
 	if cfg.Accessibility.VimNavigation {
 		lines = append(lines,
-			[2]string{"j / k", "Move between rows and message stops"},
-			[2]string{"h / l", "Previous/next panel; unfold selected group"},
+			[2]string{"j / k", "Scroll down/up"},
+			[2]string{"J / K", "Move down/up between message stops"},
+			[2]string{"h / l", "Previous/next component or panel"},
+			[2]string{"H / L", "Previous/next panel"},
+			[2]string{"← / →", "Previous/next component"},
+			[2]string{"PgUp / PgDn", "Scroll by one viewport"},
 			[2]string{"-", "Toggle the focused message section"},
 			[2]string{"U", "Open the focused author's profile"},
 			[2]string{"V / Y", "Select message anchors / copy formatted selection"},
-			[2]string{"I / ;q", "Enter / leave composer input mode"},
+			[2]string{"i / ;q", "Enter / leave composer input mode"},
 		)
 	}
 	rows := make([]tui.Widget, 0, len(lines)+1)

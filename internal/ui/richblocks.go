@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"awesomeProject/internal/media"
@@ -18,14 +19,15 @@ func (w *ChatView) renderMedia(m store.Message, width int, base screen.Style) []
 	var lines []chatLine
 	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
 	for i, a := range m.Attachments {
-		if url, ok := attachmentMediaURL(a); ok {
-			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()), attachmentAnimated(a, url))...)
+		if videoURL, ok := attachmentVideoURL(a); ok {
+			// Prefer Discord's JPEG proxy as the poster, but keep the direct URL as
+			// the playback target. Without a proxy, reserve a playable placeholder.
+			posterURL, _ := attachmentMediaURL(a)
+			lines = append(lines, w.mediaLinesVideo(posterURL, videoURL, attachmentChip(a), messageMediaPlacementKey(m, "video", i, videoURL), base, attachmentVideoSpec(a, width, w.mediaMaxRows()), false)...)
 			continue
 		}
-		if vurl, ok := attachmentVideoURL(a); ok {
-			// A video attachment has no poster image; reserve a play region and
-			// stream the file inline on select-to-play.
-			lines = append(lines, w.mediaLinesVideo("", vurl, attachmentChip(a), messageMediaPlacementKey(m, "video", i, vurl), base, attachmentVideoSpec(a, width, w.mediaMaxRows()), false)...)
+		if url, ok := attachmentMediaURL(a); ok {
+			lines = append(lines, w.mediaLines(url, attachmentChip(a), messageMediaPlacementKey(m, "attachment", i, url), base, attachmentMediaSpec(a, url, width, w.mediaMaxRows()), attachmentAnimated(a, url))...)
 			continue
 		}
 		lines = append(lines, chatLine{segments: []chatSegment{{text: attachmentChip(a), style: muted}}})
@@ -47,6 +49,14 @@ func attachmentMediaURL(a store.Attachment) (string, bool) {
 	}
 	if url == "" {
 		return "", false
+	}
+	if strings.HasPrefix(a.ContentType, "video/") || media.ClassifyURL(url) == media.ClassVideo {
+		// Discord's attachment proxy is the only source guaranteed to negotiate
+		// a JPEG poster. Never feed a direct MP4 URL to the image decoder.
+		if a.ProxyURL == "" {
+			return "", false
+		}
+		return videoPosterURL(url), true
 	}
 	if strings.HasPrefix(a.ContentType, "image/") {
 		return url, true
@@ -91,6 +101,20 @@ func attachmentVideoSpec(a store.Attachment, width, maxRows int) mediaSpec {
 // classifier is the fallback when the content type is absent.
 func attachmentAnimated(a store.Attachment, url string) bool {
 	return a.ContentType == "image/gif" || media.ClassifyURL(url) == media.ClassGIF
+}
+
+// videoPosterURL asks Discord's media proxy for a JPEG poster frame. The
+// source attachment remains the canonical URL for opening the video; this URL
+// is only ever passed through the ordinary image fetcher.
+func videoPosterURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("format", "jpeg")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func stickerMediaURL(s store.Sticker) (string, bool) {
