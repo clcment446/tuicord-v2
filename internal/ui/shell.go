@@ -167,31 +167,34 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 		if quiet && errors.Is(err, term.ErrNoClipboardImage) {
 			return false
 		}
-		s.ShowToast("Paste image", err)
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
 		return false
 	}
 	f, err := os.CreateTemp("", "tuicord-paste-*."+ext)
 	if err != nil {
-		s.ShowToast("Paste image", err)
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
 		return false
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		_ = os.Remove(f.Name())
-		s.ShowToast("Paste image", err)
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
 		return false
 	}
 	f.Close()
 	filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
 	if err := s.mv.StageTempImage(f.Name(), filename, int64(len(data))); err != nil {
 		_ = os.Remove(f.Name())
-		s.ShowToast("Paste image", err)
+		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
 		return false
 	}
 	// The staged image previews inline above the composer via updateAttachmentChips.
-	s.ShowNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send")
+	s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
 	return true
 }
+
+// pasteNoticeTTL is how long paste confirmations stay before auto-dismissing.
+const pasteNoticeTTL = 5 * time.Second
 
 // runThemeCommand applies a plugin-registered theme by name, or lists the
 // available themes when called without an argument.
@@ -304,6 +307,16 @@ func (s *Shell) Handle(ev tui.Event) bool {
 		}
 	}
 	key, isKey := ev.(input.KeyEvent)
+
+	// Auto-dismiss an expired toast. On a tick, short-circuit so the runtime
+	// invalidates and repaints without it; on real input, drop it and let the
+	// event process normally (it triggers its own repaint).
+	if s.toast != nil && s.toast.expired(time.Now()) {
+		s.toast = nil
+		if _, isTick := ev.(input.TickEvent); isTick {
+			return true
+		}
+	}
 
 	if s.toast != nil && s.toast.Handle(ev) {
 		if s.toast.wantsDismiss(ev) {
@@ -1063,6 +1076,15 @@ func (s *Shell) ShowNotice(title, detail string) {
 		return
 	}
 	s.toast = NewToast(title, detail, s.styles)
+}
+
+// ShowTimedNotice shows a notice that auto-dismisses after ttl (unless the user
+// expands it). Used for low-importance confirmations like image paste.
+func (s *Shell) ShowTimedNotice(title, detail string, ttl time.Duration) {
+	if s == nil {
+		return
+	}
+	s.toast = NewToast(title, detail, s.styles).SetTTL(ttl)
 }
 
 // Toast returns the current popup, if any.
