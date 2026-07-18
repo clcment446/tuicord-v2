@@ -17,6 +17,10 @@ type runtime struct {
 	cancel context.CancelFunc
 
 	closeOnce sync.Once
+	// submitMu makes submit and the start of stop mutually exclusive. Without
+	// it, submit could observe an open quit channel, then enqueue successfully
+	// after stop closed quit and the worker had decided to exit.
+	submitMu sync.RWMutex
 }
 
 // newRuntime creates a runtime whose job queue holds queue pending jobs before
@@ -67,6 +71,8 @@ func (r *runtime) submit(job func()) bool {
 	if job == nil {
 		return false
 	}
+	r.submitMu.RLock()
+	defer r.submitMu.RUnlock()
 	select {
 	case <-r.quit:
 		return false
@@ -114,8 +120,10 @@ func (r *runtime) context() context.Context { return r.ctx }
 // waits for the worker. LStates can be closed safely after it returns.
 func (r *runtime) stop() {
 	r.closeOnce.Do(func() {
+		r.submitMu.Lock()
 		close(r.quit)
 		r.cancel()
+		r.submitMu.Unlock()
 	})
 	r.wg.Wait()
 }

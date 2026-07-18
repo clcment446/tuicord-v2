@@ -165,6 +165,74 @@ func TestRunCommand(t *testing.T) {
 	}
 }
 
+func TestRunCommandAndKeyRejectSaturatedQueue(t *testing.T) {
+	dir := writePlugin(t, "dispatch", `
+		tuicord.command("queued", function() error("command unexpectedly ran") end)
+		tuicord.keymap("ctrl+j", function() error("key unexpectedly ran") end)
+	`)
+	var log bytes.Buffer
+	m := NewManager(Options{Dir: dir, QueueSize: 1, Log: &log})
+	if errs := m.Load(); len(errs) != 0 {
+		m.Close()
+		t.Fatalf("load errors: %v", errs)
+	}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		close(release)
+		m.Close()
+	}()
+	if !m.rt.submit(func() {
+		close(started)
+		<-release
+	}) {
+		t.Fatal("failed to submit blocking job")
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("blocking job did not start")
+	}
+	if !m.rt.submit(func() {}) {
+		t.Fatal("failed to fill plugin queue")
+	}
+
+	if m.RunCommand("queued", nil) {
+		t.Fatal("RunCommand reported handled when the queue was saturated")
+	}
+	if m.RunKey("ctrl+j") {
+		t.Fatal("RunKey reported handled when the queue was saturated")
+	}
+	if got := log.String(); !strings.Contains(got, `dropped command "queued"`) || !strings.Contains(got, `dropped key "ctrl+j"`) {
+		t.Fatalf("dispatch rejection was not logged: %q", got)
+	}
+}
+
+func TestRunCommandAndKeyRejectAfterShutdown(t *testing.T) {
+	dir := writePlugin(t, "dispatch", `
+		tuicord.command("stopped", function() error("command unexpectedly ran") end)
+		tuicord.keymap("ctrl+k", function() error("key unexpectedly ran") end)
+	`)
+	var log bytes.Buffer
+	m := NewManager(Options{Dir: dir, Log: &log})
+	if errs := m.Load(); len(errs) != 0 {
+		m.Close()
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Close()
+
+	if m.RunCommand("stopped", nil) {
+		t.Fatal("RunCommand reported handled after shutdown")
+	}
+	if m.RunKey("ctrl+k") {
+		t.Fatal("RunKey reported handled after shutdown")
+	}
+	if got := log.String(); !strings.Contains(got, `dropped command "stopped"`) || !strings.Contains(got, `dropped key "ctrl+k"`) {
+		t.Fatalf("shutdown dispatch rejection was not logged: %q", got)
+	}
+}
+
 func TestStateAccessorsAsStrings(t *testing.T) {
 	dir := writePlugin(t, "ids", `
 		tuicord.on("ready", function()
