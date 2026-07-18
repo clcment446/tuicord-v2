@@ -28,6 +28,7 @@ type captureHost struct {
 	reply   chan replyCall
 	style   chan styleCall
 	overlay chan overlayCall
+	theme   chan map[string]string
 }
 
 type replyCall struct {
@@ -56,6 +57,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		reply:   make(chan replyCall, 8),
 		style:   make(chan styleCall, 8),
 		overlay: make(chan overlayCall, 8),
+		theme:   make(chan map[string]string, 8),
 	}
 	h := &Host{
 		Send:          func(content string) { c.sent <- content },
@@ -65,6 +67,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		Reply:         func(ch, msg uint64, content string, mention bool) { c.reply <- replyCall{ch, msg, content, mention} },
 		Style:         func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
 		OpenOverlay:   func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
+		ApplyTheme:    func(palette map[string]string) { c.theme <- palette },
 		ActiveChannel: func() uint64 { return 111 },
 		ActiveGuild:   func() uint64 { return 222 },
 		SelfID:        func() uint64 { return 333 },
@@ -284,6 +287,11 @@ func TestExamplePluginsLoad(t *testing.T) {
 			t.Fatalf("example command %q not registered; have %v", want, m.CommandNames())
 		}
 	}
+	for _, want := range []string{"dracula", "nord"} {
+		if !contains(m.ThemeNames(), want) {
+			t.Fatalf("example theme %q not registered; have %v", want, m.ThemeNames())
+		}
+	}
 }
 
 // TestEverythingPluginExercisesAllSurfaces loads the shipped everything.lua in
@@ -407,6 +415,18 @@ func TestEverythingPluginExercisesAllSurfaces(t *testing.T) {
 	}
 }
 
+func equalSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func contains(list []string, want string) bool {
 	for _, s := range list {
 		if s == want {
@@ -466,6 +486,79 @@ func TestOverlayBinding(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for overlay call")
+	}
+}
+
+func TestThemeRegisterAndApply(t *testing.T) {
+	dir := writePlugin(t, "palettes", `
+		tuicord.theme("dracula", { background = "#282a36", accent = "#bd93f9" })
+		tuicord.theme("nord", { background = "#2e3440", accent = "#88c0d0" })
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{Dir: dir, Host: h})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+
+	if got, want := m.ThemeNames(), []string{"dracula", "nord"}; !equalSlice(got, want) {
+		t.Fatalf("ThemeNames = %v, want %v", got, want)
+	}
+	if m.ApplyTheme("does-not-exist") {
+		t.Fatal("ApplyTheme returned true for an unknown theme")
+	}
+	if !m.ApplyTheme("dracula") {
+		t.Fatal("ApplyTheme returned false for a registered theme")
+	}
+	select {
+	case palette := <-c.theme:
+		if palette["background"] != "#282a36" || palette["accent"] != "#bd93f9" {
+			t.Fatalf("applied palette = %v", palette)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for ApplyTheme")
+	}
+}
+
+func TestLoadConfigLua(t *testing.T) {
+	// config.lua is loaded via LoadConfig regardless of the plugins dir, and can
+	// register keybindings and commands like any Lua context.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.lua")
+	body := `
+		tuicord.keymap("ctrl+j", function() tuicord.send("from config") end)
+		tuicord.command("cfg", function() tuicord.notify("cfg", "ran") end)
+	`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, h := newCaptureHost()
+	// Point Dir at an empty dir: only config.lua should load.
+	m := NewManager(Options{Dir: t.TempDir(), Host: h})
+	defer m.Close()
+	if err := m.LoadConfig(path); err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if specs := m.KeySpecs(); len(specs) != 1 || specs[0] != "ctrl+j" {
+		t.Fatalf("config keymap not registered: %v", specs)
+	}
+	if !m.RunKey("ctrl+j") {
+		t.Fatal("RunKey returned false for config-bound key")
+	}
+	if got := recvStr(t, c.sent); got != "from config" {
+		t.Fatalf("config keymap send = %q", got)
+	}
+	if !contains(m.Loaded(), "config") {
+		t.Fatalf("config context not marked loaded: %v", m.Loaded())
+	}
+}
+
+func TestLoadConfigMissingIsNoError(t *testing.T) {
+	_, h := newCaptureHost()
+	m := NewManager(Options{Dir: t.TempDir(), Host: h})
+	defer m.Close()
+	if err := m.LoadConfig(filepath.Join(t.TempDir(), "config.lua")); err != nil {
+		t.Fatalf("missing config.lua should be no error: %v", err)
 	}
 }
 

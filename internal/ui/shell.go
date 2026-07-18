@@ -35,6 +35,10 @@ type PluginHost interface {
 	KeySpecs() []string
 	// CommandNames lists registered plugin command names for help.
 	CommandNames() []string
+	// ApplyTheme applies a registered theme by name, reporting whether it exists.
+	ApplyTheme(name string) bool
+	// ThemeNames lists registered theme names.
+	ThemeNames() []string
 }
 
 // Shell is the root widget. It shows the main view and can swap in a
@@ -70,14 +74,22 @@ func (s *Shell) SetPluginHost(host PluginHost) { s.plugins = host }
 // swaps in a full-screen overlay dismissed with Esc, like the help panel. Call
 // on the UI goroutine.
 func (s *Shell) OpenPluginOverlay(title string, lines []string) {
+	textStyle := s.styles.Cell("messages.content")
 	rows := make([]tui.Widget, 0, len(lines))
 	for _, line := range lines {
-		rows = append(rows, widget.NewText(line))
+		t := widget.NewText(line)
+		t.SetStyle(textStyle)
+		rows = append(rows, t)
 	}
 	if len(rows) == 0 {
-		rows = append(rows, widget.NewText(""))
+		empty := widget.NewText("")
+		empty.SetStyle(textStyle)
+		rows = append(rows, empty)
 	}
-	s.overlay = titled(title, widget.Column(rows...))
+	border := titled(title, widget.Column(rows...))
+	border.SetStyle(s.styles.Cell("panels.border"))
+	border.SetFocusStyle(s.styles.Cell("panels.focus"))
+	s.overlay = border
 }
 
 // NewShell wraps a MainView with overlay handling.
@@ -101,7 +113,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		detail := ";help [command] · ;quit · ;switch <query> · ;settings"
+		detail := ";help [command] · ;quit · ;switch <query> · ;settings · ;theme [name]"
 		if s.plugins != nil {
 			if names := s.plugins.CommandNames(); len(names) > 0 {
 				detail += " · plugins: ;" + strings.Join(names, " ;")
@@ -125,6 +137,8 @@ func (s *Shell) runLocalCommand(input string) bool {
 		} else {
 			s.openServerSettings(guild)
 		}
+	case "theme":
+		s.runThemeCommand(command.args)
 	default:
 		if s.plugins != nil && s.plugins.RunCommand(command.name, command.args) {
 			return true
@@ -132,6 +146,30 @@ func (s *Shell) runLocalCommand(input string) bool {
 		s.ShowNotice("Unknown local command", "Use ;help to list local commands")
 	}
 	return true
+}
+
+// runThemeCommand applies a plugin-registered theme by name, or lists the
+// available themes when called without an argument.
+func (s *Shell) runThemeCommand(args []string) {
+	if s.plugins == nil {
+		s.ShowNotice("Themes", "No plugins are loaded")
+		return
+	}
+	names := s.plugins.ThemeNames()
+	if len(args) == 0 {
+		if len(names) == 0 {
+			s.ShowNotice("Themes", "No themes registered. Plugins add them with tuicord.theme(name, palette).")
+			return
+		}
+		s.ShowNotice("Themes", "Available: "+strings.Join(names, ", ")+" · use ;theme <name>")
+		return
+	}
+	name := args[0]
+	if s.plugins.ApplyTheme(name) {
+		s.ShowNotice("Theme", "Applied "+name)
+	} else {
+		s.ShowNotice("Unknown theme", "Registered: "+strings.Join(names, ", "))
+	}
 }
 
 func (s *Shell) openForumPostPrompt(title string) {

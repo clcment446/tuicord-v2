@@ -290,6 +290,17 @@ func PluginsDir() (string, error) {
 	return filepath.Join(filepath.Dir(path), "plugins"), nil
 }
 
+// ConfigLuaPath returns the path to the optional Lua configuration file beside
+// config.toml. It is loaded independently of the plugin system, so settings and
+// keybindings can be expressed in Lua without writing a plugin.
+func ConfigLuaPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "config.lua"), nil
+}
+
 // Load reads the config file, layering it over Default. When the file does not
 // exist it writes the default file and returns Default. Decode errors are
 // returned so the user can fix a malformed file rather than silently losing it.

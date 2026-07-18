@@ -8,36 +8,45 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
 )
 
 // setupPlugins constructs the Lua plugin manager, wires its Host to the
-// orchestrator/UI, loads plugins from the config directory, and registers the
-// manager as the app's event sink and the shell's command/key host.
+// orchestrator/UI, loads the optional config.lua and the plugins directory, and
+// registers the manager as the app's event sink and the shell's command/key
+// host.
 //
-// It never fails startup: a missing directory or a broken plugin is reported to
-// the user via a toast and logged, but the client keeps running. It returns the
-// manager so the caller can Close it on shutdown, or nil when plugins are
-// disabled.
-func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config) *plugin.Manager {
-	if !cfg.PluginsEnabled() {
-		return nil
-	}
-
+// config.lua is loaded whenever it exists, independent of the plugins toggle,
+// so users can express settings and keybindings in Lua without writing a
+// plugin. The plugins directory is loaded only when [plugins].enabled.
+//
+// It never fails startup: a missing file or a broken plugin is reported to the
+// user via a toast and logged, but the client keeps running. It returns the
+// manager so the caller can Close it on shutdown, or nil when there is nothing
+// to load.
+func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles) *plugin.Manager {
 	pluginsDir, err := config.PluginsDir()
 	if err != nil {
 		shell.ShowToast("Plugins", err)
 		return nil
 	}
 	base := filepath.Dir(pluginsDir)
+	configLua := filepath.Join(base, "config.lua")
+
+	_, statErr := os.Stat(configLua)
+	hasConfigLua := statErr == nil
+	if !cfg.PluginsEnabled() && !hasConfigLua {
+		return nil
+	}
 
 	var logW *os.File
 	if f, err := os.OpenFile(filepath.Join(base, "plugin.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 		logW = f
 	}
 
-	host := newPluginHost(orch, uiApp, shell, cfg.ColorOverrides)
+	host := newPluginHost(orch, uiApp, shell, cfg.ColorOverrides, styles.Cells, cfg.Colors)
 
 	var grants map[string][]string
 	var disabled []string
@@ -58,8 +67,14 @@ func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Con
 	}
 
 	mgr := plugin.NewManager(opts)
-	if errs := mgr.Load(); len(errs) > 0 {
-		shell.ShowToast("Plugin load", errs[0])
+	// config.lua first: its settings/keybinds apply even when plugins are off.
+	if err := mgr.LoadConfig(configLua); err != nil {
+		shell.ShowToast("config.lua", err)
+	}
+	if cfg.PluginsEnabled() {
+		if errs := mgr.Load(); len(errs) > 0 {
+			shell.ShowToast("Plugin load", errs[0])
+		}
 	}
 
 	orch.SetEventSink(mgr)
@@ -71,7 +86,7 @@ func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Con
 // against. Every function marshals its work onto the UI goroutine via Post; the
 // synchronous accessors round-trip a value back so they never read App's
 // UI-goroutine-owned fields from the plugin goroutine.
-func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides) *plugin.Host {
+func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, cells map[string]screen.Style, palette config.Colors) *plugin.Host {
 	get := func(read func() uint64) uint64 {
 		ch := make(chan uint64, 1)
 		uiApp.Post(func() { ch <- read() })
@@ -90,6 +105,22 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 				if changed {
 					uiApp.Invalidate()
 				}
+			})
+		},
+		ApplyTheme: func(p map[string]string) {
+			uiApp.Post(func() {
+				palette = mergePalette(palette, p)
+				fresh := config.CellStyles(palette.Styles(), overrides)
+				// Repopulate the shared cells map in place so every widget that
+				// resolves via Styles.Cell picks up the new palette on the next
+				// render, without rebuilding the widget tree.
+				for k := range cells {
+					delete(cells, k)
+				}
+				for k, v := range fresh {
+					cells[k] = v
+				}
+				uiApp.Invalidate()
 			})
 		},
 		OpenOverlay: func(title string, lines []string) {
@@ -125,6 +156,24 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 		ActiveGuild:   func() uint64 { return get(func() uint64 { return uint64(orch.ActiveGuild()) }) },
 		SelfID:        func() uint64 { return get(func() uint64 { return uint64(orch.SelfID()) }) },
 	}
+}
+
+// mergePalette overlays hex values from a plugin theme onto the current palette.
+// Keys mirror config.Colors fields; unknown or empty values are ignored.
+func mergePalette(base config.Colors, p map[string]string) config.Colors {
+	set := func(dst *string, key string) {
+		if v, ok := p[key]; ok && v != "" {
+			*dst = v
+		}
+	}
+	set(&base.Background, "background")
+	set(&base.Text, "text")
+	set(&base.Muted, "muted")
+	set(&base.Accent, "accent")
+	set(&base.Selection, "selection")
+	set(&base.Border, "border")
+	set(&base.Error, "error")
+	return base
 }
 
 // findMessage locates a message by ID within a channel's loaded history.

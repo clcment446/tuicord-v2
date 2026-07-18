@@ -14,6 +14,7 @@ type pluginContext struct {
 	events   *eventBus
 	commands *commandRegistry
 	keys     *keyRegistry
+	themes   *themeRegistry
 	log      func(msg string)
 	grants   map[string]bool
 	dataDir  string
@@ -109,6 +110,12 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		if pctx.host.OpenOverlay != nil {
 			pctx.host.OpenOverlay(title, lines)
 		}
+		return 0
+	})
+	reg("theme", func(L *lua.LState) int {
+		name := L.CheckString(1)
+		palette := tableToStringMap(L.CheckTable(2))
+		pctx.themes.add(name, palette)
 		return 0
 	})
 

@@ -43,6 +43,7 @@ type Manager struct {
 	events   *eventBus
 	commands *commandRegistry
 	keys     *keyRegistry
+	themes   *themeRegistry
 	host     *Host
 
 	mu     sync.Mutex
@@ -64,6 +65,7 @@ func NewManager(opts Options) *Manager {
 		events:   newEventBus(),
 		commands: newCommandRegistry(),
 		keys:     newKeyRegistry(),
+		themes:   newThemeRegistry(),
 		host:     opts.Host,
 	}
 	m.rt.start()
@@ -107,6 +109,28 @@ func (m *Manager) Load() []error {
 	return errs
 }
 
+// LoadConfig runs a single Lua config file (e.g. config.lua) as a context named
+// "config". Unlike Load it is not gated on the plugins toggle: it is the seam
+// for user settings and keybindings expressed in Lua rather than as a plugin. A
+// missing file is not an error.
+func (m *Manager) LoadConfig(path string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if err := m.loadOne(pluginFile{name: "config", path: path}); err != nil {
+		m.logf("config.lua failed: %v", err)
+		return err
+	}
+	m.mu.Lock()
+	m.loaded = append(m.loaded, "config")
+	m.mu.Unlock()
+	m.logf("config.lua loaded")
+	return nil
+}
+
 // loadOne creates a state, installs the API, and runs the plugin file. All Lua
 // work happens on the plugin goroutine.
 func (m *Manager) loadOne(f pluginFile) error {
@@ -123,6 +147,7 @@ func (m *Manager) loadOne(f pluginFile) error {
 			events:   m.events,
 			commands: m.commands,
 			keys:     m.keys,
+			themes:   m.themes,
 			log:      func(msg string) { m.logf("[%s] %s", f.name, msg) },
 			grants:   grantSet(m.opts.Grants[f.name]),
 			dataDir:  m.pluginDataDir(f.name),
@@ -177,6 +202,30 @@ func (m *Manager) RunCommand(name string, args []string) bool {
 			m.onCallbackError(h.plugin, err)
 		}
 	})
+	return true
+}
+
+// ThemeNames returns the registered theme names, sorted, for a ;theme listing.
+func (m *Manager) ThemeNames() []string {
+	if m == nil {
+		return nil
+	}
+	return m.themes.names()
+}
+
+// ApplyTheme applies a registered theme by name via the Host, reporting whether
+// a theme with that name exists.
+func (m *Manager) ApplyTheme(name string) bool {
+	if m == nil {
+		return false
+	}
+	palette, ok := m.themes.lookup(name)
+	if !ok {
+		return false
+	}
+	if m.host != nil && m.host.ApplyTheme != nil {
+		m.host.ApplyTheme(palette)
+	}
 	return true
 }
 
