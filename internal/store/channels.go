@@ -32,13 +32,20 @@ func (s *Store) RemoveChannel(id ChannelID) {
 		}
 	}
 	if !s.removeChannel(id) {
-		// A delete can race channel hydration. Still advance the lifetime so an
-		// older in-flight history response cannot create a message-only cache.
+		// A delete can race channel hydration. Still clear any message-only state
+		// and advance the lifetime so older async responses cannot recreate it.
+		delete(s.messages, id)
+		delete(s.deletedMessages, id)
+		delete(s.prunedDeleteRevision, id)
+		delete(s.unread, id)
+		delete(s.pings, id)
 		s.channelGeneration[id]++
+		s.touchMeta()
 	}
 }
 
-// RemoveGuild deletes a guild and all state owned by it.
+// RemoveGuild deletes a guild and all state owned by it. Even an unknown guild
+// advances its generation so an older directory request cannot recreate it.
 func (s *Store) RemoveGuild(id GuildID) {
 	for _, channelID := range append([]ChannelID(nil), s.channelOrder[id]...) {
 		s.removeChannel(channelID)
@@ -49,6 +56,7 @@ func (s *Store) RemoveGuild(id GuildID) {
 	delete(s.guildEmojis, id)
 	delete(s.guildStickers, id)
 	delete(s.guilds, id)
+	s.guildGeneration[id]++
 	for i, guildID := range s.guildOrder {
 		if guildID == id {
 			s.guildOrder = append(s.guildOrder[:i], s.guildOrder[i+1:]...)
@@ -92,6 +100,7 @@ func (s *Store) removeChannel(id ChannelID) bool {
 	delete(s.channels, id)
 	delete(s.messages, id)
 	delete(s.deletedMessages, id)
+	delete(s.prunedDeleteRevision, id)
 	delete(s.unread, id)
 	delete(s.pings, id)
 	s.channelGeneration[id]++
@@ -139,6 +148,46 @@ func (s *Store) SetThreadJoined(id ChannelID, joined bool) bool {
 	s.channels[id] = c
 	s.touchMeta()
 	return true
+}
+
+// SyncActiveThreads applies Discord's authoritative THREAD_LIST_SYNC semantics.
+// A nil parents slice covers the whole guild; a non-nil slice covers only those
+// parent channel IDs. Cached active threads absent from incoming are removed,
+// while archived and out-of-scope threads remain untouched. Removed IDs are
+// returned so App can invalidate their async resource gates.
+func (s *Store) SyncActiveThreads(guild GuildID, parents []ChannelID, incoming []Channel) []ChannelID {
+	present := make(map[ChannelID]struct{}, len(incoming))
+	for _, thread := range incoming {
+		present[thread.ID] = struct{}{}
+	}
+	var scope map[ChannelID]struct{}
+	if parents != nil {
+		scope = make(map[ChannelID]struct{}, len(parents))
+		for _, parent := range parents {
+			scope[parent] = struct{}{}
+		}
+	}
+	var removed []ChannelID
+	for _, id := range append([]ChannelID(nil), s.channelOrder[guild]...) {
+		thread := s.channels[id]
+		if thread.Kind != ChannelThread || thread.Thread == nil || thread.Thread.Archived {
+			continue
+		}
+		if scope != nil {
+			if _, ok := scope[thread.ParentID]; !ok {
+				continue
+			}
+		}
+		if _, ok := present[id]; ok {
+			continue
+		}
+		s.RemoveThread(id)
+		removed = append(removed, id)
+	}
+	for _, thread := range incoming {
+		s.UpsertThread(thread)
+	}
+	return removed
 }
 
 // Threads returns the active (non-archived) threads parented to parent, sorted

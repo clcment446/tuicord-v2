@@ -27,6 +27,20 @@ func (s *Store) RemoveMessage(channel ChannelID, id MessageID) bool {
 		s.deletedMessages[channel] = deleted
 	}
 	deleted[id] = s.nextRevision()
+	if len(deleted) > s.historyLimit {
+		var oldestID MessageID
+		var oldestRevision uint64
+		for messageID, revision := range deleted {
+			if oldestID == 0 || revision < oldestRevision || (revision == oldestRevision && messageID < oldestID) {
+				oldestID = messageID
+				oldestRevision = revision
+			}
+		}
+		delete(deleted, oldestID)
+		if oldestRevision > s.prunedDeleteRevision[channel] {
+			s.prunedDeleteRevision[channel] = oldestRevision
+		}
+	}
 	r := s.messages[channel]
 	if r == nil {
 		return false

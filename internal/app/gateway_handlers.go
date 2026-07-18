@@ -126,6 +126,7 @@ func (a *App) registerGatewayMemberHandlers() {
 		guildID := store.GuildID(e.GuildID)
 		roleID := store.RoleID(e.RoleID)
 		a.ui.Post(func() {
+			a.invalidateRoleLoad(guildID)
 			a.store.RemoveRole(guildID, roleID)
 			if a.onChange != nil {
 				a.onChange()

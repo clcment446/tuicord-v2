@@ -51,6 +51,64 @@ func TestHandleThreadListSync(t *testing.T) {
 	}
 }
 
+func TestThreadListSyncRemovesOnlyMissingActiveThreadsInChannelScope(t *testing.T) {
+	a := &App{store: store.New(0), ui: syncPoster{}}
+	a.store.UpsertGuild(store.Guild{ID: 1})
+	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 1, Kind: store.ChannelText})
+	a.store.UpsertChannel(store.Channel{ID: 200, GuildID: 1, Kind: store.ChannelText})
+	a.store.UpsertThread(store.Channel{ID: 10, GuildID: 1, ParentID: 100, Thread: &store.ThreadMeta{}})
+	a.store.UpsertThread(store.Channel{ID: 11, GuildID: 1, ParentID: 100, Thread: &store.ThreadMeta{Archived: true}})
+	a.store.UpsertThread(store.Channel{ID: 20, GuildID: 1, ParentID: 200, Thread: &store.ThreadMeta{}})
+
+	a.handleThreadListSync(&gateway.ThreadListSyncEvent{
+		GuildID:    1,
+		ChannelIDs: []discord.ChannelID{100},
+		Threads:    []discord.Channel{{ID: 12, Type: discord.GuildPublicThread, ParentID: 100, Name: "present"}},
+	})
+
+	if _, ok := a.store.Channel(10); ok {
+		t.Fatal("missing active thread in scoped parent survived authoritative sync")
+	}
+	if _, ok := a.store.Channel(11); !ok {
+		t.Fatal("scoped sync removed archived thread")
+	}
+	if _, ok := a.store.Channel(20); !ok {
+		t.Fatal("scoped sync removed active thread under unrelated parent")
+	}
+	if _, ok := a.store.Channel(12); !ok {
+		t.Fatal("sync did not insert returned active thread")
+	}
+}
+
+func TestThreadListSyncNilScopeRemovesMissingActiveThreadsAcrossGuildOnly(t *testing.T) {
+	a := &App{store: store.New(0), ui: syncPoster{}}
+	for _, guild := range []store.GuildID{1, 2} {
+		a.store.UpsertGuild(store.Guild{ID: guild})
+	}
+	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 1, Kind: store.ChannelText})
+	a.store.UpsertChannel(store.Channel{ID: 200, GuildID: 1, Kind: store.ChannelText})
+	a.store.UpsertChannel(store.Channel{ID: 300, GuildID: 2, Kind: store.ChannelText})
+	a.store.UpsertThread(store.Channel{ID: 10, GuildID: 1, ParentID: 100, Thread: &store.ThreadMeta{}})
+	a.store.UpsertThread(store.Channel{ID: 20, GuildID: 1, ParentID: 200, Thread: &store.ThreadMeta{}})
+	a.store.UpsertThread(store.Channel{ID: 30, GuildID: 2, ParentID: 300, Thread: &store.ThreadMeta{}})
+
+	// A nil ChannelIDs field means the list covers every parent in guild 1.
+	a.handleThreadListSync(&gateway.ThreadListSyncEvent{
+		GuildID: 1,
+		Threads: []discord.Channel{{ID: 10, Type: discord.GuildPublicThread, ParentID: 100}},
+	})
+
+	if _, ok := a.store.Channel(10); !ok {
+		t.Fatal("returned guild thread was removed")
+	}
+	if _, ok := a.store.Channel(20); ok {
+		t.Fatal("missing guild-wide active thread survived authoritative sync")
+	}
+	if _, ok := a.store.Channel(30); !ok {
+		t.Fatal("guild-wide sync removed thread from another guild")
+	}
+}
+
 func TestHandleThreadMembersUpdateOwnJoinLeave(t *testing.T) {
 	a := &App{store: store.New(0), ui: syncPoster{}, selfID: 42}
 	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 1, Kind: store.ChannelText})

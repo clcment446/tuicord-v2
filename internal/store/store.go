@@ -301,8 +301,9 @@ const DefaultHistoryLimit = 200
 type Store struct {
 	historyLimit int
 
-	guildOrder []GuildID
-	guilds     map[GuildID]Guild
+	guildOrder      []GuildID
+	guilds          map[GuildID]Guild
+	guildGeneration map[GuildID]uint64
 
 	channelOrder map[GuildID][]ChannelID
 	channels     map[ChannelID]Channel
@@ -312,6 +313,10 @@ type Store struct {
 	// that was already in flight when a delete arrived must not resurrect that
 	// message. Explicit creates clear their own tombstone.
 	deletedMessages map[ChannelID]map[MessageID]uint64
+	// prunedDeleteRevision records the newest tombstone evicted by the bounded
+	// tombstone cache. A history request older than this watermark must be
+	// discarded because the store can no longer identify every in-flight delete.
+	prunedDeleteRevision map[ChannelID]uint64
 	// channelGeneration changes whenever a channel is created or deleted. Async
 	// history requests snapshot it so a response for a deleted (or recreated)
 	// channel cannot recreate that channel's message ring.
@@ -369,19 +374,21 @@ func New(historyLimit int) *Store {
 		historyLimit = DefaultHistoryLimit
 	}
 	return &Store{
-		historyLimit:      historyLimit,
-		guilds:            map[GuildID]Guild{},
-		channelOrder:      map[GuildID][]ChannelID{},
-		channels:          map[ChannelID]Channel{},
-		messages:          map[ChannelID]*ring{},
-		deletedMessages:   map[ChannelID]map[MessageID]uint64{},
-		channelGeneration: map[ChannelID]uint64{},
-		members:           map[GuildID]map[UserID]Member{},
-		roles:             map[GuildID]map[RoleID]Role{},
-		unread:            map[ChannelID]int{},
-		pings:             map[ChannelID]int{},
-		guildEmojis:       map[GuildID][]GuildEmoji{},
-		guildStickers:     map[GuildID][]GuildSticker{},
+		historyLimit:         historyLimit,
+		guilds:               map[GuildID]Guild{},
+		guildGeneration:      map[GuildID]uint64{},
+		channelOrder:         map[GuildID][]ChannelID{},
+		channels:             map[ChannelID]Channel{},
+		messages:             map[ChannelID]*ring{},
+		deletedMessages:      map[ChannelID]map[MessageID]uint64{},
+		prunedDeleteRevision: map[ChannelID]uint64{},
+		channelGeneration:    map[ChannelID]uint64{},
+		members:              map[GuildID]map[UserID]Member{},
+		roles:                map[GuildID]map[RoleID]Role{},
+		unread:               map[ChannelID]int{},
+		pings:                map[ChannelID]int{},
+		guildEmojis:          map[GuildID][]GuildEmoji{},
+		guildStickers:        map[GuildID][]GuildSticker{},
 	}
 }
 
@@ -441,9 +448,27 @@ func (s *Store) UpsertGuild(g Guild) {
 	}
 	if _, ok := s.guilds[g.ID]; !ok {
 		s.guildOrder = append(s.guildOrder, g.ID)
+		s.guildGeneration[g.ID]++
 	}
 	s.guilds[g.ID] = g
 	s.touchMeta()
+}
+
+// GuildGeneration identifies the current lifetime of a guild. It advances on
+// creation and permanent deletion, including deletes that race initial REST
+// hydration of an otherwise unknown guild.
+func (s *Store) GuildGeneration(id GuildID) uint64 {
+	return s.guildGeneration[id]
+}
+
+// GuildGenerations returns a snapshot suitable for validating a directory
+// request whose result IDs are not known until after the request completes.
+func (s *Store) GuildGenerations() map[GuildID]uint64 {
+	out := make(map[GuildID]uint64, len(s.guildGeneration))
+	for id, generation := range s.guildGeneration {
+		out[id] = generation
+	}
+	return out
 }
 
 // SetGuildFolders records the guild-folder layout from READY (or a later
@@ -553,6 +578,16 @@ func (s *Store) UpsertChannel(c Channel) {
 // on creation and deletion and is safe to snapshot before an async request.
 func (s *Store) ChannelGeneration(id ChannelID) uint64 {
 	return s.channelGeneration[id]
+}
+
+// ChannelGenerations returns a snapshot for loaders (such as the guild/DM
+// directory) that discover channel IDs only after their request has begun.
+func (s *Store) ChannelGenerations() map[ChannelID]uint64 {
+	out := make(map[ChannelID]uint64, len(s.channelGeneration))
+	for id, generation := range s.channelGeneration {
+		out[id] = generation
+	}
+	return out
 }
 
 // Channel returns the channel with id, if known.
@@ -784,10 +819,22 @@ func (s *Store) Messages(channel ChannelID) []Message {
 func (s *Store) Revision() uint64 { return s.rev }
 
 // MessageTombstoned reports whether a delete has been observed for message.
-// Tombstones survive until an explicit create for the same ID and prevent stale
-// REST pages from resurrecting deleted messages.
+// Tombstones survive until an explicit create for the same ID or bounded-cache
+// eviction and prevent stale REST pages from resurrecting deleted messages.
 func (s *Store) MessageTombstoned(channel ChannelID, message MessageID) bool {
 	return s.deletedMessages[channel][message] != 0
+}
+
+// TombstonesPrunedSince reports that deletes newer than requestRevision were
+// evicted from the bounded tombstone cache. A response from that request must be
+// discarded wholesale because its stale copies can no longer be identified.
+func (s *Store) TombstonesPrunedSince(channel ChannelID, requestRevision uint64) bool {
+	return s.prunedDeleteRevision[channel] > requestRevision
+}
+
+// MessageTombstoneCount exposes the bounded cache size for diagnostics/tests.
+func (s *Store) MessageTombstoneCount(channel ChannelID) int {
+	return len(s.deletedMessages[channel])
 }
 
 func (s *Store) clearMessageTombstone(channel ChannelID, message MessageID) {

@@ -252,6 +252,33 @@ func TestDeleteTombstoneSurvivesMissingRingUntilExplicitCreate(t *testing.T) {
 	}
 }
 
+func TestMessageDeleteTombstonesAreBoundedByHistoryLimit(t *testing.T) {
+	s := New(3)
+	baseline := s.Revision()
+	for id := MessageID(1); id <= 10; id++ {
+		s.RemoveMessage(7, id)
+	}
+	if got := s.MessageTombstoneCount(7); got != 3 {
+		t.Fatalf("tombstones = %d, want history limit 3", got)
+	}
+	for id := MessageID(1); id <= 7; id++ {
+		if s.MessageTombstoned(7, id) {
+			t.Fatalf("old tombstone %d survived bounded eviction", id)
+		}
+	}
+	for id := MessageID(8); id <= 10; id++ {
+		if !s.MessageTombstoned(7, id) {
+			t.Fatalf("new tombstone %d was evicted", id)
+		}
+	}
+	if !s.TombstonesPrunedSince(7, baseline) {
+		t.Fatal("tombstone eviction did not invalidate an older in-flight request")
+	}
+	if s.TombstonesPrunedSince(7, s.Revision()) {
+		t.Fatal("tombstone watermark invalidated a request started after pruning")
+	}
+}
+
 func TestPrependMessagesDeduplicatesOverlapAndPreservesOrderAtCapacity(t *testing.T) {
 	s := New(5)
 	s.SetMessages(7, []Message{{ID: 4}, {ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
