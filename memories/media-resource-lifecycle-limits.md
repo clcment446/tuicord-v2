@@ -61,3 +61,15 @@ workers, reject new posts, drain already accepted shutdown-aware closures, and
 flush the finite final Kitty delete backlog before terminal restoration closes
 the writer. Async temp-file producers use `TryPost`; a rejected post and an
 accepted closure that later observes shutdown both delete the unowned file.
+
+Clipboard operation deadlines are UI completions, not lifecycle exits: marshal
+them back to clear busy/cancel state and show a timeout, while lifecycle
+cancellation stays silent. Protect the state so rejected posts and `Close` can
+both clear it without racing.
+
+mpv SHM snapshots need a per-frame byte cap and an independent total retained
+byte budget. Copy source files with bounded IO, remove partial destinations on
+all errors, and account snapshot sizes during eviction and final cleanup. Since
+the Kitty framer has already isolated a complete SHM APC command, an oversized
+or unreadable frame must be dropped as a whole command; forwarding part of it
+would leave later terminal output inside Kitty's payload stream.

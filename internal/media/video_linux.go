@@ -7,7 +7,9 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -41,7 +43,13 @@ type videoSession struct {
 	done       chan struct{}
 	ipcPath    string
 	shmMu      sync.Mutex
-	shmFiles   []string
+	shmFiles   []shmSnapshot
+	shmBytes   int64
+}
+
+type shmSnapshot struct {
+	path  string
+	bytes int64
 }
 
 var videoIPCSequence atomic.Uint64
@@ -141,6 +149,9 @@ func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit fun
 		defer close(session.readerDone)
 		buf := make([]byte, 32*1024)
 		var framer kittyOutputFramer
+		bounded := p.cfg.Bounded()
+		frameMaxBytes := min(bounded.MaxResponseBytes, bounded.DecodedCacheMaxBytes)
+		retainedMaxBytes := bounded.DecodedCacheMaxBytes
 		emit := func(chunk []byte) {
 			if len(chunk) == 0 || out == nil {
 				return
@@ -156,13 +167,14 @@ func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit fun
 			n, err := master.Read(buf)
 			if n > 0 {
 				for _, chunk := range framer.Push(buf[:n]) {
-					if stable, path, stableErr := stabilizeKittySHM(chunk, "/dev/shm"); stableErr == nil {
-						chunk = stable
-						if path != "" {
-							session.trackSHM(path)
-						}
+					stable, ok := session.snapshotKittyChunk(chunk, "/dev/shm", frameMaxBytes, retainedMaxBytes)
+					if !ok {
+						// Framing gives us the complete APC command. Dropping it whole on
+						// an oversized or unreadable SHM object keeps later terminal bytes
+						// outside Kitty's payload parser.
+						continue
 					}
-					emit(chunk)
+					emit(stable)
 				}
 			}
 			if err != nil {
@@ -196,71 +208,155 @@ func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit fun
 	return nil
 }
 
-func (s *videoSession) trackSHM(path string) {
+func (s *videoSession) snapshotKittyChunk(chunk []byte, dir string, frameMaxBytes, retainedMaxBytes int64) ([]byte, bool) {
+	stable, path, size, err := stabilizeKittySHMWithLimit(chunk, dir, frameMaxBytes)
+	if err != nil {
+		return nil, false
+	}
+	if path != "" && !s.trackSHM(path, size, retainedMaxBytes) {
+		return nil, false
+	}
+	return stable, true
+}
+
+// trackSHM retains a snapshot only after evicting enough old snapshots to stay
+// within the byte budget. A conforming terminal unlinks consumed objects;
+// Remove remains harmless in that case. It returns false and removes path when
+// one frame cannot fit the total budget.
+func (s *videoSession) trackSHM(path string, size, maxBytes int64) bool {
+	if path == "" {
+		return true
+	}
+	if size < 0 || maxBytes <= 0 || size > maxBytes {
+		_ = os.Remove(path)
+		return false
+	}
+
 	s.shmMu.Lock()
-	defer s.shmMu.Unlock()
-	s.shmFiles = append(s.shmFiles, path)
-	// A conforming terminal unlinks consumed objects. Bound leftovers for
-	// terminals that do not, while retaining several seconds of frame history.
-	if len(s.shmFiles) > 120 {
-		_ = os.Remove(s.shmFiles[0])
+	var evicted []shmSnapshot
+	const maxSnapshotFiles = 120
+	for len(s.shmFiles) > 0 && (len(s.shmFiles) >= maxSnapshotFiles || s.shmBytes > maxBytes-size) {
+		evicted = append(evicted, s.shmFiles[0])
+		s.shmBytes -= s.shmFiles[0].bytes
 		s.shmFiles = s.shmFiles[1:]
 	}
+	s.shmFiles = append(s.shmFiles, shmSnapshot{path: path, bytes: size})
+	s.shmBytes += size
+	s.shmMu.Unlock()
+
+	for _, snapshot := range evicted {
+		_ = os.Remove(snapshot.path)
+	}
+	return true
 }
 
 func (s *videoSession) cleanupSHM() {
 	s.shmMu.Lock()
-	files := append([]string(nil), s.shmFiles...)
+	files := append([]shmSnapshot(nil), s.shmFiles...)
 	s.shmFiles = nil
+	s.shmBytes = 0
 	s.shmMu.Unlock()
-	for _, path := range files {
-		_ = os.Remove(path)
+	for _, snapshot := range files {
+		_ = os.Remove(snapshot.path)
 	}
 }
 
-// stabilizeKittySHM snapshots an mpv t=s frame and rewrites its Kitty payload
-// to a unique object name. mpv reuses its source object; forwarding that name
-// directly lets it overwrite the pixels before the real terminal consumes the
-// queued command, especially across pause/resume.
+// stabilizeKittySHM snapshots an mpv t=s frame with the default media response
+// limit. Keep this compatibility seam for package callers and tests; playback
+// passes its configured limit to stabilizeKittySHMWithLimit.
 func stabilizeKittySHM(packet []byte, dir string) ([]byte, string, error) {
+	stable, path, _, err := stabilizeKittySHMWithLimit(packet, dir, DefaultMaxResponseBytes)
+	return stable, path, err
+}
+
+// stabilizeKittySHMWithLimit snapshots an mpv t=s frame and rewrites its Kitty
+// payload to a unique object name. Source reads are capped at maxBytes+1 and the
+// destination receives at most maxBytes, so a malicious or raced SHM object can
+// never cause an unbounded allocation or write.
+func stabilizeKittySHMWithLimit(packet []byte, dir string, maxBytes int64) ([]byte, string, int64, error) {
 	start := bytes.Index(packet, kittyAPCStart)
 	if start < 0 {
-		return packet, "", nil
+		return packet, "", 0, nil
 	}
 	end := bytes.Index(packet[start+len(kittyAPCStart):], kittyAPCEnd)
 	if end < 0 {
-		return packet, "", nil
+		return packet, "", 0, nil
 	}
 	end += start + len(kittyAPCStart)
 	body := packet[start+len(kittyAPCStart) : end]
 	semicolon := bytes.IndexByte(body, ';')
 	if semicolon < 0 || !bytes.Contains(body[:semicolon], []byte("t=s")) {
-		return packet, "", nil
+		return packet, "", 0, nil
 	}
-	nameBytes, err := base64.StdEncoding.DecodeString(string(body[semicolon+1:]))
+	if maxBytes <= 0 {
+		maxBytes = DefaultMaxResponseBytes
+	}
+	payload := body[semicolon+1:]
+	// POSIX SHM names are tiny. Bounding the decoded name also avoids allocating
+	// from an arbitrarily large malformed Kitty command.
+	const maxSHMNameBytes = 4096
+	if len(payload) > base64.StdEncoding.EncodedLen(maxSHMNameBytes) {
+		return nil, "", 0, fmt.Errorf("media: mpv shared-memory name is too long")
+	}
+	nameBytes := make([]byte, base64.StdEncoding.DecodedLen(len(payload)))
+	n, err := base64.StdEncoding.Decode(nameBytes, payload)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
+	}
+	nameBytes = nameBytes[:n]
+	if len(nameBytes) == 0 || len(nameBytes) > maxSHMNameBytes || bytes.IndexByte(nameBytes, 0) >= 0 {
+		return nil, "", 0, fmt.Errorf("media: invalid mpv shared-memory name")
 	}
 	sourceName := string(nameBytes)
 	source := sourceName
 	if !filepath.IsAbs(source) {
 		source = filepath.Join(dir, source)
 	}
-	pixels, err := os.ReadFile(source)
+	src, err := os.Open(source)
 	if err != nil {
-		return nil, "", err
+		return nil, "", 0, err
 	}
+	defer src.Close()
+
 	stableName := fmt.Sprintf("tuicord-kitty-%d-%d", os.Getpid(), videoIPCSequence.Add(1))
 	stablePath := filepath.Join(dir, stableName)
-	if err := os.WriteFile(stablePath, pixels, 0o600); err != nil {
-		return nil, "", err
+	dst, err := os.OpenFile(stablePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, "", 0, err
 	}
+	keep := false
+	defer func() {
+		_ = dst.Close()
+		if !keep {
+			_ = os.Remove(stablePath)
+		}
+	}()
+
+	written, copyErr := io.CopyN(dst, src, maxBytes)
+	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+		return nil, "", 0, copyErr
+	}
+	if written == maxBytes {
+		var extra [1]byte
+		extraN, readErr := src.Read(extra[:])
+		if extraN > 0 {
+			return nil, "", 0, fmt.Errorf("%w: limit is %d bytes", ErrVideoFrameTooLarge, maxBytes)
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, "", 0, readErr
+		}
+	}
+	if err := dst.Close(); err != nil {
+		return nil, "", 0, err
+	}
+	keep = true
+
 	encoded := base64.StdEncoding.EncodeToString([]byte(stableName))
 	rewritten := make([]byte, 0, len(packet)+len(encoded))
 	rewritten = append(rewritten, packet[:start+len(kittyAPCStart)+semicolon+1]...)
 	rewritten = append(rewritten, encoded...)
 	rewritten = append(rewritten, packet[end:]...)
-	return rewritten, stablePath, nil
+	return rewritten, stablePath, written, nil
 }
 
 // Stop ends any current playback. It does not clear mpv's final frame from the

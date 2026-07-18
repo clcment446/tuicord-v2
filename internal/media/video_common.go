@@ -101,6 +101,11 @@ func (f *kittyOutputFramer) Flush() []byte {
 // an inline mpv pty session.
 var ErrVideoUnsupported = errors.New("media: inline video is not supported on this platform")
 
+// ErrVideoFrameTooLarge reports an mpv shared-memory frame that exceeds the
+// configured media byte limit. Callers drop the complete Kitty APC command so
+// no partial graphics payload can leak into the terminal stream.
+var ErrVideoFrameTooLarge = errors.New("media: mpv shared-memory frame exceeds the configured size limit")
+
 // Rect is a cell-space rectangle on the terminal, addressed from a 0-based
 // origin at the top-left of the screen. It is the region an inline video renders
 // into.
