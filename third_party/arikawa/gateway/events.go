@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	stdjson "encoding/json"
 	"errors"
 	"strconv"
 	"strings"
@@ -500,12 +501,56 @@ type MessageCreateEvent struct {
 	Member *discord.Member `json:"member,omitempty"`
 }
 
-// MessageUpdateEvent is a dispatch event.
+// MessageUpdateEvent is a dispatch event. MESSAGE_UPDATE is a partial payload:
+// only ID and ChannelID are guaranteed. Fields records which patchable message
+// fields were actually present so consumers can distinguish omission from an
+// explicitly empty or false value. Fields is nil for manually constructed
+// events, which preserves the historical full-message behavior.
 //
 // https://discord.com/developers/docs/topics/gateway#messages
 type MessageUpdateEvent struct {
 	discord.Message
-	Member *discord.Member `json:"member,omitempty"`
+	Member *discord.Member      `json:"member,omitempty"`
+	Fields *MessageUpdateFields `json:"-"`
+}
+
+// MessageUpdateFields records JSON-key presence for fields commonly merged
+// into a cached message.
+type MessageUpdateFields struct {
+	Content     bool
+	Flags       bool
+	Attachments bool
+	Embeds      bool
+	Stickers    bool
+	Components  bool
+	Pinned      bool
+}
+
+// UnmarshalJSON decodes the partial message and records field presence. Empty
+// arrays, the empty string, zero flags, and false pinned values remain present.
+func (e *MessageUpdateEvent) UnmarshalJSON(data []byte) error {
+	type plain MessageUpdateEvent
+	var decoded plain
+	if err := stdjson.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var raw map[string]stdjson.RawMessage
+	if err := stdjson.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	_, content := raw["content"]
+	_, flags := raw["flags"]
+	_, attachments := raw["attachments"]
+	_, embeds := raw["embeds"]
+	_, stickers := raw["sticker_items"]
+	_, components := raw["components"]
+	_, pinned := raw["pinned"]
+	*e = MessageUpdateEvent(decoded)
+	e.Fields = &MessageUpdateFields{
+		Content: content, Flags: flags, Attachments: attachments, Embeds: embeds,
+		Stickers: stickers, Components: components, Pinned: pinned,
+	}
+	return nil
 }
 
 // MessageDeleteEvent is a dispatch event.

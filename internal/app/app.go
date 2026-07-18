@@ -308,6 +308,7 @@ type App struct {
 
 	onReady           func()
 	onChange          func()
+	onGuildChange     func()
 	onError           func(error)
 	onIncomingMessage func(store.Message)
 	events            EventSink
@@ -551,9 +552,13 @@ func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
 // has populated the store, so the UI can select an initial channel.
 func (a *App) OnReady(fn func()) { a.onReady = fn }
 
-// OnChange registers a callback run (on the UI goroutine) after an incoming
-// message updates the store, so the UI can refresh unread badges.
+// OnChange registers a callback run on the UI goroutine after channel-scoped
+// state changes, so the UI can refresh channel rows and unread badges.
 func (a *App) OnChange(fn func()) { a.onChange = fn }
+
+// OnGuildChange registers a callback run on the UI goroutine after the guild
+// directory changes. Guild lifecycle events also invoke OnChange.
+func (a *App) OnGuildChange(fn func()) { a.onGuildChange = fn }
 
 // OnIncomingMessage registers a callback for a newly received remote message.
 // It runs on the UI goroutine after the message has been added to the store.
@@ -635,22 +640,29 @@ func (a *App) handleThreadListSync(e *gateway.ThreadListSyncEvent) {
 // to or removed from a thread.
 func (a *App) handleThreadMembersUpdate(e *gateway.ThreadMembersUpdateEvent) {
 	id := store.ChannelID(e.ID)
-	added := false
-	for _, m := range e.AddedMembers {
-		if store.UserID(m.UserID) == a.selfID && a.selfID != 0 {
-			added = true
-		}
-	}
-	removed := false
-	for _, uid := range e.RemovedMemberIDs {
-		if store.UserID(uid) == a.selfID && a.selfID != 0 {
-			removed = true
-		}
-	}
-	if !added && !removed {
-		return
-	}
+	addedMembers := append([]discord.ThreadMember(nil), e.AddedMembers...)
+	removedMemberIDs := append([]discord.UserID(nil), e.RemovedMemberIDs...)
 	a.ui.Post(func() {
+		if a.selfID == 0 {
+			return
+		}
+		added := false
+		for _, member := range addedMembers {
+			if store.UserID(member.UserID) == a.selfID {
+				added = true
+				break
+			}
+		}
+		removed := false
+		for _, userID := range removedMemberIDs {
+			if store.UserID(userID) == a.selfID {
+				removed = true
+				break
+			}
+		}
+		if !added && !removed {
+			return
+		}
 		a.store.SetThreadJoined(id, added)
 		if a.onChange != nil {
 			a.onChange()
@@ -699,9 +711,97 @@ func (a *App) handleGuildCreate(e *gateway.GuildCreateEvent) {
 	guild := *e
 	a.ui.Post(func() {
 		ingestGuild(a.store, &guild)
-		a.markRolesLoaded(store.GuildID(guild.ID))
-		if len(guild.Channels) > 0 {
-			a.markChannelsLoaded(store.GuildID(guild.ID))
+		if !guild.Unavailable {
+			a.markRolesLoaded(store.GuildID(guild.ID))
+			if len(guild.Channels) > 0 {
+				a.markChannelsLoaded(store.GuildID(guild.ID))
+			}
+		}
+		if a.onGuildChange != nil {
+			a.onGuildChange()
+		}
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleGuildUpdate(e *gateway.GuildUpdateEvent) {
+	guild := store.Guild{
+		ID:             store.GuildID(e.ID),
+		Name:           e.Name,
+		OwnerID:        store.UserID(e.OwnerID),
+		RulesChannelID: store.ChannelID(e.RulesChannelID),
+	}
+	a.ui.Post(func() {
+		a.store.UpsertGuild(guild)
+		if a.onGuildChange != nil {
+			a.onGuildChange()
+		}
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleGuildDelete(e *gateway.GuildDeleteEvent) {
+	id := store.GuildID(e.ID)
+	unavailable := e.Unavailable
+	a.ui.Post(func() {
+		if unavailable {
+			if !a.store.SetGuildUnavailable(id, true) {
+				a.store.UpsertGuild(store.Guild{ID: id, Unavailable: true})
+			}
+		} else {
+			a.store.RemoveGuild(id)
+			if a.activeGuild == id {
+				a.SetActive(0, 0)
+			}
+		}
+		if a.onGuildChange != nil {
+			a.onGuildChange()
+		}
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleChannelUpsert(channel discord.Channel) {
+	converted := convertChannel(channel)
+	isDM := converted.Kind == store.ChannelDM
+	if isDM {
+		converted.GuildID = DirectMessagesGuildID
+	}
+	a.ui.Post(func() {
+		if isDM {
+			a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
+			wire := channel
+			wire.GuildID = discord.GuildID(DirectMessagesGuildID)
+			ingestPrivateChannel(a.store, wire)
+		} else {
+			a.store.UpsertChannel(converted)
+		}
+		if a.onGuildChange != nil && isDM {
+			a.onGuildChange()
+		}
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
+}
+
+func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
+	id := store.ChannelID(e.ID)
+	a.ui.Post(func() {
+		a.store.RemoveChannel(id)
+		if a.activeChannel != 0 {
+			if _, ok := a.store.Channel(a.activeChannel); !ok {
+				a.SetActive(a.activeGuild, 0)
+			}
+		}
+		if a.onChange != nil {
+			a.onChange()
 		}
 	})
 }
@@ -795,16 +895,42 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 	patch := convertMessage(e.Message)
 	channel := patch.ChannelID
 	id := patch.ID
+	var fields *gateway.MessageUpdateFields
+	if e.Fields != nil {
+		copied := *e.Fields
+		fields = &copied
+	}
+	componentTreeLegacy := convertComponentTree(e.Message.Components, false)
+	componentTreeV2 := convertComponentTree(e.Message.Components, true)
+	guildID := uint64(e.GuildID)
 	a.ui.Post(func() {
 		a.store.UpdateMessage(channel, id, func(m *store.Message) {
-			m.Content = patch.Content
-			m.Flags = patch.Flags
-			m.Attachments = patch.Attachments
-			m.Embeds = patch.Embeds
-			m.Stickers = patch.Stickers
-			m.Components = patch.Components
-			m.ComponentTree = patch.ComponentTree
-			m.Pinned = patch.Pinned
+			allFields := fields == nil
+			if allFields || fields.Content {
+				m.Content = patch.Content
+			}
+			if allFields || fields.Flags {
+				m.Flags = patch.Flags
+			}
+			if allFields || fields.Attachments {
+				m.Attachments = patch.Attachments
+			}
+			if allFields || fields.Embeds {
+				m.Embeds = patch.Embeds
+			}
+			if allFields || fields.Stickers {
+				m.Stickers = patch.Stickers
+			}
+			if allFields || fields.Components {
+				m.Components = patch.Components
+				m.ComponentTree = componentTreeLegacy
+				if m.Flags&uint64(discord.IsComponentsV2) != 0 {
+					m.ComponentTree = componentTreeV2
+				}
+			}
+			if allFields || fields.Pinned {
+				m.Pinned = patch.Pinned
+			}
 		})
 		if a.onChange != nil {
 			a.onChange()
@@ -812,7 +938,7 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 		a.emit("message.update", map[string]any{
 			"id":         uint64(id),
 			"channel_id": uint64(channel),
-			"guild_id":   uint64(e.GuildID),
+			"guild_id":   guildID,
 			"author_id":  uint64(patch.AuthorID),
 			"content":    patch.Content,
 		})
@@ -850,17 +976,18 @@ func (a *App) handleMessageDeleteBulk(e *gateway.MessageDeleteBulkEvent) {
 func (a *App) handleReactionAdd(e *gateway.MessageReactionAddEvent) {
 	channel := store.ChannelID(e.ChannelID)
 	id := store.MessageID(e.MessageID)
-	react := store.Reaction{
-		EmojiName: e.Emoji.Name,
-		EmojiID:   uint64(e.Emoji.ID),
-		Animated:  e.Emoji.Animated,
-		Count:     1,
-		Me:        store.UserID(e.UserID) == a.selfID && a.selfID != 0,
-	}
 	userID := uint64(e.UserID)
 	emoji := e.Emoji.Name
+	emojiID := uint64(e.Emoji.ID)
+	animated := e.Emoji.Animated
 	a.ui.Post(func() {
-		a.store.AddReaction(channel, id, react)
+		a.store.AddReaction(channel, id, store.Reaction{
+			EmojiName: emoji,
+			EmojiID:   emojiID,
+			Animated:  animated,
+			Count:     1,
+			Me:        store.UserID(userID) == a.selfID && a.selfID != 0,
+		})
 		if a.onChange != nil {
 			a.onChange()
 		}
@@ -878,9 +1005,9 @@ func (a *App) handleReactionRemove(e *gateway.MessageReactionRemoveEvent) {
 	id := store.MessageID(e.MessageID)
 	name := e.Emoji.Name
 	emojiID := uint64(e.Emoji.ID)
-	me := store.UserID(e.UserID) == a.selfID && a.selfID != 0
 	userID := uint64(e.UserID)
 	a.ui.Post(func() {
+		me := store.UserID(userID) == a.selfID && a.selfID != 0
 		a.store.RemoveReaction(channel, id, name, emojiID, me)
 		if a.onChange != nil {
 			a.onChange()
@@ -1205,10 +1332,20 @@ func (a *App) LoadHistory(channel store.ChannelID, limit uint) {
 	if !a.beginHistoryLoad(channel) {
 		return
 	}
-	go a.loadHistory(channel, limit)
+	// Capture the pre-request cache on the UI goroutine. Confirmed gateway
+	// messages absent from this snapshot arrived while REST was in flight and
+	// must survive installation of the initial page.
+	baseline := messageIDSet(a.store.Messages(channel))
+	go a.loadHistoryFrom(channel, limit, baseline)
 }
 
+// loadHistory is the synchronous test seam. Production callers use
+// LoadHistory, which captures the same baseline before starting its goroutine.
 func (a *App) loadHistory(channel store.ChannelID, limit uint) {
+	a.loadHistoryFrom(channel, limit, messageIDSet(a.store.Messages(channel)))
+}
+
+func (a *App) loadHistoryFrom(channel store.ChannelID, limit uint, baseline map[store.MessageID]struct{}) {
 	messages, err := a.history.Messages(discord.ChannelID(channel), limit)
 	if err != nil {
 		a.finishHistoryLoad(channel, false)
@@ -1230,7 +1367,8 @@ func (a *App) loadHistory(channel store.ChannelID, limit uint) {
 				a.store.RememberMemberIdentity(ch.GuildID, convertMember(discord.Member{User: message.Author}, guild))
 			}
 		}
-		a.store.SetMessages(channel, converted)
+		current := a.store.Messages(channel)
+		a.store.SetMessages(channel, mergeInitialHistory(converted, current, baseline))
 		a.finishHistoryLoad(channel, true)
 		if limit == 0 || len(messages) < int(limit) {
 			a.markHistoryExhausted(channel)
@@ -1239,6 +1377,38 @@ func (a *App) loadHistory(channel store.ChannelID, limit uint) {
 			a.onChange()
 		}
 	})
+}
+
+func messageIDSet(messages []store.Message) map[store.MessageID]struct{} {
+	ids := make(map[store.MessageID]struct{}, len(messages))
+	for _, message := range messages {
+		if message.ID != 0 {
+			ids[message.ID] = struct{}{}
+		}
+	}
+	return ids
+}
+
+// mergeInitialHistory adds confirmed messages that arrived during the REST
+// request after the oldest-first REST page. SetMessages separately preserves
+// pending/failed local echoes.
+func mergeInitialHistory(incoming, current []store.Message, baseline map[store.MessageID]struct{}) []store.Message {
+	merged := append([]store.Message(nil), incoming...)
+	known := messageIDSet(incoming)
+	for _, message := range current {
+		if message.ID == 0 || message.Pending || message.Failed {
+			continue
+		}
+		if _, existedBeforeRequest := baseline[message.ID]; existedBeforeRequest {
+			continue
+		}
+		if _, inRESTPage := known[message.ID]; inRESTPage {
+			continue
+		}
+		known[message.ID] = struct{}{}
+		merged = append(merged, message)
+	}
+	return merged
 }
 
 // LoadOlderHistory fetches the next page before the oldest cached message.

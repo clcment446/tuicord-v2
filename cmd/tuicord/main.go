@@ -81,6 +81,7 @@ func run() error {
 		shell.ShowToast("View state", err)
 	})
 	orch.OnReady(mv.Refresh)
+	orch.OnGuildChange(mv.Refresh)
 	orch.OnChange(mv.RefreshChannels)
 	orch.OnIncomingMessage(shell.NotifyIncomingMessage)
 	orch.OnError(func(err error) {

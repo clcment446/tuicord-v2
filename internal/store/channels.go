@@ -20,27 +20,86 @@ func (s *Store) UpsertThread(c Channel) {
 // RemoveThread deletes a thread channel and its cached messages. It is safe to
 // call for an unknown id.
 func (s *Store) RemoveThread(id ChannelID) {
+	s.RemoveChannel(id)
+}
+
+// RemoveChannel drops a channel and any child threads from the store, including
+// cached messages and notification state. It is safe to call for an unknown ID.
+func (s *Store) RemoveChannel(id ChannelID) {
+	for childID, child := range s.channels {
+		if child.Kind == ChannelThread && child.ParentID == id {
+			s.removeChannel(childID)
+		}
+	}
 	s.removeChannel(id)
 }
 
-// removeChannel drops a channel from the store: its record, its guild ordering
-// slot, and any cached message ring.
+// RemoveGuild deletes a guild and all state owned by it.
+func (s *Store) RemoveGuild(id GuildID) {
+	for _, channelID := range append([]ChannelID(nil), s.channelOrder[id]...) {
+		s.removeChannel(channelID)
+	}
+	delete(s.channelOrder, id)
+	delete(s.members, id)
+	delete(s.roles, id)
+	delete(s.guildEmojis, id)
+	delete(s.guildStickers, id)
+	delete(s.guilds, id)
+	for i, guildID := range s.guildOrder {
+		if guildID == id {
+			s.guildOrder = append(s.guildOrder[:i], s.guildOrder[i+1:]...)
+			break
+		}
+	}
+	for i := len(s.guildFolders) - 1; i >= 0; i-- {
+		folder := &s.guildFolders[i]
+		for j := len(folder.GuildIDs) - 1; j >= 0; j-- {
+			if folder.GuildIDs[j] == id {
+				folder.GuildIDs = append(folder.GuildIDs[:j], folder.GuildIDs[j+1:]...)
+			}
+		}
+		if len(folder.GuildIDs) == 0 {
+			s.guildFolders = append(s.guildFolders[:i], s.guildFolders[i+1:]...)
+		}
+	}
+	s.touchMeta()
+}
+
+// SetGuildUnavailable records a temporary outage without discarding cached
+// guild state. It reports whether the guild was known.
+func (s *Store) SetGuildUnavailable(id GuildID, unavailable bool) bool {
+	guild, ok := s.guilds[id]
+	if !ok {
+		return false
+	}
+	guild.Unavailable = unavailable
+	s.guilds[id] = guild
+	s.touchMeta()
+	return true
+}
+
+// removeChannel drops one channel from the store.
 func (s *Store) removeChannel(id ChannelID) {
 	c, ok := s.channels[id]
 	if !ok {
 		return
 	}
-	order := s.channelOrder[c.GuildID]
-	for i, cid := range order {
-		if cid == id {
-			s.channelOrder[c.GuildID] = append(order[:i], order[i+1:]...)
-			break
-		}
-	}
+	s.removeChannelOrder(c.GuildID, id)
 	delete(s.channels, id)
 	delete(s.messages, id)
 	delete(s.unread, id)
+	delete(s.pings, id)
 	s.touchMeta()
+}
+
+func (s *Store) removeChannelOrder(guild GuildID, id ChannelID) {
+	order := s.channelOrder[guild]
+	for i, channelID := range order {
+		if channelID == id {
+			s.channelOrder[guild] = append(order[:i], order[i+1:]...)
+			return
+		}
+	}
 }
 
 // SetArchived flips a thread's archived state, returning true when the channel

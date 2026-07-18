@@ -76,6 +76,9 @@ const (
 type Guild struct {
 	ID   GuildID
 	Name string
+	// Unavailable marks a temporary Discord outage. Guild data remains cached
+	// until a later GUILD_CREATE restores availability.
+	Unavailable bool
 	// OwnerID is the guild owner's user ID. The owner implicitly holds every
 	// permission (see Store.MemberPermissions). Zero when unknown.
 	OwnerID UserID
@@ -523,7 +526,12 @@ func (s *Store) Guild(id GuildID) (Guild, bool) {
 // UpsertChannel inserts or updates a channel. Channels are returned from
 // Channels sorted by Position then ID, so insertion order does not matter.
 func (s *Store) UpsertChannel(c Channel) {
-	if _, ok := s.channels[c.ID]; !ok {
+	if existing, ok := s.channels[c.ID]; ok {
+		if existing.GuildID != c.GuildID {
+			s.removeChannelOrder(existing.GuildID, c.ID)
+			s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
+		}
+	} else {
 		s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
 	}
 	s.channels[c.ID] = c
@@ -624,7 +632,7 @@ func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
 		return
 	}
 	current := s.Messages(channel)
-	known := make(map[MessageID]struct{}, len(current))
+	known := make(map[MessageID]struct{}, len(current)+len(messages))
 	for _, message := range current {
 		if message.ID != 0 {
 			known[message.ID] = struct{}{}
@@ -641,7 +649,44 @@ func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
 		combined = append(combined, message)
 	}
 	combined = append(combined, current...)
-	s.SetMessages(channel, combined)
+
+	// A normal ring push evicts from the front. For a prepend that would throw
+	// away exactly the older page we just fetched, so bound from the back
+	// instead. Pending/failed local echoes remain reserved at the newest end.
+	echoes := make([]Message, 0)
+	history := combined[:0]
+	for _, message := range combined {
+		if message.Pending || message.Failed {
+			echoes = append(echoes, message)
+			continue
+		}
+		history = append(history, message)
+	}
+	if len(echoes) > s.historyLimit {
+		echoes = echoes[len(echoes)-s.historyLimit:]
+	}
+	available := s.historyLimit - len(echoes)
+	if len(history) > available {
+		history = history[:available]
+	}
+	bounded := append(append(make([]Message, 0, len(history)+len(echoes)), history...), echoes...)
+	s.replaceMessages(channel, bounded)
+}
+
+// replaceMessages installs an already bounded oldest-first slice without the
+// FIFO eviction used by SetMessages.
+func (s *Store) replaceMessages(channel ChannelID, messages []Message) {
+	if len(messages) == 0 {
+		delete(s.messages, channel)
+		return
+	}
+	r := newRing(s.historyLimit)
+	for _, message := range messages {
+		message.ChannelID = channel
+		message.rev = s.nextRevision()
+		r.push(message)
+	}
+	s.messages[channel] = r
 }
 
 // ReplaceMessage swaps a pending optimistic message (matched by Nonce) for the

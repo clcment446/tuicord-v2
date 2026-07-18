@@ -16,6 +16,26 @@ func (a *App) registerGatewayLifecycleHandlers() {
 		a.handleGuildCreate(e)
 	})
 
+	a.handle.AddHandler(func(e *gateway.GuildUpdateEvent) {
+		a.handleGuildUpdate(e)
+	})
+
+	a.handle.AddHandler(func(e *gateway.GuildDeleteEvent) {
+		a.handleGuildDelete(e)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ChannelCreateEvent) {
+		a.handleChannelUpsert(e.Channel)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ChannelUpdateEvent) {
+		a.handleChannelUpsert(e.Channel)
+	})
+
+	a.handle.AddHandler(func(e *gateway.ChannelDeleteEvent) {
+		a.handleChannelDelete(e)
+	})
+
 	a.handle.AddHandler(func(e *gateway.GuildEmojisUpdateEvent) {
 		guildID := store.GuildID(e.GuildID)
 		emojis := convertGuildEmojis(e.Emojis)

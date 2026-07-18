@@ -112,6 +112,62 @@ func TestRemoveThread(t *testing.T) {
 	s.RemoveThread(10)
 }
 
+func TestRemoveChannelCascadesThreadAndNotificationState(t *testing.T) {
+	s := New(0)
+	s.UpsertGuild(Guild{ID: 1, Name: "guild"})
+	s.UpsertChannel(Channel{ID: 100, GuildID: 1, Kind: ChannelText})
+	s.UpsertThread(thread(10, 100, time.Unix(1, 0), false))
+	s.AppendMessage(Message{ID: 1, ChannelID: 100})
+	s.AppendMessage(Message{ID: 2, ChannelID: 10})
+	s.IncrementUnread(100)
+	s.IncrementPing(100)
+
+	s.RemoveChannel(100)
+
+	if _, ok := s.Channel(100); ok {
+		t.Fatal("parent channel remains after removal")
+	}
+	if _, ok := s.Channel(10); ok {
+		t.Fatal("child thread remains after parent removal")
+	}
+	if s.Messages(100) != nil || s.Messages(10) != nil || s.Unread(100) != 0 || s.Pings(100) != 0 {
+		t.Fatal("channel-owned state was not removed")
+	}
+}
+
+func TestRemoveGuildCascadesAllOwnedState(t *testing.T) {
+	s := New(0)
+	s.UpsertGuild(Guild{ID: 1, Name: "guild"})
+	s.UpsertChannel(Channel{ID: 100, GuildID: 1, Kind: ChannelText})
+	s.AppendMessage(Message{ID: 1, ChannelID: 100})
+	s.UpsertMember(1, Member{ID: 2, Name: "member"})
+	s.UpsertRole(1, Role{ID: 3, Name: "role"})
+	s.SetGuildEmojis(1, []GuildEmoji{{ID: 4, Name: "emoji"}})
+	s.SetGuildStickers(1, []GuildSticker{{ID: 5, Name: "sticker"}})
+	s.SetGuildFolders([]GuildFolder{{ID: 6, GuildIDs: []GuildID{1}}})
+
+	s.RemoveGuild(1)
+
+	if _, ok := s.Guild(1); ok || len(s.Channels(1)) != 0 || s.Messages(100) != nil ||
+		len(s.Members(1)) != 0 || len(s.Roles(1)) != 0 || len(s.GuildEmojis(1)) != 0 ||
+		len(s.GuildStickers(1)) != 0 || len(s.GuildFolders()) != 0 {
+		t.Fatal("guild-owned state was not fully removed")
+	}
+}
+
+func TestSetGuildUnavailablePreservesGuildState(t *testing.T) {
+	s := New(0)
+	s.UpsertGuild(Guild{ID: 1, Name: "guild"})
+	s.UpsertChannel(Channel{ID: 100, GuildID: 1})
+	if !s.SetGuildUnavailable(1, true) {
+		t.Fatal("known guild was not marked unavailable")
+	}
+	guild, ok := s.Guild(1)
+	if !ok || !guild.Unavailable || len(s.Channels(1)) != 1 {
+		t.Fatalf("unavailable guild state = %+v, channels=%v", guild, s.Channels(1))
+	}
+}
+
 func TestSetThreadJoined(t *testing.T) {
 	s := New(0)
 	s.UpsertChannel(Channel{ID: 100, GuildID: 1, Kind: ChannelText})

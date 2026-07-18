@@ -709,7 +709,11 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 		Name:           g.Name,
 		OwnerID:        store.UserID(g.OwnerID),
 		RulesChannelID: store.ChannelID(g.RulesChannelID),
+		Unavailable:    g.Unavailable,
 	})
+	if g.Unavailable {
+		return
+	}
 	for _, r := range g.Roles {
 		s.UpsertRole(store.GuildID(g.ID), convertRole(r))
 	}

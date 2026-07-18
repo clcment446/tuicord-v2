@@ -89,6 +89,62 @@ func TestMessageUpdatePatchesEmbedsInPlace(t *testing.T) {
 	}
 }
 
+func TestMessageUpdatePreservesOmittedCachedFields(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{
+		ID: 7, ChannelID: 3, Content: "keep", Flags: 42, Pinned: true,
+		Attachments: []store.Attachment{{Filename: "keep.txt"}},
+		Embeds:      []store.Embed{{Title: "old embed"}},
+		Stickers:    []store.Sticker{{Name: "keep sticker"}},
+		Components:  []store.Component{{Label: "keep component"}},
+		ComponentTree: []store.ComponentNode{{
+			Kind: store.ComponentTextDisplay, Content: "keep tree",
+		}},
+	})
+	var event gateway.MessageUpdateEvent
+	if err := json.Unmarshal([]byte(`{"id":"7","channel_id":"3","embeds":[]}`), &event); err != nil {
+		t.Fatal(err)
+	}
+
+	a.handleMessageUpdate(&event)
+
+	got := a.store.Messages(3)[0]
+	if got.Content != "keep" || got.Flags != 42 || !got.Pinned || len(got.Attachments) != 1 ||
+		len(got.Stickers) != 1 || len(got.Components) != 1 || len(got.ComponentTree) != 1 {
+		t.Fatalf("omitted fields were overwritten: %+v", got)
+	}
+	if len(got.Embeds) != 0 {
+		t.Fatalf("explicit embeds=[] did not clear embeds: %+v", got.Embeds)
+	}
+}
+
+func TestMessageUpdateExplicitEmptyAndFalseClearCachedFields(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{
+		ID: 8, ChannelID: 3, Content: "clear", Flags: 42, Pinned: true,
+		Attachments:   []store.Attachment{{Filename: "clear.txt"}},
+		Embeds:        []store.Embed{{Title: "clear embed"}},
+		Stickers:      []store.Sticker{{Name: "clear sticker"}},
+		Components:    []store.Component{{Label: "clear component"}},
+		ComponentTree: []store.ComponentNode{{Kind: store.ComponentTextDisplay, Content: "clear tree"}},
+	})
+	var event gateway.MessageUpdateEvent
+	if err := json.Unmarshal([]byte(`{
+		"id":"8","channel_id":"3","content":"","flags":0,"pinned":false,
+		"attachments":[],"embeds":[],"sticker_items":[],"components":[]
+	}`), &event); err != nil {
+		t.Fatal(err)
+	}
+
+	a.handleMessageUpdate(&event)
+
+	got := a.store.Messages(3)[0]
+	if got.Content != "" || got.Flags != 0 || got.Pinned || len(got.Attachments) != 0 ||
+		len(got.Embeds) != 0 || len(got.Stickers) != 0 || len(got.Components) != 0 || len(got.ComponentTree) != 0 {
+		t.Fatalf("explicit empty update did not clear cache: %+v", got)
+	}
+}
+
 func TestMessageUpdatePatchesComponentsV2TreeForRenderer(t *testing.T) {
 	// Arrange: the message was rendered with the original Components V2 tree.
 	a := newTestApp(&fakeSender{})

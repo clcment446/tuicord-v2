@@ -205,3 +205,41 @@ func TestPrependMessagesKeepsOlderHistoryFirst(t *testing.T) {
 		t.Fatalf("messages = %+v, want IDs 1,2,3,4", got)
 	}
 }
+
+func TestPrependMessagesAtCapacityRetainsFetchedOlderPage(t *testing.T) {
+	s := New(4)
+	s.SetMessages(7, []Message{{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
+
+	s.PrependMessages(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}})
+
+	got := s.Messages(7)
+	if ids := messageIDs(got); len(ids) != 4 || ids[0] != 1 || ids[1] != 2 || ids[2] != 3 || ids[3] != 4 {
+		t.Fatalf("messages = %v, want fetched IDs [1 2 3 4]", ids)
+	}
+}
+
+func TestPrependMessagesDeduplicatesOverlapAndPreservesOrderAtCapacity(t *testing.T) {
+	s := New(5)
+	s.SetMessages(7, []Message{{ID: 4}, {ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
+
+	s.PrependMessages(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 4}})
+
+	got := messageIDs(s.Messages(7))
+	want := []MessageID{1, 2, 3, 4, 5}
+	if len(got) != len(want) {
+		t.Fatalf("messages = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("messages = %v, want %v", got, want)
+		}
+	}
+}
+
+func messageIDs(messages []Message) []MessageID {
+	ids := make([]MessageID, len(messages))
+	for i, message := range messages {
+		ids[i] = message.ID
+	}
+	return ids
+}
