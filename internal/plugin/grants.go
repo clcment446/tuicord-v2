@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
-	"time"
 
 	lua "github.com/yuin/gopher-lua"
 )
@@ -96,7 +95,7 @@ func newFSTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
 // newHTTPTable exposes a minimal GET helper. It is intentionally small: no
 // custom methods, headers, or bodies in v1.
 func newHTTPTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{}
 	tbl := L.NewTable()
 
 	tbl.RawSetString("get", L.NewFunction(func(L *lua.LState) int {
@@ -106,7 +105,23 @@ func newHTTPTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
 			L.Push(lua.LString("url must be http(s)"))
 			return 2
 		}
-		resp, err := client.Get(url)
+		// safeDoFile/safeCall installs the execution deadline on the LState.
+		// Binding the request to that exact context makes both the Lua timeout
+		// and Manager.Close interrupt blocked network I/O while preserving the
+		// single worker/LState execution contract.
+		ctx := L.Context()
+		if ctx == nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString("http.get requires an active Lua execution context"))
+			return 2
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		resp, err := client.Do(req)
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))

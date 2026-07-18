@@ -3,6 +3,8 @@ package plugin
 import (
 	"bytes"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -649,6 +651,167 @@ func TestMissingDirIsNoError(t *testing.T) {
 	if errs := m.Load(); len(errs) != 0 {
 		t.Fatalf("missing dir should not error: %v", errs)
 	}
+}
+
+func TestFailedStartupRestoresShadowedRegistrations(t *testing.T) {
+	dir := t.TempDir()
+	good := `
+		tuicord.command("shared", function() tuicord.notify("command", "original") end, "original help")
+		tuicord.keymap("ctrl+r", function() tuicord.notify("key", "original") end)
+		tuicord.theme("shared", { background = "#111111" })
+	`
+	failed := `
+		tuicord.command("shared", function() tuicord.notify("command", "failed") end, "failed help")
+		tuicord.keymap("ctrl+r", function() tuicord.notify("key", "failed") end)
+		tuicord.theme("shared", { background = "#ffffff" })
+		tuicord.theme("leaked", { background = "#badbad" })
+		error("startup failed")
+	`
+	if err := os.WriteFile(filepath.Join(dir, "a-original.lua"), []byte(good), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b-failed.lua"), []byte(failed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	c, h := newCaptureHost()
+	m := NewManager(Options{Dir: dir, Host: h})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 1 {
+		t.Fatalf("load errors = %v, want one failed plugin", errs)
+	}
+
+	if got, want := m.CommandNames(), []string{"shared"}; !equalSlice(got, want) {
+		t.Fatalf("commands after rollback = %v, want %v", got, want)
+	}
+	if specs := m.KeySpecs(); len(specs) != 1 || specs[0] != "ctrl+r" {
+		t.Fatalf("keys after rollback = %v", specs)
+	}
+	if got, want := m.ThemeNames(), []string{"shared"}; !equalSlice(got, want) {
+		t.Fatalf("themes after rollback = %v, want %v", got, want)
+	}
+
+	if !m.RunCommand("shared", nil) {
+		t.Fatal("restored command is not registered")
+	}
+	if got := recv2(t, c.notify); got != [2]string{"command", "original"} {
+		t.Fatalf("restored command invoked %v", got)
+	}
+	if !m.RunKey("ctrl+r") {
+		t.Fatal("restored key is not registered")
+	}
+	if got := recv2(t, c.notify); got != [2]string{"key", "original"} {
+		t.Fatalf("restored key invoked %v", got)
+	}
+	if !m.ApplyTheme("shared") {
+		t.Fatal("restored theme is not registered")
+	}
+	select {
+	case palette := <-c.theme:
+		if palette["background"] != "#111111" {
+			t.Fatalf("restored theme palette = %v", palette)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for restored theme")
+	}
+}
+
+func TestHTTPGetUsesLuaCallbackDeadline(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	dir := writePlugin(t, "net", fmt.Sprintf(`
+		tuicord.on("request", function()
+			tuicord.http.get(%q)
+		end)
+	`, server.URL))
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:             dir,
+		Host:            h,
+		Grants:          map[string][]string{"net": {CapNet}},
+		CallbackTimeout: 50 * time.Millisecond,
+	})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+
+	began := time.Now()
+	m.Emit("request", nil)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP request did not start")
+	}
+	if got := recv2(t, c.notify); got[0] != "Plugin error: net" {
+		t.Fatalf("deadline error notification = %v", got)
+	}
+	if elapsed := time.Since(began); elapsed > time.Second {
+		t.Fatalf("Lua deadline took %v to interrupt HTTP request", elapsed)
+	}
+}
+
+func TestCloseCancelsHTTPGet(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer server.Close()
+
+	dir := writePlugin(t, "net", fmt.Sprintf(`
+		tuicord.on("request", function()
+			tuicord.http.get(%q)
+		end)
+	`, server.URL))
+	_, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:             dir,
+		Host:            h,
+		Grants:          map[string][]string{"net": {CapNet}},
+		CallbackTimeout: time.Minute,
+	})
+	if errs := m.Load(); len(errs) != 0 {
+		close(release)
+		m.Close()
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Emit("request", nil)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		close(release)
+		m.Close()
+		t.Fatal("HTTP request did not start")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		m.Close()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		close(release)
+		<-done
+		t.Fatal("Manager.Close did not interrupt HTTP request")
+	}
+	close(release)
 }
 
 func TestInfiniteStartupIsBounded(t *testing.T) {

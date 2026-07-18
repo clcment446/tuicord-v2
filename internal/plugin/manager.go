@@ -181,11 +181,9 @@ func (m *Manager) loadOne(f pluginFile) error {
 		}
 		installAPI(L, pctx)
 		if err := safeDoFile(m.rt.context(), L, f.path, m.opts.StartupTimeout); err != nil {
-			// Startup can register handlers before failing or timing out. Remove
-			// those pointers before closing the state they belong to.
-			m.events.removeState(L)
-			m.commands.removeState(L)
-			m.keys.removeState(L)
+			// Startup registration is transactional. Roll back everything owned by
+			// this state (revealing any prior owners it shadowed) before closing it.
+			m.rollbackRegistrations(L)
 			if fsRoot != nil {
 				_ = fsRoot.Close()
 			}
@@ -328,6 +326,13 @@ func (m *Manager) Close() {
 		}
 	}
 	m.states = nil
+}
+
+func (m *Manager) rollbackRegistrations(L *lua.LState) {
+	m.events.rollbackOwner(L)
+	m.commands.rollbackOwner(L)
+	m.keys.rollbackOwner(L)
+	m.themes.rollbackOwner(L)
 }
 
 func (m *Manager) onCallbackError(plugin string, err error) {

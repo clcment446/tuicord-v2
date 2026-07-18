@@ -83,16 +83,11 @@ func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Con
 }
 
 // newPluginHost builds the side-effecting Host the tuicord Lua API binds
-// against. Every function marshals its work onto the UI goroutine via Post; the
-// synchronous accessors round-trip a value back so they never read App's
-// UI-goroutine-owned fields from the plugin goroutine.
+// against. Mutations marshal onto the UI goroutine via Post. Synchronous state
+// accessors use App's atomic snapshot instead: a Post-and-receive round trip can
+// never complete before the UI loop starts or after it shuts down, deadlocking
+// plugin startup or Manager.Close.
 func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, cells map[string]screen.Style, palette config.Colors) *plugin.Host {
-	get := func(read func() uint64) uint64 {
-		ch := make(chan uint64, 1)
-		uiApp.Post(func() { ch <- read() })
-		return <-ch
-	}
-
 	return &plugin.Host{
 		Style: func(selector string, props map[string]string) {
 			uiApp.Post(func() {
@@ -152,9 +147,9 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 		Notify: func(title, body string) {
 			uiApp.Post(func() { shell.ShowNotice(title, body) })
 		},
-		ActiveChannel: func() uint64 { return get(func() uint64 { return uint64(orch.ActiveChannel()) }) },
-		ActiveGuild:   func() uint64 { return get(func() uint64 { return uint64(orch.ActiveGuild()) }) },
-		SelfID:        func() uint64 { return get(func() uint64 { return uint64(orch.SelfID()) }) },
+		ActiveChannel: func() uint64 { return uint64(orch.Snapshot().ActiveChannel) },
+		ActiveGuild:   func() uint64 { return uint64(orch.Snapshot().ActiveGuild) },
+		SelfID:        func() uint64 { return uint64(orch.Snapshot().SelfID) },
 	}
 }
 

@@ -116,7 +116,7 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 	reg("theme", func(L *lua.LState) int {
 		name := L.CheckString(1)
 		palette := tableToStringMap(L.CheckTable(2))
-		pctx.themes.add(name, palette)
+		pctx.themes.add(name, palette, L)
 		return 0
 	})
 

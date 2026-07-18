@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	clientdiscord "awesomeProject/internal/discord"
@@ -316,6 +317,10 @@ type App struct {
 	activeGuild   store.GuildID
 	activeChannel store.ChannelID
 	selfID        store.UserID
+	// stateSnapshot publishes the UI-owned selection and identity to readers on
+	// other goroutines (notably synchronous Lua accessors) without posting back
+	// to the UI loop, which may not be running during startup or shutdown.
+	stateSnapshot atomic.Pointer[StateSnapshot]
 	// sessionID is the gateway session identifier from READY; Discord requires
 	// it on user-originated interaction payloads.
 	sessionID string
@@ -534,11 +539,43 @@ func (a *App) ActiveChannel() store.ChannelID { return a.activeChannel }
 // SelfID returns the logged-in user's ID once READY has been processed.
 func (a *App) SelfID() store.UserID { return a.selfID }
 
+// StateSnapshot is an immutable, concurrently readable view of the small piece
+// of UI-owned state exposed to integrations. Call App.Snapshot instead of
+// reading ActiveGuild, ActiveChannel, or SelfID from a background goroutine.
+type StateSnapshot struct {
+	ActiveGuild   store.GuildID
+	ActiveChannel store.ChannelID
+	SelfID        store.UserID
+}
+
+// Snapshot returns the latest published app state without waiting for the UI
+// event loop. Before READY/selection it returns zero values.
+func (a *App) Snapshot() StateSnapshot {
+	if a == nil {
+		return StateSnapshot{}
+	}
+	if snapshot := a.stateSnapshot.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return StateSnapshot{}
+}
+
+// publishStateSnapshot must be called on the UI goroutine after changing one of
+// the fields represented by StateSnapshot.
+func (a *App) publishStateSnapshot() {
+	a.stateSnapshot.Store(&StateSnapshot{
+		ActiveGuild:   a.activeGuild,
+		ActiveChannel: a.activeChannel,
+		SelfID:        a.selfID,
+	})
+}
+
 // SetActive selects the guild/channel the chat view renders, clearing the newly
 // active channel's unread badge. Call on the UI goroutine.
 func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
 	a.activeGuild = guild
 	a.activeChannel = channel
+	a.publishStateSnapshot()
 	if channel != 0 {
 		a.store.ClearUnread(channel)
 	}
@@ -683,6 +720,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	}
 	a.ui.Post(func() {
 		a.selfID = selfID
+		a.publishStateSnapshot()
 		a.sessionID = sessionID
 		a.store.SetNitro(hasNitro)
 		a.store.SetGuildFolders(folders)

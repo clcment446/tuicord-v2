@@ -89,6 +89,8 @@ func run() error {
 		shell.ShowToast("Discord error", err)
 	})
 	if mgr := setupPlugins(orch, uiApp, shell, cfg, styles); mgr != nil {
+		// Registered after shell.Close above so LIFO shutdown stops/cancels all
+		// plugin work while its Host targets are still alive.
 		defer mgr.Close()
 	}
 

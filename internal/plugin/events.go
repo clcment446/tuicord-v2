@@ -56,9 +56,9 @@ func (b *eventBus) on(event string, L *lua.LState, fn *lua.LFunction, plugin str
 	b.subs[event] = append(b.subs[event], subscription{L: L, fn: fn, plugin: plugin})
 }
 
-// removeState discards registrations made before a plugin failed startup. It
+// rollbackOwner discards registrations made before a plugin failed startup. It
 // runs on the same worker as registration and dispatch.
-func (b *eventBus) removeState(L *lua.LState) {
+func (b *eventBus) rollbackOwner(L *lua.LState) {
 	for event, subs := range b.subs {
 		kept := subs[:0]
 		for _, sub := range subs {
