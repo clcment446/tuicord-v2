@@ -80,6 +80,7 @@ type Shell struct {
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
 	viewerCancel    context.CancelFunc
+	clipboardMu     sync.Mutex
 	clipboardCancel context.CancelFunc
 	clipboardBusy   bool
 	lifecycleWG     sync.WaitGroup
@@ -419,9 +420,12 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 		}
 		return false
 	}
+	s.clipboardMu.Lock()
 	if s.clipboardBusy {
+		s.clipboardMu.Unlock()
 		return true
 	}
+	s.clipboardMu.Unlock()
 	timeout := time.Duration(s.cfg.Privacy.ClipboardTimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -431,8 +435,17 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 		maxBytes = 25 << 20
 	}
 	ctx, cancel := context.WithTimeout(s.lifecycleCtx, timeout)
+	s.clipboardMu.Lock()
+	// This second check makes the state transition safe even if a non-UI test
+	// seam invokes paste concurrently. Production calls remain UI-goroutine owned.
+	if s.clipboardBusy {
+		s.clipboardMu.Unlock()
+		cancel()
+		return true
+	}
 	s.clipboardCancel = cancel
 	s.clipboardBusy = true
+	s.clipboardMu.Unlock()
 	s.lifecycleWG.Add(1)
 	go func() {
 		defer s.lifecycleWG.Done()
@@ -466,8 +479,23 @@ func (s *Shell) finishClipboardPaste(ctx context.Context, cancel context.CancelF
 			_ = os.Remove(tempPath)
 		}
 	}
-	if s == nil || ctx.Err() != nil || s.lifecycleCtx == nil || s.lifecycleCtx.Err() != nil {
+	clearBusy := func() {
+		s.clipboardMu.Lock()
+		s.clipboardBusy = false
+		s.clipboardCancel = nil
+		s.clipboardMu.Unlock()
+	}
+	if s == nil {
 		cleanup()
+		cancel()
+		return
+	}
+	// An operation deadline is a user-visible completion, not a lifecycle exit.
+	// It must reach the UI so the busy state clears and the timeout is reported.
+	// Shell cancellation remains silent and does not post into a stopped loop.
+	if s.lifecycleCtx == nil || s.lifecycleCtx.Err() != nil {
+		cleanup()
+		clearBusy()
 		cancel()
 		return
 	}
@@ -478,9 +506,16 @@ func (s *Shell) finishClipboardPaste(ctx context.Context, cancel context.CancelF
 	if tryPost == nil || !tryPost(func() {
 		// Shutdown can begin after TryPost accepted this closure. Recheck before
 		// staging, otherwise the temp file would have no UI owner to delete it.
-		live := ctx.Err() == nil && s.lifecycleCtx != nil && s.lifecycleCtx.Err() == nil
-		s.clipboardBusy = false
-		s.clipboardCancel = nil
+		live := s.lifecycleCtx != nil && s.lifecycleCtx.Err() == nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			switch {
+			case errors.Is(ctxErr, context.DeadlineExceeded):
+				resultErr = fmt.Errorf("clipboard image extraction timed out: %w", ctxErr)
+			case resultErr == nil:
+				resultErr = fmt.Errorf("clipboard image extraction canceled: %w", ctxErr)
+			}
+		}
+		clearBusy()
 		cancel()
 		if !live {
 			cleanup()
@@ -502,7 +537,10 @@ func (s *Shell) finishClipboardPaste(ctx context.Context, cancel context.CancelF
 		}
 		s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
 	}) {
+		// TryPost only rejects while the event loop is stopping. Clearing under
+		// clipboardMu avoids racing Close and guarantees no stale busy/cancel state.
 		cleanup()
+		clearBusy()
 		cancel()
 	}
 }
@@ -1449,9 +1487,13 @@ func (s *Shell) Close() {
 			s.viewerCancel()
 			s.viewerCancel = nil
 		}
-		if s.clipboardCancel != nil {
-			s.clipboardCancel()
-			s.clipboardCancel = nil
+		s.clipboardMu.Lock()
+		clipboardCancel := s.clipboardCancel
+		s.clipboardCancel = nil
+		s.clipboardBusy = false
+		s.clipboardMu.Unlock()
+		if clipboardCancel != nil {
+			clipboardCancel()
 		}
 		if s.prefetch != nil {
 			s.prefetch.Close()

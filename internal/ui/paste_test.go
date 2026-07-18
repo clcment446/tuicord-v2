@@ -8,7 +8,9 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/layout"
@@ -149,13 +151,44 @@ func TestClipboardPasteRemovesTempWhenTryPostRejects(t *testing.T) {
 	defer closeLifecycle()
 	op, cancelOp := context.WithCancel(context.Background())
 	sh := &Shell{
-		lifecycleCtx: lifecycle,
-		mv:           &MainView{},
-		tryPost:      func(func()) bool { return false },
+		lifecycleCtx:    lifecycle,
+		mv:              &MainView{},
+		tryPost:         func(func()) bool { return false },
+		clipboardBusy:   true,
+		clipboardCancel: cancelOp,
 	}
 	sh.finishClipboardPaste(op, cancelOp, false, []byte("png"), "png", path, nil)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("rejected post stranded temp file: %v", err)
+	}
+	if sh.clipboardBusy || sh.clipboardCancel != nil {
+		t.Fatal("rejected post left clipboard operation busy")
+	}
+}
+
+func TestClipboardPasteDeadlineClearsBusyAndReportsTimeout(t *testing.T) {
+	lifecycle, closeLifecycle := context.WithCancel(context.Background())
+	defer closeLifecycle()
+	op, cancelOp := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancelOp()
+	sh := &Shell{
+		lifecycleCtx:    lifecycle,
+		mv:              &MainView{},
+		clipboardBusy:   true,
+		clipboardCancel: cancelOp,
+		tryPost: func(fn func()) bool {
+			fn()
+			return true
+		},
+	}
+
+	sh.finishClipboardPaste(op, cancelOp, false, nil, "", "", context.DeadlineExceeded)
+
+	if sh.clipboardBusy || sh.clipboardCancel != nil {
+		t.Fatal("deadline left clipboard operation busy")
+	}
+	if len(sh.toasts) != 1 || sh.toasts[0].title != "Paste image" || !strings.Contains(sh.toasts[0].detail, "timed out") {
+		t.Fatalf("deadline notice = %#v", sh.toasts)
 	}
 }
 
