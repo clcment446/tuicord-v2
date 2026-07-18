@@ -1017,7 +1017,36 @@ func (mv *MainView) openAttachments() ([]sendpart.File, []store.Attachment, func
 	return files, optimistic, cleanup, nil
 }
 
+// StageTempImage queues a temporary file (e.g. an image read from the system
+// clipboard) as an attachment. The file is owned by the composer: it is deleted
+// once the message is sent or the attachments are cleared. It returns an error
+// if the file exceeds the upload limit, in which case the caller should remove
+// the temp file.
+func (mv *MainView) StageTempImage(path, filename string, size int64) error {
+	if size > MaxUploadBytes {
+		return fmt.Errorf("image is larger than the %d MiB upload limit", MaxUploadBytes/(1024*1024))
+	}
+	if mv.composerReadOnly {
+		return fmt.Errorf("this channel does not accept attachments")
+	}
+	if mv.hasAttachment(path) {
+		return nil
+	}
+	mv.attachments = append(mv.attachments, queuedAttachment{
+		path: path,
+		meta: store.Attachment{Filename: filename, Size: size},
+		temp: true,
+	})
+	mv.updateAttachmentChips()
+	return nil
+}
+
 func (mv *MainView) clearAttachments() {
+	for _, attachment := range mv.attachments {
+		if attachment.temp {
+			_ = os.Remove(attachment.path)
+		}
+	}
 	mv.attachments = nil
 	mv.updateAttachmentChips()
 }

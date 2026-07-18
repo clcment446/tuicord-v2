@@ -113,7 +113,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		detail := ";help [command] · ;quit · ;switch <query> · ;settings · ;theme [name]"
+		detail := ";help [command] · ;quit · ;switch <query> · ;settings · ;theme [name] · ;paste"
 		if s.plugins != nil {
 			if names := s.plugins.CommandNames(); len(names) > 0 {
 				detail += " · plugins: ;" + strings.Join(names, " ;")
@@ -139,6 +139,8 @@ func (s *Shell) runLocalCommand(input string) bool {
 		}
 	case "theme":
 		s.runThemeCommand(command.args)
+	case "paste", "img":
+		s.pasteImage()
 	default:
 		if s.plugins != nil && s.plugins.RunCommand(command.name, command.args) {
 			return true
@@ -146,6 +148,37 @@ func (s *Shell) runLocalCommand(input string) bool {
 		s.ShowNotice("Unknown local command", "Use ;help to list local commands")
 	}
 	return true
+}
+
+// pasteImage reads an image from the system clipboard, writes it to a temporary
+// file, and stages it as a composer attachment. Text paste is unaffected: this
+// only touches the clipboard's image data. Errors (including an empty or
+// text-only clipboard) surface as a toast.
+func (s *Shell) pasteImage() {
+	data, ext, err := term.ReadClipboardImage()
+	if err != nil {
+		s.ShowToast("Paste image", err)
+		return
+	}
+	f, err := os.CreateTemp("", "tuicord-paste-*."+ext)
+	if err != nil {
+		s.ShowToast("Paste image", err)
+		return
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(f.Name())
+		s.ShowToast("Paste image", err)
+		return
+	}
+	f.Close()
+	filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
+	if err := s.mv.StageTempImage(f.Name(), filename, int64(len(data))); err != nil {
+		_ = os.Remove(f.Name())
+		s.ShowToast("Paste image", err)
+		return
+	}
+	s.ShowNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send")
 }
 
 // runThemeCommand applies a plugin-registered theme by name, or lists the
@@ -316,6 +349,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			return true
 		case keyMatches(key, s.cfg.Keys.Picker):
 			s.openPicker()
+			return true
+		case s.cfg.Keys.PasteImage != "" && keyMatches(key, s.cfg.Keys.PasteImage):
+			s.pasteImage()
 			return true
 		case keyMatches(key, s.cfg.Keys.Help):
 			s.overlay = NewHelpOverlay(s.cfg)
