@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"image"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +15,7 @@ import (
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
+	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
@@ -113,7 +116,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		detail := ";help [command] · ;quit · ;switch <query> · ;settings · ;theme [name] · ;paste"
+		detail := ";help · ;quit · ;switch · ;settings · ;theme [name] · ;paste · ;preview"
 		if s.plugins != nil {
 			if names := s.plugins.CommandNames(); len(names) > 0 {
 				detail += " · plugins: ;" + strings.Join(names, " ;")
@@ -141,6 +144,8 @@ func (s *Shell) runLocalCommand(input string) bool {
 		s.runThemeCommand(command.args)
 	case "paste", "img":
 		s.pasteImage()
+	case "preview":
+		s.openAttachmentPreview()
 	default:
 		if s.plugins != nil && s.plugins.RunCommand(command.name, command.args) {
 			return true
@@ -150,35 +155,96 @@ func (s *Shell) runLocalCommand(input string) bool {
 	return true
 }
 
-// pasteImage reads an image from the system clipboard, writes it to a temporary
-// file, and stages it as a composer attachment. Text paste is unaffected: this
-// only touches the clipboard's image data. Errors (including an empty or
-// text-only clipboard) surface as a toast.
-func (s *Shell) pasteImage() {
+// pasteImage attaches a clipboard image, reporting an empty/text-only clipboard
+// as a toast. It is the explicit trigger (ctrl+v / ;paste).
+func (s *Shell) pasteImage() { s.tryPasteImage(false) }
+
+// tryPasteImage reads an image from the system clipboard, writes it to a
+// temporary file, and stages it as a composer attachment, then opens a preview.
+// Text paste is unaffected: this only touches the clipboard's image data. When
+// quiet is true an empty/text-only clipboard is a silent no-op (used for the
+// bracketed-paste hook); otherwise it surfaces as a toast. It reports whether an
+// image was attached.
+func (s *Shell) tryPasteImage(quiet bool) bool {
 	data, ext, err := term.ReadClipboardImage()
 	if err != nil {
+		if quiet && errors.Is(err, term.ErrNoClipboardImage) {
+			return false
+		}
 		s.ShowToast("Paste image", err)
-		return
+		return false
 	}
 	f, err := os.CreateTemp("", "tuicord-paste-*."+ext)
 	if err != nil {
 		s.ShowToast("Paste image", err)
-		return
+		return false
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		_ = os.Remove(f.Name())
 		s.ShowToast("Paste image", err)
-		return
+		return false
 	}
 	f.Close()
 	filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
 	if err := s.mv.StageTempImage(f.Name(), filename, int64(len(data))); err != nil {
 		_ = os.Remove(f.Name())
 		s.ShowToast("Paste image", err)
+		return false
+	}
+	s.openAttachmentPreview()
+	return true
+}
+
+// openAttachmentPreview shows the staged image attachments in an overlay so the
+// user can confirm them before sending. It renders with the same Kitty image
+// path as inline chat media (with a cell fallback on terminals without graphics
+// support). Dismiss with Esc; the attachments stay staged.
+func (s *Shell) openAttachmentPreview() {
+	images := s.mv.imageAttachments()
+	if len(images) == 0 {
+		s.ShowNotice("Preview", "No image attachments are staged")
 		return
 	}
-	s.ShowNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send")
+	rows := make([]tui.Widget, 0, len(images)*2)
+	for _, attachment := range images {
+		label := widget.NewText(attachment.meta.Filename + " (" + formatAttachmentSize(attachment.meta.Size) + ")")
+		label.SetStyle(s.styles.Cell("messages.attachment"))
+		rows = append(rows, label)
+		if img, ok := decodePreviewImage(attachment.path); ok {
+			rows = append(rows, widget.NewKittyImageFrom(img).
+				SetID(stableImageID("preview:"+attachment.path)).
+				SetStyle(s.styles.Cell("messages.content")))
+		} else {
+			warn := widget.NewText("  (cannot decode this image)")
+			warn.SetStyle(s.styles.Cell("muted"))
+			rows = append(rows, warn)
+		}
+	}
+	border := titled("Attachment preview — Esc to close, then Enter to send", widget.Column(rows...))
+	border.SetStyle(s.styles.Cell("panels.border"))
+	border.SetFocusStyle(s.styles.Cell("panels.focus"))
+	s.overlay = border
+}
+
+// previewMaxCols and previewMaxRows bound the preview thumbnail size.
+const (
+	previewMaxCols = 60
+	previewMaxRows = 18
+)
+
+// decodePreviewImage reads and downscales an image file for a composer preview.
+func decodePreviewImage(path string) (image.Image, bool) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	img, err := media.Decode(f)
+	if err != nil {
+		return nil, false
+	}
+	return media.Downscale(img, previewMaxCols, previewMaxRows), true
 }
 
 // runThemeCommand applies a plugin-registered theme by name, or lists the
@@ -315,6 +381,17 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			return true
 		}
 		return s.overlay.Handle(ev)
+	}
+
+	// A bracketed paste carrying no text is what terminals emit when the
+	// clipboard holds an image and the user hits their native paste bind (e.g.
+	// ctrl+shift+v): the text target is empty. Treat it as an image paste so the
+	// default paste shortcut attaches images too. A real image-less empty paste
+	// is a harmless no-op.
+	if paste, ok := ev.(input.PasteEvent); ok && strings.TrimSpace(paste.Text) == "" {
+		if s.tryPasteImage(true) {
+			return true
+		}
 	}
 
 	if mouse, ok := ev.(input.MouseEvent); ok && mouse.Kind == input.MousePress && mouse.Btn == input.ButtonRight {
