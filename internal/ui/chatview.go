@@ -405,9 +405,6 @@ func (w *ChatView) openFocusedMedia() bool {
 	if w.playFocusedVideo() {
 		return true
 	}
-	if w.onOpenMedia == nil {
-		return false
-	}
 	prefix := messagePlacementPrefix(w.focusedMessage) + ":"
 	for _, line := range w.visibleLines {
 		b := line.media
@@ -415,8 +412,15 @@ func (w *ChatView) openFocusedMedia() bool {
 			continue
 		}
 		if strings.HasPrefix(b.placementKey, prefix) {
-			w.onOpenMedia(b.url, b.img, w.mediaFrames(b.url))
-			return true
+			if b.linkURL != "" {
+				w.entityAction = markup.Action{Kind: markup.ActionOpenURL, Target: b.linkURL}
+				w.entityActionSet = true
+				return true
+			}
+			if w.onOpenMedia != nil {
+				w.onOpenMedia(b.url, b.img, w.mediaFrames(b.url))
+				return true
+			}
 		}
 	}
 	return false
@@ -433,6 +437,18 @@ func (w *ChatView) mediaFrames(url string) []media.Frame {
 
 func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style, spec mediaSpec, animated bool) []chatLine {
 	return w.mediaLinesVideo(url, "", label, placementKey, base, spec, animated)
+}
+
+// mediaLinesLink renders a non-playable embed thumbnail whose activation opens
+// target in the system browser.
+func (w *ChatView) mediaLinesLink(url, target, label, placementKey string, base screen.Style, spec mediaSpec, animated bool) []chatLine {
+	lines := w.mediaLines(url, label, placementKey, base, spec, animated)
+	for i := range lines {
+		if lines[i].media != nil {
+			lines[i].media.linkURL = target
+		}
+	}
+	return lines
 }
 
 // mediaLinesVideo renders inline media, optionally as a playable video. videoURL
@@ -1167,6 +1183,9 @@ type inlineMedia struct {
 	// the poster frame; a ▶ overlay invites activation. video without img draws a
 	// placeholder box that still reserves the play region.
 	videoURL string
+	// linkURL makes an embed thumbnail open in the browser instead of the media
+	// viewer. It is mutually exclusive with videoURL.
+	linkURL string
 }
 
 // video reports whether this block is a playable video target.
@@ -2285,10 +2304,17 @@ func (w *ChatView) activateAt(x, y int, shiftMulti bool) bool {
 		}
 	}
 	// A click on a loaded image/GIF block opens it enlarged in the viewer.
-	if line := w.visibleLines[y]; line.media != nil && !line.media.video() && line.media.img != nil && w.onOpenMedia != nil {
+	if line := w.visibleLines[y]; line.media != nil && !line.media.video() && line.media.img != nil {
 		if x >= line.mediaX && x < line.mediaX+line.media.cols {
-			w.onOpenMedia(line.media.url, line.media.img, w.mediaFrames(line.media.url))
-			return true
+			if line.media.linkURL != "" {
+				w.entityAction = markup.Action{Kind: markup.ActionOpenURL, Target: line.media.linkURL}
+				w.entityActionSet = true
+				return true
+			}
+			if w.onOpenMedia != nil {
+				w.onOpenMedia(line.media.url, line.media.img, w.mediaFrames(line.media.url))
+				return true
+			}
 		}
 	}
 	for _, hit := range w.visibleLines[y].entities {

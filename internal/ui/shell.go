@@ -176,8 +176,52 @@ func (s *Shell) playVideo(url string, _ media.Rect) {
 		s.ShowToast("Video error", err)
 		return
 	}
-	full := media.Rect{Cols: sz.Width, Rows: sz.Height}
-	s.overlay = newMediaViewer(s.styles, "▶ playing — Esc to close", url, nil, nil, s.closeOverlay)
+	full := videoRectForSize(sz.Width, sz.Height)
+	v := newMediaViewer(s.styles, "▶ playing", url, nil, nil, s.closeOverlay)
+	v.setVideoControls(
+		func() {
+			if err := s.video.TogglePause(); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		func() {
+			if err := s.video.Replay(); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		func(percent float64) {
+			if err := s.video.SeekPercent(percent); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+		s.video.Status,
+	)
+	v.setVideoKeys(
+		s.cfg.Keys.VideoPause,
+		s.cfg.Keys.VideoSeekBackward,
+		s.cfg.Keys.VideoSeekForward,
+		s.cfg.Keys.VideoReplay,
+		func(seconds float64) {
+			if err := s.video.SeekRelative(seconds); err != nil {
+				s.ShowToast("Video control", err)
+			}
+		},
+	)
+	v.width, v.height = sz.Width, sz.Height
+	v.setVideoResize(func(width, height int) {
+		s.app.Post(func() {
+			if s.overlay != v || s.video == nil {
+				return
+			}
+			region := videoRectForSize(width, height)
+			if err := s.video.Resize(region); err != nil {
+				s.ShowToast("Video resize", err)
+				return
+			}
+			s.videoRegion = region
+		})
+	})
+	s.overlay = v
 	s.videoRegion = full
 	onExit := func() { s.app.Post(s.closeOverlay) }
 	if err := s.video.Play(url, full, s.app.WriteRaw, onExit); err != nil {
@@ -189,11 +233,54 @@ func (s *Shell) playVideo(url string, _ media.Rect) {
 	s.app.Invalidate()
 }
 
+func videoRectForSize(width, height int) media.Rect {
+	return media.Rect{
+		X:    mediaViewerPadding,
+		Y:    mediaViewerPadding,
+		Cols: max(width-mediaViewerPadding*2, 1),
+		Rows: max(height-videoControlRows-mediaViewerPadding*2, 1),
+	}
+}
+
 // openMediaViewer shows an already-loaded image or GIF frame enlarged in the
 // full-screen viewer.
 func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Frame) {
-	s.overlay = newMediaViewer(s.styles, "Esc to close", url, img, frames, s.closeOverlay)
+	v := newMediaViewer(s.styles, "Esc to close", url, img, frames, s.closeOverlay)
+	s.overlay = v
 	s.app.Invalidate()
+
+	// Inline media is deliberately downscaled before caching. The full-screen
+	// viewer refetches from the raw disk cache (or network) with no pixel cap so
+	// enlargement does not magnify a thumbnail.
+	cache, err := media.NewCache(0, "")
+	if err != nil {
+		return
+	}
+	fetcher := &media.Fetcher{Cache: cache}
+	animated := len(frames) > 1 || media.ClassifyURL(url) == media.ClassGIF
+	go func() {
+		if animated {
+			fullFrames, err := fetcher.FetchGIF(context.Background(), url)
+			if err != nil || len(fullFrames) == 0 {
+				return
+			}
+			s.app.Post(func() {
+				if s.overlay == v {
+					v.setFrames(fullFrames)
+				}
+			})
+			return
+		}
+		full, err := fetcher.Fetch(context.Background(), url)
+		if err != nil {
+			return
+		}
+		s.app.Post(func() {
+			if s.overlay == v {
+				v.setImage(full)
+			}
+		})
+	}()
 }
 
 // teardownVideo stops the current playback and erases mpv's final frame from the
@@ -204,8 +291,9 @@ func (s *Shell) teardownVideo() {
 	}
 	s.video.Stop()
 	if !s.videoRegion.Empty() {
-		// mpv played full-screen; drop every placement in one escape. closeOverlay
-		// force-repaints afterward, re-uploading the widget tree's own images.
+		// mpv owns an untracked Kitty image. Delete it after stopping; closeOverlay
+		// requests a force repaint, and the event loop drains this raw command
+		// before restoring the widget tree.
 		s.app.WriteRaw(media.KittyDeleteAllImages())
 		s.videoRegion = media.Rect{}
 	}
@@ -566,6 +654,12 @@ func drawPreviewText(r screen.Region, x, y int, value string, width int, style s
 }
 
 func (s *Shell) dispatchEntityAction(action markup.Action) {
+	if action.Kind == markup.ActionOpenURL {
+		if err := term.OpenURL(action.Target); err != nil {
+			s.ShowToast("Open link", err)
+		}
+		return
+	}
 	id, err := strconv.ParseUint(action.Target, 10, 64)
 	if err != nil {
 		return

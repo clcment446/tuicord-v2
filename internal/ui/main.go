@@ -274,6 +274,10 @@ func newChatMediaFetcher(cfg media.Config) *media.Fetcher {
 // substitutes conventional defaults.
 func chatMediaConfig() media.Config {
 	cfg := media.DefaultConfig()
+	// Local Kitty shared-memory frames keep playback commands small enough that
+	// input and controls remain responsive. Remote terminals cannot access the
+	// host's shared-memory objects and retain streamed payloads.
+	cfg.VideoUseSHM = os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""
 	if sz, err := term.ProbeSize(); err == nil {
 		if w, h, ok := sz.CellPixels(); ok {
 			cfg.CellPixelWidth, cfg.CellPixelHeight = w, h

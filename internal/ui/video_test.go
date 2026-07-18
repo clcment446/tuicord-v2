@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
@@ -62,13 +63,14 @@ func TestVideoAttachmentPlaceholderAndActivation(t *testing.T) {
 	}
 }
 
-func TestVideoEmbedPosterRendersPlayGlyph(t *testing.T) {
+func TestVideoEmbedPosterOpensBrowser(t *testing.T) {
 	st := store.New(0)
 	poster := "https://media.discordapp.net/external/abc/thumb.png"
 	vurl := "https://cdn.discordapp.com/external/abc/clip.mp4"
+	pageURL := "https://example.com/watch/clip"
 	st.AppendMessage(store.Message{
 		ChannelID: 1, Author: "bob",
-		Embeds: []store.Embed{{Kind: store.EmbedVideo, ThumbURL: poster, VideoURL: vurl}},
+		Embeds: []store.Embed{{Kind: store.EmbedVideo, URL: pageURL, ThumbURL: poster, VideoURL: vurl}},
 	})
 	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
 	view.SetMedia(nil, media.DefaultConfig(), nil)
@@ -80,44 +82,34 @@ func TestVideoEmbedPosterRendersPlayGlyph(t *testing.T) {
 	if view.Animating() {
 		t.Fatal("a video poster must not report as animating")
 	}
-	if len(view.videoHits) != 1 {
-		t.Fatalf("videoHits = %d, want 1", len(view.videoHits))
-	}
-	if view.videoHits[0].url != vurl {
-		t.Fatalf("video hit url = %q, want %q", view.videoHits[0].url, vurl)
+	if len(view.videoHits) != 0 {
+		t.Fatalf("videoHits = %d, want no mpv target for embeds", len(view.videoHits))
 	}
 	if graphics := buf.Graphics(); len(graphics) != 1 {
 		t.Fatalf("graphics = %d, want 1 poster placement", len(graphics))
 	}
-	if !hasGlyph(buf, "▶") {
-		t.Fatal("no ▶ play glyph over the poster")
+	var mediaLine *chatLine
+	mediaY := -1
+	for i := range view.visibleLines {
+		if view.visibleLines[i].media != nil {
+			mediaLine = &view.visibleLines[i]
+			mediaY = i
+			break
+		}
+	}
+	if mediaLine == nil || !view.activateAt(mediaLine.mediaX, mediaY, false) {
+		t.Fatal("embed thumbnail was not clickable")
+	}
+	action, ok := view.TakeEntityAction()
+	if !ok || action.Kind != markup.ActionOpenURL || action.Target != pageURL {
+		t.Fatalf("thumbnail action = %+v, %v; want browser URL %q", action, ok, pageURL)
 	}
 }
 
-func TestPlayingVideoBlanksPosterRegion(t *testing.T) {
-	st := store.New(0)
-	poster := "https://media.discordapp.net/external/abc/thumb.png"
-	vurl := "https://cdn.discordapp.com/external/abc/clip.mp4"
-	st.AppendMessage(store.Message{
-		ChannelID: 1, Author: "bob",
-		Embeds: []store.Embed{{Kind: store.EmbedVideo, ThumbURL: poster, VideoURL: vurl}},
-	})
-	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
-	view.SetMedia(nil, media.DefaultConfig(), nil)
-	view.media = map[string]*chatMediaState{poster: {img: solidTestImage(64, 36)}}
-
-	buf := screen.NewBuffer(30, 12)
-	view.Draw(buf.Clip(buf.Bounds())) // establishes layout for the play snapshot
-
-	view.SetPlayingVideo(vurl)
-	buf2 := screen.NewBuffer(30, 12)
-	view.Draw(buf2.Clip(buf2.Bounds()))
-
-	if view.playingVideo != vurl {
-		t.Fatal("playback stopped unexpectedly on an unchanged layout")
-	}
-	if graphics := buf2.Graphics(); len(graphics) != 0 {
-		t.Fatalf("graphics = %d while playing, want 0 (region blanked for mpv)", len(graphics))
+func TestGIFEmbedThumbnailStaysInMediaViewer(t *testing.T) {
+	e := store.Embed{Kind: store.EmbedGIFV, URL: "https://tenor.com/view/1", ThumbURL: "https://media.tenor.com/preview.webp"}
+	if got := embedThumbnailLink(e, e.ThumbURL); got != "" {
+		t.Fatalf("GIF thumbnail browser target = %q, want empty", got)
 	}
 }
 

@@ -56,7 +56,7 @@ func New(opts ...Option) *App {
 	a := &App{
 		dirty:     true,
 		wake:      make(chan struct{}, 1),
-		rawWrites: make(chan []byte, 256),
+		rawWrites: make(chan []byte, 8),
 		escExits:  5,
 		mouseOn:   true,
 	}
@@ -142,6 +142,12 @@ func (a *App) takeForceRepaint() bool {
 	f := a.forceRepaint
 	a.forceRepaint = false
 	return f
+}
+
+func (a *App) forceRepaintPending() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.forceRepaint
 }
 
 // Dirty reports whether the app currently needs to redraw.
@@ -401,9 +407,21 @@ func (a *App) run(
 	prev := (*screen.Buffer)(nil)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
+	writeAll := func(data []byte) error {
+		for len(data) > 0 {
+			n, err := out.Write(data)
+			if err != nil {
+				return err
+			}
+			if n <= 0 {
+				return io.ErrShortWrite
+			}
+			data = data[n:]
+		}
+		return nil
+	}
 
 	render := func() error {
-		a.drainPosts()
 		if !a.Dirty() {
 			return nil
 		}
@@ -425,16 +443,42 @@ func (a *App) run(
 			frame = screen.Frame(prev, next, syncOutput(out))
 		}
 		if len(frame) > 0 {
-			if _, err := out.Write(frame); err != nil {
+			if err := writeAll(frame); err != nil {
 				return err
 			}
 		}
 		prev = next
 		return nil
 	}
+	flushRaw := func(limit int) error {
+		for i := 0; i < limit; i++ {
+			select {
+			case b := <-a.rawWrites:
+				if err := writeAll(b); err != nil {
+					return err
+				}
+			default:
+				return nil
+			}
+		}
+		return nil
+	}
 	a.Invalidate()
 	fastTick := false
 	for {
+		// Posts may stop mpv and request a force repaint. Flush every raw Kitty
+		// command they queued before rendering, so mpv's final global delete can
+		// never run after the restored frame.
+		a.drainPosts()
+		rawLimit := 1
+		if a.forceRepaintPending() {
+			// The video reader has stopped before requesting restoration, so this
+			// backlog is finite and must be completely ordered before the repaint.
+			rawLimit = int(^uint(0) >> 1)
+		}
+		if err := flushRaw(rawLimit); err != nil {
+			return err
+		}
 		if err := render(); err != nil {
 			// Canceling a prompt closes the terminal input to unblock its read.
 			// A final render can race that close; cancellation is still a clean
@@ -465,18 +509,8 @@ func (a *App) run(
 			// Flush queued raw bytes (mpv video) after the current frame, draining
 			// the whole backlog so playback stays smooth without one render per
 			// chunk. These bytes place graphics the widget tree does not own.
-			if _, err := out.Write(b); err != nil {
+			if err := writeAll(b); err != nil {
 				return err
-			}
-			for drained := false; !drained; {
-				select {
-				case b2 := <-a.rawWrites:
-					if _, err := out.Write(b2); err != nil {
-						return err
-					}
-				default:
-					drained = true
-				}
 			}
 		case <-ticker.C:
 			if a.Handle(input.TickEvent{}) {

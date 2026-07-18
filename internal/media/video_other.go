@@ -17,9 +17,15 @@ func (p *VideoPlayer) Available() bool { return false }
 func (p *VideoPlayer) Playing() (string, bool) { return "", false }
 
 // Play always returns ErrVideoUnsupported.
-func (p *VideoPlayer) Play(url string, region, term Rect, out func([]byte), onExit func()) error {
+func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit func()) error {
 	return ErrVideoUnsupported
 }
 
 // Stop is a no-op.
-func (p *VideoPlayer) Stop() {}
+func (p *VideoPlayer) Stop()                        {}
+func (p *VideoPlayer) TogglePause() error           { return ErrVideoUnsupported }
+func (p *VideoPlayer) Replay() error                { return ErrVideoUnsupported }
+func (p *VideoPlayer) SeekPercent(float64) error    { return ErrVideoUnsupported }
+func (p *VideoPlayer) SeekRelative(float64) error   { return ErrVideoUnsupported }
+func (p *VideoPlayer) Resize(Rect) error            { return ErrVideoUnsupported }
+func (p *VideoPlayer) Status() (VideoStatus, error) { return VideoStatus{}, ErrVideoUnsupported }

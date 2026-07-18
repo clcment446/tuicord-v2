@@ -37,6 +37,16 @@ match:
 		return ev.Key == input.KeyTab
 	case "enter", "return":
 		return ev.Key == input.KeyEnter
+	case "space":
+		return ev.Key == input.KeyRune && ev.Rune == ' '
+	case "left":
+		return ev.Key == input.KeyLeft
+	case "right":
+		return ev.Key == input.KeyRight
+	case "up":
+		return ev.Key == input.KeyUp
+	case "down":
+		return ev.Key == input.KeyDown
 	default:
 		// Single character key.
 		return ev.Key == input.KeyRune && strings.ToLower(string(ev.Rune)) == spec

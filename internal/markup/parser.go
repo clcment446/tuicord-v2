@@ -78,10 +78,22 @@ func (p *parser) matchAt(i int) int {
 		if n := p.scanDiscordURL(i); n > i {
 			return n
 		}
-		return i
+		return p.scanWebURL(i)
+	case p.has(i, "https://"), p.has(i, "http://"):
+		return p.scanWebURL(i)
 	default:
 		return i
 	}
+}
+
+func (p *parser) scanWebURL(i int) int {
+	end := urlEnd(p.src, i)
+	if end <= i {
+		return i
+	}
+	target := p.src[i:end]
+	p.emit(Span{Kind: Kind_Link, Text: target, URL: target, Action: &Action{Kind: ActionOpenURL, Target: target}})
+	return end
 }
 
 // scanSmall consumes Discord's -# small-text line. The marker requires a
@@ -284,7 +296,7 @@ func (p *parser) scanLink(i int) int {
 		p.emit(Span{Kind: Kind_FakeSticker, Text: strings.TrimPrefix(label, FakeStickerMarker), URL: url})
 		return urlStart + closeURL + 1
 	}
-	p.emit(Span{Kind: Kind_Link, Text: label, URL: url})
+	p.emit(Span{Kind: Kind_Link, Text: label, URL: url, Action: &Action{Kind: ActionOpenURL, Target: url}})
 	return urlStart + closeURL + 1
 }
 
