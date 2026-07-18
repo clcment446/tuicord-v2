@@ -308,6 +308,14 @@ type Store struct {
 	channels     map[ChannelID]Channel
 
 	messages map[ChannelID]*ring
+	// deletedMessages records MESSAGE_DELETE tombstones. A REST history response
+	// that was already in flight when a delete arrived must not resurrect that
+	// message. Explicit creates clear their own tombstone.
+	deletedMessages map[ChannelID]map[MessageID]uint64
+	// channelGeneration changes whenever a channel is created or deleted. Async
+	// history requests snapshot it so a response for a deleted (or recreated)
+	// channel cannot recreate that channel's message ring.
+	channelGeneration map[ChannelID]uint64
 
 	members map[GuildID]map[UserID]Member
 	roles   map[GuildID]map[RoleID]Role
@@ -361,17 +369,19 @@ func New(historyLimit int) *Store {
 		historyLimit = DefaultHistoryLimit
 	}
 	return &Store{
-		historyLimit:  historyLimit,
-		guilds:        map[GuildID]Guild{},
-		channelOrder:  map[GuildID][]ChannelID{},
-		channels:      map[ChannelID]Channel{},
-		messages:      map[ChannelID]*ring{},
-		members:       map[GuildID]map[UserID]Member{},
-		roles:         map[GuildID]map[RoleID]Role{},
-		unread:        map[ChannelID]int{},
-		pings:         map[ChannelID]int{},
-		guildEmojis:   map[GuildID][]GuildEmoji{},
-		guildStickers: map[GuildID][]GuildSticker{},
+		historyLimit:      historyLimit,
+		guilds:            map[GuildID]Guild{},
+		channelOrder:      map[GuildID][]ChannelID{},
+		channels:          map[ChannelID]Channel{},
+		messages:          map[ChannelID]*ring{},
+		deletedMessages:   map[ChannelID]map[MessageID]uint64{},
+		channelGeneration: map[ChannelID]uint64{},
+		members:           map[GuildID]map[UserID]Member{},
+		roles:             map[GuildID]map[RoleID]Role{},
+		unread:            map[ChannelID]int{},
+		pings:             map[ChannelID]int{},
+		guildEmojis:       map[GuildID][]GuildEmoji{},
+		guildStickers:     map[GuildID][]GuildSticker{},
 	}
 }
 
@@ -533,9 +543,16 @@ func (s *Store) UpsertChannel(c Channel) {
 		}
 	} else {
 		s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
+		s.channelGeneration[c.ID]++
 	}
 	s.channels[c.ID] = c
 	s.touchMeta()
+}
+
+// ChannelGeneration identifies the current lifetime of a channel. It changes
+// on creation and deletion and is safe to snapshot before an async request.
+func (s *Store) ChannelGeneration(id ChannelID) uint64 {
+	return s.channelGeneration[id]
 }
 
 // Channel returns the channel with id, if known.
@@ -565,6 +582,7 @@ func (s *Store) AppendMessage(m Message) {
 	}
 	m.rev = s.nextRevision()
 	r.push(m)
+	s.clearMessageTombstone(m.ChannelID, m.ID)
 }
 
 // SetMessages replaces a channel's history with messages in oldest-first order.
@@ -585,6 +603,7 @@ func (s *Store) SetMessages(channel ChannelID, messages []Message) {
 		m.ChannelID = channel
 		m.rev = s.nextRevision()
 		r.push(m)
+		s.clearMessageTombstone(channel, m.ID)
 	}
 	// Echoes keep their existing revision: they have not changed, so anything
 	// caching a render of them stays valid.
@@ -628,6 +647,16 @@ func (s *Store) unconfirmedEchoes(channel ChannelID, incoming []Message) []Messa
 // PrependMessages adds older messages before the existing channel history.
 // Both slices must be ordered oldest-first.
 func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
+	// A direct prepend has no in-flight interval, so all current messages are
+	// ordinary window candidates. Async callers use PrependMessagesSince.
+	s.PrependMessagesSince(channel, messages, s.rev)
+}
+
+// PrependMessagesSince prepends an older page while reserving messages mutated
+// after requestRevision. At full capacity this advances the oldest edge of the
+// window without discarding gateway arrivals, edits, or local echoes that were
+// made while the REST request was in flight.
+func (s *Store) PrependMessagesSince(channel ChannelID, messages []Message, requestRevision uint64) {
 	if len(messages) == 0 {
 		return
 	}
@@ -641,6 +670,9 @@ func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
 	combined := make([]Message, 0, len(messages)+len(current))
 	for _, message := range messages {
 		if message.ID != 0 {
+			if s.MessageTombstoned(channel, message.ID) {
+				continue
+			}
 			if _, exists := known[message.ID]; exists {
 				continue
 			}
@@ -650,26 +682,47 @@ func (s *Store) PrependMessages(channel ChannelID, messages []Message) {
 	}
 	combined = append(combined, current...)
 
-	// A normal ring push evicts from the front. For a prepend that would throw
-	// away exactly the older page we just fetched, so bound from the back
-	// instead. Pending/failed local echoes remain reserved at the newest end.
-	echoes := make([]Message, 0)
-	history := combined[:0]
+	protected := 0
 	for _, message := range combined {
-		if message.Pending || message.Failed {
-			echoes = append(echoes, message)
-			continue
+		if message.Pending || message.Failed || message.rev > requestRevision {
+			protected++
 		}
-		history = append(history, message)
 	}
-	if len(echoes) > s.historyLimit {
-		echoes = echoes[len(echoes)-s.historyLimit:]
+	if protected >= s.historyLimit {
+		// The bounded ring cannot hold both a full window of post-request state
+		// and older history. In that exceptional case, retain the newest live
+		// state rather than losing messages the user has just received.
+		bounded := make([]Message, 0, s.historyLimit)
+		skip := protected - s.historyLimit
+		for _, message := range combined {
+			if !(message.Pending || message.Failed || message.rev > requestRevision) {
+				continue
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			bounded = append(bounded, message)
+		}
+		s.replaceMessages(channel, bounded)
+		return
 	}
-	available := s.historyLimit - len(echoes)
-	if len(history) > available {
-		history = history[:available]
+
+	// Reserve every post-request mutation, then spend the remaining capacity
+	// from the oldest edge: fetched page first, followed by the oldest part of
+	// the pre-request window. This guarantees pagination progress.
+	available := s.historyLimit - protected
+	bounded := make([]Message, 0, s.historyLimit)
+	for _, message := range combined {
+		keep := message.Pending || message.Failed || message.rev > requestRevision
+		if !keep && available > 0 {
+			keep = true
+			available--
+		}
+		if keep {
+			bounded = append(bounded, message)
+		}
 	}
-	bounded := append(append(make([]Message, 0, len(history)+len(echoes)), history...), echoes...)
 	s.replaceMessages(channel, bounded)
 }
 
@@ -701,7 +754,11 @@ func (s *Store) ReplaceMessage(nonce string, confirmed Message) bool {
 		return false
 	}
 	confirmed.rev = s.nextRevision()
-	return r.replaceByNonce(nonce, confirmed)
+	if !r.replaceByNonce(nonce, confirmed) {
+		return false
+	}
+	s.clearMessageTombstone(confirmed.ChannelID, confirmed.ID)
+	return true
 }
 
 // MarkFailed flags the pending message with the given nonce as failed to send.
@@ -720,6 +777,28 @@ func (s *Store) Messages(channel ChannelID) []Message {
 		return nil
 	}
 	return r.slice()
+}
+
+// Revision returns the latest message mutation revision. Async history callers
+// use it to distinguish their request baseline from in-flight gateway changes.
+func (s *Store) Revision() uint64 { return s.rev }
+
+// MessageTombstoned reports whether a delete has been observed for message.
+// Tombstones survive until an explicit create for the same ID and prevent stale
+// REST pages from resurrecting deleted messages.
+func (s *Store) MessageTombstoned(channel ChannelID, message MessageID) bool {
+	return s.deletedMessages[channel][message] != 0
+}
+
+func (s *Store) clearMessageTombstone(channel ChannelID, message MessageID) {
+	if message == 0 {
+		return
+	}
+	deleted := s.deletedMessages[channel]
+	delete(deleted, message)
+	if len(deleted) == 0 {
+		delete(s.deletedMessages, channel)
+	}
 }
 
 // UpsertMember inserts or updates a guild member.

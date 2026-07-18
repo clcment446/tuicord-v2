@@ -31,7 +31,11 @@ func (s *Store) RemoveChannel(id ChannelID) {
 			s.removeChannel(childID)
 		}
 	}
-	s.removeChannel(id)
+	if !s.removeChannel(id) {
+		// A delete can race channel hydration. Still advance the lifetime so an
+		// older in-flight history response cannot create a message-only cache.
+		s.channelGeneration[id]++
+	}
 }
 
 // RemoveGuild deletes a guild and all state owned by it.
@@ -79,17 +83,20 @@ func (s *Store) SetGuildUnavailable(id GuildID, unavailable bool) bool {
 }
 
 // removeChannel drops one channel from the store.
-func (s *Store) removeChannel(id ChannelID) {
+func (s *Store) removeChannel(id ChannelID) bool {
 	c, ok := s.channels[id]
 	if !ok {
-		return
+		return false
 	}
 	s.removeChannelOrder(c.GuildID, id)
 	delete(s.channels, id)
 	delete(s.messages, id)
+	delete(s.deletedMessages, id)
 	delete(s.unread, id)
 	delete(s.pings, id)
+	s.channelGeneration[id]++
 	s.touchMeta()
+	return true
 }
 
 func (s *Store) removeChannelOrder(guild GuildID, id ChannelID) {

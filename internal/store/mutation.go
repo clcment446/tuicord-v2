@@ -18,6 +18,15 @@ func (s *Store) UpdateMessage(channel ChannelID, id MessageID, patch func(*Messa
 // RemoveMessage deletes message id from channel's ring. It returns true when a
 // matching message was present.
 func (s *Store) RemoveMessage(channel ChannelID, id MessageID) bool {
+	if id == 0 {
+		return false
+	}
+	deleted := s.deletedMessages[channel]
+	if deleted == nil {
+		deleted = make(map[MessageID]uint64)
+		s.deletedMessages[channel] = deleted
+	}
+	deleted[id] = s.nextRevision()
 	r := s.messages[channel]
 	if r == nil {
 		return false

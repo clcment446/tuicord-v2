@@ -218,6 +218,40 @@ func TestPrependMessagesAtCapacityRetainsFetchedOlderPage(t *testing.T) {
 	}
 }
 
+func TestPrependMessagesSinceRetainsPostRequestArrivalAtCapacity(t *testing.T) {
+	s := New(4)
+	s.SetMessages(7, []Message{{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
+	requestRevision := s.Revision()
+	s.AppendMessage(Message{ID: 9, ChannelID: 7})
+
+	s.PrependMessagesSince(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}, requestRevision)
+
+	got := messageIDs(s.Messages(7))
+	want := []MessageID{1, 2, 3, 9}
+	if len(got) != len(want) {
+		t.Fatalf("messages = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("messages = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestDeleteTombstoneSurvivesMissingRingUntilExplicitCreate(t *testing.T) {
+	s := New(0)
+	if s.RemoveMessage(7, 99) {
+		t.Fatal("delete of uncached message reported a removal")
+	}
+	if !s.MessageTombstoned(7, 99) {
+		t.Fatal("uncached delete did not leave a tombstone")
+	}
+	s.AppendMessage(Message{ID: 99, ChannelID: 7})
+	if s.MessageTombstoned(7, 99) {
+		t.Fatal("explicit create did not clear tombstone")
+	}
+}
+
 func TestPrependMessagesDeduplicatesOverlapAndPreservesOrderAtCapacity(t *testing.T) {
 	s := New(5)
 	s.SetMessages(7, []Message{{ID: 4}, {ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
