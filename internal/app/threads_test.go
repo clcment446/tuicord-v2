@@ -10,6 +10,7 @@ import (
 
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 )
 
 // fakeThreadClient records thread REST calls. Each method sends on sig after it
@@ -97,6 +98,46 @@ func TestLoadArchivedThreadsCapturesParentGuildBeforeWorker(t *testing.T) {
 	}
 	if thread.GuildID != 7 {
 		t.Fatalf("archived thread guild = %d, want snapshot guild 7", thread.GuildID)
+	}
+}
+
+func TestThreadDeleteInvalidatesParentArchivedLoad(t *testing.T) {
+	ready := make(chan struct{})
+	release := make(chan struct{})
+	tc := &fakeThreadClient{
+		archivedReady:   ready,
+		archivedRelease: release,
+		archived: &api.ArchivedThreads{ActiveThreads: api.ActiveThreads{Threads: []discord.Channel{
+			{ID: 10, GuildID: 7, Type: discord.GuildPublicThread, ParentID: 100, ThreadMetadata: &discord.ThreadMetadata{Archived: true}},
+		}}},
+	}
+	ui := newChannelPoster()
+	a := &App{store: store.New(0), ui: ui, threads: tc}
+	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 7, Kind: store.ChannelForum})
+	a.store.UpsertThread(store.Channel{ID: 10, GuildID: 7, ParentID: 100, Thread: &store.ThreadMeta{Archived: true}})
+
+	a.LoadArchivedThreads(100)
+	waitSig(t, ready)
+	a.resourceMu.Lock()
+	requestVersion := a.archivedGate.version[store.ChannelID(100)]
+	a.resourceMu.Unlock()
+
+	// Omit ParentID to verify the handler snapshots it from the cached thread
+	// before removal, then invalidates the parent's in-flight archive request.
+	a.handleThreadDelete(&gateway.ThreadDeleteEvent{ID: 10, GuildID: 7})
+	ui.runNext(t)
+	a.resourceMu.Lock()
+	invalidatedVersion := a.archivedGate.version[store.ChannelID(100)]
+	_, pending := a.archivedGate.pending[store.ChannelID(100)]
+	a.resourceMu.Unlock()
+	if invalidatedVersion == requestVersion || pending {
+		t.Fatalf("parent archive gate version/pending = %d/%t after delete, request version %d", invalidatedVersion, pending, requestVersion)
+	}
+
+	close(release)
+	ui.runNext(t)
+	if _, ok := a.store.Channel(10); ok {
+		t.Fatal("stale archived-thread completion resurrected deleted thread")
 	}
 }
 

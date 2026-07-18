@@ -887,13 +887,18 @@ func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 func (a *App) handleThreadDelete(e *gateway.ThreadDeleteEvent) {
 	id := store.ChannelID(e.ID)
 	guildID := store.GuildID(e.GuildID)
+	parentID := store.ChannelID(e.ParentID)
 	a.ui.Post(func() {
-		if guildID == 0 {
-			if channel, ok := a.store.Channel(id); ok {
+		if channel, ok := a.store.Channel(id); ok {
+			if guildID == 0 {
 				guildID = channel.GuildID
+			}
+			if parentID == 0 {
+				parentID = channel.ParentID
 			}
 		}
 		a.invalidateThreadLoad(guildID)
+		a.invalidateArchivedLoad(parentID)
 		a.invalidateChannelLoads(id)
 		a.store.RemoveThread(id)
 		a.repairActiveChannel()
@@ -942,6 +947,17 @@ func (a *App) invalidateRoleLoad(id store.GuildID) {
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
 	a.rolesGate.invalidate(id)
+}
+
+func (a *App) invalidateArchivedLoad(id store.ChannelID) {
+	if id == 0 {
+		return
+	}
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.archivedGate.invalidate(id)
+	delete(a.archivedBefore, id)
 }
 
 func (a *App) invalidateChannelLoads(id store.ChannelID) {
@@ -1745,6 +1761,7 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 			// Any deletion invalidates the directory gate. Do not let this old
 			// failure clear a newer request's pending state.
 			if !a.directorySnapshotCurrent(snapshot, nil, nil) {
+				a.finishGuildLoadVersion(snapshot.gateVersion, false)
 				return
 			}
 			a.finishGuildLoad(false)
@@ -1758,7 +1775,10 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 	a.ui.Post(func() {
 		if !a.directorySnapshotCurrent(snapshot, guilds, privateChannels) {
 			// A returned guild/channel was deleted or replaced while this directory
-			// request (including DM detail hydration) was in flight.
+			// request (including DM detail hydration) was in flight. Finish only this
+			// gate version so a generation-only rejection remains retryable without
+			// disturbing a newer request after explicit invalidation.
+			a.finishGuildLoadVersion(snapshot.gateVersion, false)
 			return
 		}
 		for _, guild := range guilds {
@@ -1983,6 +2003,12 @@ func (a *App) finishGuildLoad(ok bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.guildsGate.finish(ok)
+}
+
+func (a *App) finishGuildLoadVersion(version uint64, ok bool) {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.guildsGate.finishVersion(version, ok)
 }
 
 func (a *App) beginHistoryLoad(channel store.ChannelID) (uint64, bool) {

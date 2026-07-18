@@ -61,6 +61,44 @@ func (l *sequencedChannelDetails) Channel(discord.ChannelID) (*discord.Channel, 
 	return &result, nil
 }
 
+type directoryLoadStep struct {
+	ready   chan struct{}
+	release chan struct{}
+	guilds  []discord.Guild
+	dms     []discord.Channel
+}
+
+type sequencedDirectoryLoader struct {
+	mu         sync.Mutex
+	steps      []*directoryLoadStep
+	guildCalls int
+	dmCalls    int
+}
+
+func (l *sequencedDirectoryLoader) Guilds(uint) ([]discord.Guild, error) {
+	l.mu.Lock()
+	step := l.steps[l.guildCalls]
+	l.guildCalls++
+	l.mu.Unlock()
+	close(step.ready)
+	<-step.release
+	return append([]discord.Guild(nil), step.guilds...), nil
+}
+
+func (l *sequencedDirectoryLoader) PrivateChannels() ([]discord.Channel, error) {
+	l.mu.Lock()
+	step := l.steps[l.dmCalls]
+	l.dmCalls++
+	l.mu.Unlock()
+	return append([]discord.Channel(nil), step.dms...), nil
+}
+
+func (l *sequencedDirectoryLoader) callCount() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.guildCalls
+}
+
 func TestChannelLoaderStaleCompletionCannotPoisonRecreatedGuildGate(t *testing.T) {
 	first := &channelLoadStep{
 		ready:   make(chan struct{}),
@@ -112,6 +150,48 @@ func TestChannelLoaderStaleCompletionCannotPoisonRecreatedGuildGate(t *testing.T
 	channel, ok := a.store.Channel(20)
 	if !ok || channel.Name != "new" || channel.GuildID != 1 {
 		t.Fatalf("new lifetime channel = %+v, %t", channel, ok)
+	}
+}
+
+func TestDirectoryGenerationRejectionAllowsRetry(t *testing.T) {
+	first := &directoryLoadStep{
+		ready:   make(chan struct{}),
+		release: make(chan struct{}),
+		guilds:  []discord.Guild{{ID: 1, Name: "stale directory"}},
+	}
+	second := &directoryLoadStep{
+		ready:   make(chan struct{}),
+		release: make(chan struct{}),
+		guilds:  []discord.Guild{{ID: 1, Name: "fresh directory"}},
+	}
+	loader := &sequencedDirectoryLoader{steps: []*directoryLoadStep{first, second}}
+	ui := newChannelPoster()
+	a := &App{store: store.New(0), ui: ui, dirs: loader}
+	a.store.UpsertGuild(store.Guild{ID: 1, Name: "live gateway"})
+
+	a.LoadGuilds(100)
+	waitSig(t, first.ready)
+	// Change the channel-generation snapshot without invalidating the directory
+	// gate. The first result must be rejected, but its pending bit must not stick.
+	a.handleChannelUpsert(discord.Channel{ID: 10, GuildID: 1, Type: discord.GuildText, Name: "live"})
+	ui.runNext(t)
+	close(first.release)
+	ui.runNext(t)
+	guild, _ := a.store.Guild(1)
+	if guild.Name != "live gateway" {
+		t.Fatalf("stale directory result was installed: %+v", guild)
+	}
+
+	a.LoadGuilds(100)
+	waitSig(t, second.ready)
+	if got := loader.callCount(); got != 2 {
+		t.Fatalf("directory calls = %d, want retry after generation rejection", got)
+	}
+	close(second.release)
+	ui.runNext(t)
+	guild, _ = a.store.Guild(1)
+	if guild.Name != "fresh directory" {
+		t.Fatalf("retry result was not installed: %+v", guild)
 	}
 }
 
