@@ -133,6 +133,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mediaCfg := chatMediaConfig()
 	if fetcher := newChatMediaFetcher(mediaCfg); fetcher != nil {
 		mv.chat.SetMedia(fetcher, mediaCfg, a.Post)
+		mv.chat.SetInvalidate(a.Invalidate)
 	}
 
 	mv.composerStatus = widget.NewText("")

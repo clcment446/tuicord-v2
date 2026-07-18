@@ -34,6 +34,12 @@ import (
 // orchestration logic can be tested without a real terminal runtime.
 type poster interface {
 	Post(func())
+	// WriteRaw queues raw terminal bytes to be flushed between frames (used for
+	// mpv's inline video graphics). Invalidate forces a redraw. ForceRepaint
+	// re-emits every cell and graphic (used after mpv painted over the screen).
+	WriteRaw([]byte)
+	Invalidate()
+	ForceRepaint()
 }
 
 // EventSink receives client events for out-of-tree consumers (the Lua plugin
@@ -493,6 +499,27 @@ func (a *App) Store() *store.Store { return a.store }
 func (a *App) Post(fn func()) {
 	if a != nil && a.ui != nil {
 		a.ui.Post(fn)
+	}
+}
+
+// WriteRaw queues raw terminal bytes for the UI loop to flush between frames.
+func (a *App) WriteRaw(b []byte) {
+	if a != nil && a.ui != nil {
+		a.ui.WriteRaw(b)
+	}
+}
+
+// Invalidate forces the UI to redraw on its next loop turn.
+func (a *App) Invalidate() {
+	if a != nil && a.ui != nil {
+		a.ui.Invalidate()
+	}
+}
+
+// ForceRepaint forces the UI to re-emit every cell and graphic on its next turn.
+func (a *App) ForceRepaint() {
+	if a != nil && a.ui != nil {
+		a.ui.ForceRepaint()
 	}
 }
 
