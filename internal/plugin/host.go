@@ -33,4 +33,8 @@ type Host struct {
 	Style func(selector string, props map[string]string)
 	// OpenOverlay shows a read-only panel of text lines with the given title.
 	OpenOverlay func(title string, lines []string)
+	// ApplyTheme swaps the active color palette. Keys are the semantic palette
+	// names (background, text, muted, accent, selection, border, error); values
+	// are hex colors. Missing keys keep their current value.
+	ApplyTheme func(palette map[string]string)
 }

@@ -150,4 +150,27 @@ end, "test the network grant")
 tuicord.keymap("ctrl+g", function() tuicord.send("gg") end)
 tuicord.keymap("ctrl+b", function() tuicord.overlay("Plugin self-test", status_lines()) end)
 
-tuicord.log("everything.lua loaded: " .. #EVENTS .. " events, commands and keymaps registered")
+-- ---------------------------------------------------------------------------
+-- Themes (tuicord.theme). Register named palettes; switch with `;theme <name>`.
+-- ---------------------------------------------------------------------------
+tuicord.theme("dracula", {
+  background = "#282a36",
+  text       = "#f8f8f2",
+  muted      = "#6272a4",
+  accent     = "#bd93f9",
+  selection  = "#44475a",
+  border     = "#44475a",
+  error      = "#ff5555",
+})
+
+tuicord.theme("nord", {
+  background = "#2e3440",
+  text       = "#eceff4",
+  muted      = "#4c566a",
+  accent     = "#88c0d0",
+  selection  = "#434c5e",
+  border     = "#434c5e",
+  error      = "#bf616a",
+})
+
+tuicord.log("everything.lua loaded: " .. #EVENTS .. " events, commands, keymaps and 2 themes registered")

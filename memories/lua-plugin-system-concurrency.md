@@ -52,8 +52,26 @@ goroutine.**
   the plugin-goroutine LState. `Shell.OpenPluginOverlay` renders plugin-supplied
   text lines; Esc dismisses via the existing overlay handling.
 
+## Lua config file & theme switching
+
+- **config.lua** (`config.ConfigLuaPath()`, beside config.toml) is loaded by
+  `Manager.LoadConfig` on every startup **independent of `[plugins].enabled`** —
+  it is the seam for user keybindings/settings in Lua, not a plugin. main.go's
+  setupPlugins now builds the manager when plugins are enabled OR config.lua
+  exists, loads config.lua first, then the plugins dir only if enabled.
+- **Themes**: `tuicord.theme(name, palette)` registers a 7-color palette in a
+  `themeRegistry`; `;theme <name>` (Shell) calls `Manager.ApplyTheme`, which
+  invokes `Host.ApplyTheme`. Live apply works by rebuilding
+  `config.CellStyles(palette.Styles(), overrides)` and **repopulating the shared
+  `Styles.Cells` map in place** (delete+reinsert on the same map object) so
+  `Cell()`-based rendering updates without rebuilding widgets. Limitation:
+  surfaces that snapshot a style at construction, and the toolkit `tui.Theme`
+  (no live setter), only update on restart.
+- Plugin overlays are themed via `s.styles.Cell("messages.content"/"panels.*")`.
+
 ## Status
 
-All four approved surfaces are built, wired, and tested (race-clean): events,
-actions, `;`-commands, keybindings, runtime theming, and custom overlays.
+All approved surfaces built, wired, tested (race-clean): events, actions,
+`;`-commands, keybindings, runtime `tuicord.style`, custom overlays, config.lua
+for Lua settings/binds, and named theme registration + `;theme` switching.
 Branch: devstyly. Plan: ~/.claude/plans/plan-the-lua-based-glowing-brooks.md.
