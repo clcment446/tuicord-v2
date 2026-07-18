@@ -14,8 +14,8 @@ type Config struct {
 	// The aspect ratio is always preserved.
 	MaxHeightCells int
 
-	// Animate enables GIF animation via the Kitty graphics animation protocol.
-	// When false the first frame is shown with a "[GIF]" badge overlay.
+	// Animate enables multi-frame GIF playback in the chat renderer. When false
+	// the first frame is shown with a "[GIF]" badge.
 	Animate bool
 
 	// EmojiImages renders custom Discord emoji as small inline images (one

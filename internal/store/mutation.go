@@ -90,26 +90,39 @@ func (s *Store) RemoveReaction(channel ChannelID, id MessageID, emojiName string
 //
 // Position ties are broken deterministically by RoleID (lower ID wins).
 func (s *Store) MemberColor(guild GuildID, user UserID) uint32 {
-	m, ok := s.members[guild][user]
+	role, ok := s.MemberDisplayRole(guild, user)
 	if !ok {
 		return 0
+	}
+	return role.GradientAt(0)
+}
+
+// MemberDisplayRole returns the highest-position role that gives user a
+// visible display color. It includes gradient-only roles, whose flat Color is
+// intentionally zero in Discord's payload.
+func (s *Store) MemberDisplayRole(guild GuildID, user UserID) (Role, bool) {
+	m, ok := s.members[guild][user]
+	if !ok {
+		return Role{}, false
 	}
 	roles := s.roles[guild]
 	bestPos := -1
 	bestID := RoleID(0)
-	var bestColor uint32
+	var best Role
+	found := false
 	for _, rid := range m.RoleIDs {
 		r, exists := roles[rid]
-		if !exists || r.Color == 0 {
+		if !exists || r.GradientAt(0) == 0 {
 			continue
 		}
 		higher := r.Position > bestPos
-		tied := r.Position == bestPos && (bestColor == 0 || rid < bestID)
+		tied := r.Position == bestPos && (!found || rid < bestID)
 		if higher || tied {
 			bestPos = r.Position
 			bestID = rid
-			bestColor = r.Color
+			best = r
+			found = true
 		}
 	}
-	return bestColor
+	return best, found
 }

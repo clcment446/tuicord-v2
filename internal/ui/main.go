@@ -126,6 +126,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.memberList.SetStyle(styles.Cell("guilds.members"))
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
 	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)
@@ -212,6 +213,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinSecond(membersWidth).
 		CollapsibleSecond().
 		Vertical()
+	chatAndMembers.SetStyle(mv.styles.Cell("panels.border"))
 	membersNode := members.Layout()
 	membersPolicy.Apply(membersNode, layout.Row)
 	membersNode.HideBelow = mv.cfg.Layout.MembersHideBelow
@@ -230,6 +232,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(12).
 		MaxFirst(40).
 		CollapsibleFirst()
+	channelsAndRest.SetStyle(mv.styles.Cell("panels.border"))
 	channelsPolicy.Apply(channels.Layout(), layout.Row)
 	if channelsPolicy.Visible != nil {
 		channelsAndRest.HideFirst(!*channelsPolicy.Visible)
@@ -246,6 +249,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(3).
 		MaxFirst(24).
 		CollapsibleFirst()
+	root.SetStyle(mv.styles.Cell("panels.border"))
 	guildsPolicy.Apply(guildRail.Layout(), layout.Row)
 	if guildsPolicy.Visible != nil {
 		root.HideFirst(!*guildsPolicy.Visible)
@@ -550,6 +554,36 @@ func (mv *MainView) onChannelSelected(index int) {
 	mv.showChat()
 	mv.app.LoadHistory(row.ChannelID, 50)
 	mv.updateChannelChrome()
+}
+
+// NavigateToChannel activates a known channel from an out-of-band UI target
+// such as an incoming-message notification.
+func (mv *MainView) NavigateToChannel(id store.ChannelID) bool {
+	if mv == nil || mv.app == nil || id == 0 {
+		return false
+	}
+	channel, ok := mv.app.Store().Channel(id)
+	if !ok {
+		return false
+	}
+	if mv.app.ActiveGuild() != channel.GuildID {
+		mv.app.SetActive(channel.GuildID, id)
+		if guildIndex := mv.guildRowIndex(channel.GuildID); guildIndex >= 0 {
+			mv.guildList.SetSelectedSilent(guildIndex)
+		}
+		mv.refreshChannels()
+		mv.refreshMembers(channel.GuildID)
+	}
+	if index := mv.channelRowIndex(id); index >= 0 {
+		mv.channelList.SetSelectedSilent(index)
+		mv.onChannelSelected(index)
+		return true
+	}
+	mv.app.SetActive(channel.GuildID, id)
+	mv.showChat()
+	mv.app.LoadHistory(id, 50)
+	mv.updateChannelChrome()
+	return true
 }
 
 func (mv *MainView) unfoldSelectedChannelCategory(_ bool) bool {

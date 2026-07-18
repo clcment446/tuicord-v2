@@ -741,6 +741,29 @@ func TestChatViewEscapeReturnsToNewestMessages(t *testing.T) {
 	}
 }
 
+func TestChatViewPageKeysScrollByViewport(t *testing.T) {
+	st := store.New(0)
+	for i := 0; i < 10; i++ {
+		st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Content: "line"})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(20, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyPageUp}) {
+		t.Fatal("PageUp was not handled")
+	}
+	if got := view.bottomScroll.Offset(); got != 4 {
+		t.Fatalf("PageUp offset = %d, want 4", got)
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyPageDown}) {
+		t.Fatal("PageDown was not handled")
+	}
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("PageDown offset = %d, want 0", got)
+	}
+}
+
 func TestChatViewEscapeKeepsNewestRowVisibleWithStickyAuthor(t *testing.T) {
 	st := store.New(0)
 	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general"})
@@ -904,8 +927,8 @@ func TestChatViewComponentShortcutsAreScopedToFocusedMessage(t *testing.T) {
 		t.Fatalf("action = %+v,%v, want newer message", action, ok)
 	}
 
-	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) {
-		t.Fatal("k did not move to the previous stopping point")
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'K'}) {
+		t.Fatal("K did not move to the previous stopping point")
 	}
 	view.Draw(buf.Clip(buf.Bounds()))
 	if got := rowsText(buf); !strings.Contains(got, "1 older") || strings.Contains(got, "1 newer") {
@@ -1079,6 +1102,49 @@ func TestChatViewWholeBlockHighlightIsOptIn(t *testing.T) {
 	}
 }
 
+func TestChatViewWholeBlockHighlightSkipsEmptyRows(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "first line\n\nsecond line"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	view.SetHighlightFocusBlock(true)
+	buf := screen.NewBuffer(30, 5)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if buf.Cell(0, 2).Style.Attrs&screen.Reverse != 0 {
+		t.Fatal("empty row was highlighted in the focused block")
+	}
+	if buf.Cell(0, 3).Style.Attrs&screen.Reverse == 0 {
+		t.Fatal("non-empty row after the blank line was not highlighted")
+	}
+}
+
+func TestFocusedHeaderUsesHeaderColorAcrossWholeLine(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "# heading"})
+	headerColor := screen.RGB(210, 15, 57)
+	baseColor := screen.RGB(239, 241, 245)
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{
+		Cells: map[string]screen.Style{
+			"messages.header1": {Fg: headerColor, Bg: baseColor},
+		},
+	})
+	view.SetFocusOwner(true)
+	view.SetHighlightFocusBlock(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	for _, x := range []int{0, 20} {
+		cell := buf.Cell(x, 1)
+		if cell.Style.Fg != headerColor {
+			t.Errorf("focused header cell %d fg = %+v, want %+v", x, cell.Style.Fg, headerColor)
+		}
+		if cell.Style.Attrs&screen.Reverse == 0 {
+			t.Errorf("focused header cell %d is missing reverse focus", x)
+		}
+	}
+}
+
 func TestChatViewBlockHighlightDoesNotIncludeEmbedBorders(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Embeds: []store.Embed{{Title: "Release", Description: "Ready"}}})
@@ -1141,8 +1207,8 @@ func TestChatViewVimMultiSelectCopiesSelectedMessages(t *testing.T) {
 	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'V', Mods: input.Shift}) {
 		t.Fatal("V did not select the focused message")
 	}
-	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) {
-		t.Fatal("k did not move to the previous message")
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'K'}) {
+		t.Fatal("K did not move to the previous message")
 	}
 	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'Y', Mods: input.Shift}) {
 		t.Fatal("Y did not copy selected messages")
@@ -1211,8 +1277,8 @@ func TestChatViewVimStopsIncludeFirstLineHeadersAndEveryControl(t *testing.T) {
 		view.focusStops[2].kind != chatFocusControl || view.focusStops[3].kind != chatFocusControl {
 		t.Fatalf("focus stop kinds = %+v", view.focusStops)
 	}
-	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || view.focusStops[view.focusStopIndex].headerKey == "" {
-		t.Fatal("j did not move from first header to second header")
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'J'}) || view.focusStops[view.focusStopIndex].headerKey == "" {
+		t.Fatal("J did not move from first header to second header")
 	}
 	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: '-'}) {
 		t.Fatal("- did not fold the focused header")
@@ -1227,5 +1293,40 @@ func TestChatViewVimStopsIncludeFirstLineHeadersAndEveryControl(t *testing.T) {
 	view.Draw(buf.Clip(buf.Bounds()))
 	if !strings.Contains(rowsText(buf), "more") {
 		t.Fatalf("collapsed header did not unfold:\n%s", rowsText(buf))
+	}
+}
+
+func TestChatViewVimComponentHorizontalNavigation(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID: 1, ChannelID: 1, Author: "bot",
+		ComponentTree: []store.ComponentNode{{Kind: store.ComponentActionRow, Children: []store.ComponentNode{
+			{Kind: store.ComponentButton, CustomID: "left", Label: "Left"},
+			{Kind: store.ComponentButton, CustomID: "right", Label: "Right"},
+		}}},
+	})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(60, 6)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'J'}) {
+		t.Fatal("J did not move from the message breakpoint to the first component")
+	}
+	if got := view.focusStops[view.focusStopIndex].action.customID; got != "left" {
+		t.Fatalf("initial component = %q, want left", got)
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRight}) {
+		t.Fatal("right arrow did not move to the next component")
+	}
+	if got := view.focusStops[view.focusStopIndex].action.customID; got != "right" {
+		t.Fatalf("right-arrow component = %q, want right", got)
+	}
+	if !view.HandleVimFocus(false) {
+		t.Fatal("h did not move back to the previous component")
+	}
+	if got := view.focusStops[view.focusStopIndex].action.customID; got != "left" {
+		t.Fatalf("h component = %q, want left", got)
 	}
 }

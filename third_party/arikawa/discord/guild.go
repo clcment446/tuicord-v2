@@ -315,6 +315,9 @@ type Role struct {
 	Position int `json:"position"`
 	// Color is the integer representation of hexadecimal color code.
 	Color Color `json:"color"`
+	// Colors holds the optional primary, secondary, and tertiary stops for
+	// Discord gradient roles.
+	Colors RoleColors `json:"colors,omitzero"`
 
 	// Hoist specifies if this role is pinned in the user listing.
 	Hoist bool `json:"hoist"`
@@ -329,6 +332,13 @@ type Role struct {
 	UnicodeEmoji string `json:"unicode_emoji,omitempty"`
 	// Tags are the RoleTags of this role.
 	Tags RoleTags `json:"tags,omitzero"`
+}
+
+// RoleColors is Discord's optional gradient-role color payload.
+type RoleColors struct {
+	PrimaryColor   Color `json:"primary_color"`
+	SecondaryColor Color `json:"secondary_color"`
+	TertiaryColor  Color `json:"tertiary_color"`
 }
 
 type RoleTags struct {

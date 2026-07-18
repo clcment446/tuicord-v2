@@ -10,6 +10,16 @@ func chatLineWidth(line chatLine) int {
 	return width
 }
 
+func chatLineHasVisibleContent(line chatLine) bool {
+	if line.media != nil || len(line.inlineMedia) > 0 {
+		return true
+	}
+	if line.text != "" && text.Width(line.text) > 0 {
+		return true
+	}
+	return chatLineWidth(line) > 0
+}
+
 // translateChatLine returns line shifted right by offset cells. It copies every
 // slice that needs coordinate adjustment so cached source lines remain
 // immutable when embeds and component containers decorate them.

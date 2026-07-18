@@ -177,6 +177,23 @@ func TestVimHLTraverseFocusAndAllowLocalUnfold(t *testing.T) {
 	}
 }
 
+func TestVimUppercaseHLTraverseSections(t *testing.T) {
+	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}, enabled: true}
+	second := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("second", true)}, enabled: true}
+	app := New()
+	app.Render(&splitLikeWidget{children: []Widget{first, second}}, Size{W: 10, H: 1})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'L'}) || app.Focus.Focused() != second {
+		t.Fatal("L did not switch to the next section")
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'H'}) || app.Focus.Focused() != first {
+		t.Fatal("H did not switch to the previous section")
+	}
+	if first.calls != 0 {
+		t.Fatalf("uppercase section navigation called local component traversal %d times", first.calls)
+	}
+}
+
 func TestVimHLDoesNotTraverseWhenWidgetHasNotOptedIn(t *testing.T) {
 	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}}
 	second := &handlingWidget{testWidget: *newTestWidget("second", true)}

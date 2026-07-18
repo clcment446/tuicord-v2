@@ -12,6 +12,8 @@ import (
 	"awesomeProject/internal/tui/term"
 )
 
+// Idle widgets need only a low-frequency heartbeat. The runtime switches to
+// animationTickInterval while a visible widget reports active animation.
 const tickInterval = 500 * time.Millisecond
 
 // animationTickInterval is the faster cadence used while a widget reports it is
@@ -352,6 +354,19 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 			}
 			a.Invalidate()
 			return true
+		}
+	}
+	if !ev.Release && ev.Key == input.KeyRune && ev.Mods == 0 && (ev.Rune == 'H' || ev.Rune == 'L') {
+		if focused := a.Focus.Focused(); focused != nil {
+			if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
+				if ev.Rune == 'L' {
+					a.Focus.Next()
+				} else {
+					a.Focus.Prev()
+				}
+				a.Invalidate()
+				return true
+			}
 		}
 	}
 	if ev.Key == input.KeyTab && !ev.Release {
