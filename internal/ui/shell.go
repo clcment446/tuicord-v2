@@ -65,6 +65,7 @@ type Shell struct {
 	notifier        desktopNotifier
 	dispatch        func(func())
 	post            func(func())
+	tryPost         func(func()) bool
 	unfocused       bool
 	now             func() time.Time
 	forumPreview    *forumPreview
@@ -81,6 +82,7 @@ type Shell struct {
 	viewerCancel    context.CancelFunc
 	clipboardCancel context.CancelFunc
 	clipboardBusy   bool
+	lifecycleWG     sync.WaitGroup
 	closeOnce       sync.Once
 	mediaCfg        media.Config
 	node            layout.Node
@@ -141,7 +143,7 @@ end run`
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	mediaCfg := chatMediaConfig(cfg)
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
 	if mediaCfg.Enabled && mediaCfg.Prefetch {
 		s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	}
@@ -357,7 +359,9 @@ func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Fram
 		return
 	}
 	animated := len(frames) > 1 || media.ClassifyURL(url) == media.ClassGIF
+	s.lifecycleWG.Add(1)
 	go func() {
+		defer s.lifecycleWG.Done()
 		if animated {
 			fullFrames, err := fetcher.FetchGIF(ctx, url)
 			if err != nil || len(fullFrames) == 0 {
@@ -429,7 +433,9 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 	ctx, cancel := context.WithTimeout(s.lifecycleCtx, timeout)
 	s.clipboardCancel = cancel
 	s.clipboardBusy = true
+	s.lifecycleWG.Add(1)
 	go func() {
+		defer s.lifecycleWG.Done()
 		data, ext, err := term.ReadClipboardImageContext(ctx, maxBytes)
 		var tempPath string
 		if err == nil {
@@ -446,37 +452,59 @@ func (s *Shell) tryPasteImage(quiet bool) bool {
 				}
 			}
 		}
-		if s.lifecycleCtx.Err() != nil {
-			if tempPath != "" {
-				_ = os.Remove(tempPath)
-			}
-			cancel()
-			return
-		}
-		s.app.Post(func() {
-			s.clipboardBusy = false
-			s.clipboardCancel = nil
-			cancel()
-			if err != nil {
-				if tempPath != "" {
-					_ = os.Remove(tempPath)
-				}
-				if quiet && errors.Is(err, term.ErrNoClipboardImage) {
-					return
-				}
-				s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
-				return
-			}
-			filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
-			if err := s.mv.StageTempImage(tempPath, filename, int64(len(data))); err != nil {
-				_ = os.Remove(tempPath)
-				s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
-				return
-			}
-			s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
-		})
+		s.finishClipboardPaste(ctx, cancel, quiet, data, ext, tempPath, err)
 	}()
 	return true
+}
+
+// finishClipboardPaste transfers temp-file ownership to the UI only while both
+// the operation and Shell are live. TryPost closes the final race where the
+// event loop exits between the worker's lifecycle check and queue insertion.
+func (s *Shell) finishClipboardPaste(ctx context.Context, cancel context.CancelFunc, quiet bool, data []byte, ext, tempPath string, resultErr error) {
+	cleanup := func() {
+		if tempPath != "" {
+			_ = os.Remove(tempPath)
+		}
+	}
+	if s == nil || ctx.Err() != nil || s.lifecycleCtx == nil || s.lifecycleCtx.Err() != nil {
+		cleanup()
+		cancel()
+		return
+	}
+	tryPost := s.tryPost
+	if tryPost == nil && s.app != nil {
+		tryPost = s.app.TryPost
+	}
+	if tryPost == nil || !tryPost(func() {
+		// Shutdown can begin after TryPost accepted this closure. Recheck before
+		// staging, otherwise the temp file would have no UI owner to delete it.
+		live := ctx.Err() == nil && s.lifecycleCtx != nil && s.lifecycleCtx.Err() == nil
+		s.clipboardBusy = false
+		s.clipboardCancel = nil
+		cancel()
+		if !live {
+			cleanup()
+			return
+		}
+		if resultErr != nil {
+			cleanup()
+			if quiet && errors.Is(resultErr, term.ErrNoClipboardImage) {
+				return
+			}
+			s.ShowTimedNotice("Paste image", resultErr.Error(), pasteNoticeTTL)
+			return
+		}
+		filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
+		if err := s.mv.StageTempImage(tempPath, filename, int64(len(data))); err != nil {
+			cleanup()
+			s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+			return
+		}
+		s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
+	}) {
+		cleanup()
+		cancel()
+	}
 }
 
 // pasteNoticeTTL is how long paste confirmations stay before auto-dismissing.
@@ -1429,7 +1457,13 @@ func (s *Shell) Close() {
 		if s.prefetch != nil {
 			s.prefetch.Close()
 		}
+		// Viewer and clipboard workers observe the canceled lifecycle context and
+		// relinquish any unposted temp files before Shell ownership ends.
+		s.lifecycleWG.Wait()
 		if s.mv != nil {
+			// Staged clipboard files are Shell-owned until send; process shutdown
+			// must release them just like composer cancellation.
+			s.mv.clearAttachments()
 			if s.mv.chat != nil {
 				s.mv.chat.CloseMedia()
 			}

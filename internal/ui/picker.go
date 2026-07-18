@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	appdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/markup"
@@ -103,6 +104,7 @@ type Picker struct {
 	mediaCtx         context.Context
 	mediaCancel      context.CancelFunc
 	mediaJobs        chan string
+	mediaWG          sync.WaitGroup
 	post             func(func())
 	media            map[string]*pickerMediaState
 	searchGIF        GIFSearchFunc
@@ -220,6 +222,7 @@ func (p *Picker) SetStickerRecent(record func(uint64)) { p.onStickerRecent = rec
 func (p *Picker) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(func())) {
 	if p.mediaCancel != nil {
 		p.mediaCancel()
+		p.mediaWG.Wait()
 	}
 	p.mediaCtx, p.mediaCancel = context.WithCancel(context.Background())
 	cfg = cfg.Bounded()
@@ -227,6 +230,7 @@ func (p *Picker) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(fu
 	p.mediaJobs = make(chan string, cfg.QueuedFetches)
 	if fetcher != nil && post != nil && cfg.Enabled && cfg.EmojiImages {
 		for range cfg.ConcurrentFetches {
+			p.mediaWG.Add(1)
 			go p.mediaWorker(p.mediaCtx, p.mediaJobs)
 		}
 	}
@@ -241,6 +245,7 @@ func (p *Picker) Close() {
 	if p != nil && p.mediaCancel != nil {
 		p.mediaCancel()
 		p.mediaCancel = nil
+		p.mediaWG.Wait()
 	}
 }
 
@@ -360,14 +365,26 @@ func (p *Picker) emojiImage(url string) image.Image {
 }
 
 func (p *Picker) mediaWorker(ctx context.Context, jobs <-chan string) {
+	defer p.mediaWG.Done()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case url := <-jobs:
+			if ctx.Err() != nil {
+				return
+			}
 			img, _ := p.mediaFetcher.Fetch(ctx, url)
 			if ctx.Err() == nil {
-				p.post(func() { p.media[url] = &pickerMediaState{img: img}; p.refilter() })
+				p.post(func() {
+					if ctx.Err() == nil {
+						p.media[url] = &pickerMediaState{img: img}
+						p.refilter()
+					}
+				})
 			}
 		}
 	}

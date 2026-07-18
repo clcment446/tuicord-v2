@@ -3,18 +3,19 @@ package media
 import "time"
 
 const (
-	DefaultMaxResponseBytes   int64 = 25 << 20
-	DefaultMaxSourcePixels    int64 = 40_000_000
-	DefaultMaxSourceDimension       = 16_384
-	DefaultGIFMaxFrames             = 120
-	DefaultGIFMaxMemoryBytes  int64 = 192 << 20
-	DefaultRequestTimeout           = 15 * time.Second
-	DefaultConcurrentFetches        = 6
-	DefaultQueuedFetches            = 48
-	MaxConcurrentFetches            = 32
-	MaxQueuedFetches                = 1024
-	DefaultDiskCacheMaxBytes  int64 = 256 << 20
-	DefaultDiskCacheTTL             = 7 * 24 * time.Hour
+	DefaultMaxResponseBytes    int64 = 25 << 20
+	DefaultMaxSourcePixels     int64 = 40_000_000
+	DefaultMaxSourceDimension        = 16_384
+	DefaultGIFMaxFrames              = 120
+	DefaultGIFMaxMemoryBytes   int64 = 192 << 20
+	DefaultRequestTimeout            = 15 * time.Second
+	DefaultConcurrentFetches         = 6
+	DefaultQueuedFetches             = 48
+	DefaultDecodedCacheEntries       = 64
+	MaxConcurrentFetches             = 32
+	MaxQueuedFetches                 = 1024
+	DefaultDiskCacheMaxBytes   int64 = 256 << 20
+	DefaultDiskCacheTTL              = 7 * 24 * time.Hour
 )
 
 // Config holds the user-facing settings for the media subsystem.
@@ -47,9 +48,10 @@ type Config struct {
 
 	// Disk cache policy. DiskCacheEnabled is explicit because privacy settings
 	// may disable persistent media while retaining the in-memory decoded LRU.
-	DiskCacheEnabled  bool
-	DiskCacheMaxBytes int64
-	DiskCacheTTL      time.Duration
+	DecodedCacheMaxBytes int64
+	DiskCacheEnabled     bool
+	DiskCacheMaxBytes    int64
+	DiskCacheTTL         time.Duration
 
 	// Prefetch controls idle emoji/sticker cache warming.
 	Prefetch bool
@@ -113,6 +115,9 @@ func (c Config) Bounded() Config {
 	} else if c.QueuedFetches > MaxQueuedFetches {
 		c.QueuedFetches = MaxQueuedFetches
 	}
+	if c.DecodedCacheMaxBytes <= 0 {
+		c.DecodedCacheMaxBytes = DefaultDecodedCacheMaxBytes
+	}
 	if c.DiskCacheMaxBytes <= 0 {
 		c.DiskCacheMaxBytes = DefaultDiskCacheMaxBytes
 	}
@@ -126,23 +131,24 @@ func (c Config) Bounded() Config {
 // retaining the existing visible media, animation, prefetch, and video behavior.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:            true,
-		MaxHeightCells:     12,
-		Animate:            true,
-		EmojiImages:        true,
-		MaxResponseBytes:   DefaultMaxResponseBytes,
-		MaxSourcePixels:    DefaultMaxSourcePixels,
-		MaxSourceDimension: DefaultMaxSourceDimension,
-		GIFMaxFrames:       DefaultGIFMaxFrames,
-		GIFMaxMemoryBytes:  DefaultGIFMaxMemoryBytes,
-		RequestTimeout:     DefaultRequestTimeout,
-		ConcurrentFetches:  DefaultConcurrentFetches,
-		QueuedFetches:      DefaultQueuedFetches,
-		DiskCacheEnabled:   true,
-		DiskCacheMaxBytes:  DefaultDiskCacheMaxBytes,
-		DiskCacheTTL:       DefaultDiskCacheTTL,
-		Prefetch:           true,
-		MpvPath:            "mpv",
-		VideoEnabled:       true,
+		Enabled:              true,
+		MaxHeightCells:       12,
+		Animate:              true,
+		EmojiImages:          true,
+		MaxResponseBytes:     DefaultMaxResponseBytes,
+		MaxSourcePixels:      DefaultMaxSourcePixels,
+		MaxSourceDimension:   DefaultMaxSourceDimension,
+		GIFMaxFrames:         DefaultGIFMaxFrames,
+		GIFMaxMemoryBytes:    DefaultGIFMaxMemoryBytes,
+		RequestTimeout:       DefaultRequestTimeout,
+		ConcurrentFetches:    DefaultConcurrentFetches,
+		QueuedFetches:        DefaultQueuedFetches,
+		DecodedCacheMaxBytes: DefaultDecodedCacheMaxBytes,
+		DiskCacheEnabled:     true,
+		DiskCacheMaxBytes:    DefaultDiskCacheMaxBytes,
+		DiskCacheTTL:         DefaultDiskCacheTTL,
+		Prefetch:             true,
+		MpvPath:              "mpv",
+		VideoEnabled:         true,
 	}
 }

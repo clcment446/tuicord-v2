@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -103,6 +104,7 @@ type ChatView struct {
 	mediaCtx     context.Context
 	mediaCancel  context.CancelFunc
 	mediaJobs    chan chatMediaJob
+	mediaWG      sync.WaitGroup
 	spinner      int
 	// mediaLoadingCount tracks in-flight fetches so mediaLoading stays O(1)
 	// as w.media grows.
@@ -242,6 +244,7 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	}
 	if w.mediaCancel != nil {
 		w.mediaCancel()
+		w.mediaWG.Wait()
 	}
 	cfg = cfg.Bounded()
 	w.mediaFetcher = fetcher
@@ -256,6 +259,7 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 		return
 	}
 	for range cfg.ConcurrentFetches {
+		w.mediaWG.Add(1)
 		go w.mediaWorker(w.mediaCtx, w.mediaJobs)
 	}
 }
@@ -267,6 +271,7 @@ func (w *ChatView) CloseMedia() {
 	if w != nil && w.mediaCancel != nil {
 		w.mediaCancel()
 		w.mediaCancel = nil
+		w.mediaWG.Wait()
 	}
 }
 
@@ -653,11 +658,19 @@ type chatMediaJob struct {
 }
 
 func (w *ChatView) mediaWorker(ctx context.Context, jobs <-chan chatMediaJob) {
+	defer w.mediaWG.Done()
 	for {
+		// A canceled owner always wins over an already-buffered job.
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case job := <-jobs:
+			if ctx.Err() != nil {
+				return
+			}
 			w.fetchMedia(ctx, job.url, job.animated)
 		}
 	}
@@ -669,9 +682,12 @@ func (w *ChatView) fetchMedia(ctx context.Context, url string, animated bool) {
 			if len(frames) > maxAnimatedGIFFrames {
 				frames = append([]media.Frame(nil), frames[:maxAnimatedGIFFrames]...)
 			}
-			frames = w.downscaleFrames(frames)
+			frames = w.downscaleFrames(ctx, frames)
 			if ctx.Err() == nil {
 				w.post(func() {
+					if ctx.Err() != nil {
+						return
+					}
 					w.deliverFrames(url, frames)
 					w.invalidate()
 				})
@@ -687,6 +703,9 @@ func (w *ChatView) fetchMedia(ctx context.Context, url string, animated bool) {
 		return
 	}
 	w.post(func() {
+		if ctx.Err() != nil {
+			return
+		}
 		state := w.media[url]
 		if state == nil {
 			return
@@ -731,7 +750,7 @@ func (w *ChatView) deliverFrames(url string, frames []media.Frame) {
 // downscaleFrames shrinks each frame to the fetcher's pixel budget. FetchGIF, unlike
 // Fetch, does not downscale, so the animator would otherwise re-upload full-size
 // frames every tick. Frames are freshly decoded per call, so mutating is safe.
-func (w *ChatView) downscaleFrames(frames []media.Frame) []media.Frame {
+func (w *ChatView) downscaleFrames(ctx context.Context, frames []media.Frame) []media.Frame {
 	if w.mediaFetcher == nil {
 		return frames
 	}
@@ -740,6 +759,9 @@ func (w *ChatView) downscaleFrames(frames []media.Frame) []media.Frame {
 		return frames
 	}
 	for i := range frames {
+		if ctx.Err() != nil {
+			return nil
+		}
 		frames[i].Image = media.DownscaleToPixels(frames[i].Image, mp.X, mp.Y)
 	}
 	return frames

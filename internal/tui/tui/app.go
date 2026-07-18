@@ -39,6 +39,7 @@ type App struct {
 	dirty        bool
 	forceRepaint bool
 	posts        []func()
+	postsStopped bool
 	wake         chan struct{}
 	rawWrites    [][]byte
 	rawStopped   bool
@@ -89,14 +90,30 @@ func WithTTYColors(enabled bool) Option {
 //
 // Posted functions execute in FIFO order. They should be short and are allowed
 // to mutate widgets because they run on the UI goroutine.
-func (a *App) Post(fn func()) {
+func (a *App) Post(fn func()) { _ = a.TryPost(fn) }
+
+// TryPost schedules fn unless event-loop shutdown has begun. The boolean lets
+// asynchronous owners release resources that would otherwise be stranded in a
+// closure the UI can no longer execute.
+func (a *App) TryPost(fn func()) bool {
 	if a == nil || fn == nil {
-		return
+		return false
 	}
 	a.mu.Lock()
+	if a.postsStopped {
+		a.mu.Unlock()
+		return false
+	}
 	a.posts = append(a.posts, fn)
 	a.mu.Unlock()
 	a.signal()
+	return true
+}
+
+func (a *App) stopPosts() {
+	a.mu.Lock()
+	a.postsStopped = true
+	a.mu.Unlock()
 }
 
 // WriteRaw queues one indivisible raw terminal command/transmission. It never
@@ -454,8 +471,7 @@ func (a *App) run(
 	errs <-chan error,
 	resizes <-chan term.Size,
 	size Size,
-) error {
-	defer a.stopRawWrites()
+) (runErr error) {
 	prev := (*screen.Buffer)(nil)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -514,6 +530,21 @@ func (a *App) run(
 		}
 		return nil
 	}
+	// Close the root while the terminal writer and raw Kitty queue are still
+	// alive. Shell.Close joins mpv's reader and queues its explicit final delete;
+	// only then reject posts, execute already-accepted shutdown-aware closures,
+	// and flush the finite raw backlog before term.Run closes the writer.
+	defer func() {
+		if closer, ok := root.(interface{ Close() }); ok {
+			closer.Close()
+		}
+		a.stopPosts()
+		a.drainPosts()
+		if err := flushRaw(int(^uint(0) >> 1)); runErr == nil && err != nil {
+			runErr = err
+		}
+		a.stopRawWrites()
+	}()
 	a.Invalidate()
 	fastTick := false
 	for {

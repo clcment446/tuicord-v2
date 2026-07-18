@@ -2,6 +2,7 @@ package media
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"fmt"
 	"image"
@@ -55,9 +56,22 @@ func Decode(r io.Reader) (image.Image, error) { return DecodeWithLimits(r, defau
 // DecodeWithLimits inspects the source dimensions before decoding pixels. This
 // prevents a small compressed image from causing an unexpectedly large decode.
 func DecodeWithLimits(r io.Reader, limits DecodeLimits) (image.Image, error) {
-	raw, err := readEncoded(r, limits.MaxEncodedBytes)
+	return DecodeWithLimitsContext(context.Background(), r, limits)
+}
+
+// DecodeWithLimitsContext checks cancellation around each decoder phase. The
+// standard library's individual image.Decode call is not interruptible, but no
+// full decode starts after cancellation and canceled results are discarded.
+func DecodeWithLimitsContext(ctx context.Context, r io.Reader, limits DecodeLimits) (image.Image, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	raw, err := readEncodedContext(ctx, r, limits.MaxEncodedBytes)
 	if err != nil {
 		return nil, fmt.Errorf("media: read image: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
@@ -66,9 +80,15 @@ func DecodeWithLimits(r io.Reader, limits DecodeLimits) (image.Image, error) {
 	if err := validateDimensions(cfg.Width, cfg.Height, limits); err != nil {
 		return nil, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, fmt.Errorf("media: decode: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return img, nil
 }
@@ -81,17 +101,32 @@ func DecodeGIF(r io.Reader) ([]Frame, error) { return DecodeGIFWithLimits(r, def
 // gif.DecodeAll necessarily materializes encoded paletted frames, but no full
 // RGBA frame composition occurs until all limits pass.
 func DecodeGIFWithLimits(r io.Reader, limits GIFLimits) ([]Frame, error) {
-	raw, err := readEncoded(r, limits.MaxEncodedBytes)
+	return DecodeGIFWithLimitsContext(context.Background(), r, limits)
+}
+
+// DecodeGIFWithLimitsContext checks cancellation while scanning blocks and
+// between each frame composition/copy, the expensive repeatable GIF work.
+func DecodeGIFWithLimitsContext(ctx context.Context, r io.Reader, limits GIFLimits) ([]Frame, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	raw, err := readEncodedContext(ctx, r, limits.MaxEncodedBytes)
 	if err != nil {
 		return nil, fmt.Errorf("media: read gif: %w", err)
 	}
-	prepared, err := preflightGIF(raw, limits)
+	prepared, err := preflightGIFContext(ctx, raw, limits)
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	g, err := gif.DecodeAll(bytes.NewReader(prepared))
 	if err != nil {
 		return nil, fmt.Errorf("media: decode gif: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if len(g.Image) == 0 {
 		return nil, fmt.Errorf("media: decode gif: no frames")
@@ -114,6 +149,9 @@ func DecodeGIFWithLimits(r io.Reader, limits GIFLimits) ([]Frame, error) {
 	}
 	var encodedFrameBytes int64
 	for i, src := range g.Image {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		if src == nil || !src.Bounds().In(canvasBounds) {
 			return nil, fmt.Errorf("media: GIF frame %d bounds %v exceed canvas %v", i, src.Bounds(), canvasBounds)
 		}
@@ -130,6 +168,9 @@ func DecodeGIFWithLimits(r io.Reader, limits GIFLimits) ([]Frame, error) {
 
 	frames := make([]Frame, 0, len(g.Image))
 	for i, src := range g.Image {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		disposal := byte(0)
 		if i < len(g.Disposal) {
 			disposal = g.Disposal[i]
@@ -142,6 +183,9 @@ func DecodeGIFWithLimits(r io.Reader, limits GIFLimits) ([]Frame, error) {
 		snapshot := image.NewRGBA(canvas.Bounds())
 		draw.Draw(snapshot, snapshot.Bounds(), canvas, image.Point{}, draw.Src)
 		frames = append(frames, Frame{Image: snapshot, Delay: delay})
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 
 		if disposal == 2 {
 			bg := color.RGBA{}
@@ -160,6 +204,10 @@ func DecodeGIFWithLimits(r io.Reader, limits GIFLimits) ([]Frame, error) {
 // and truncates after MaxFrames with a valid trailer so the established
 // first-N-frame animation cap does not allocate discarded source frames.
 func preflightGIF(raw []byte, limits GIFLimits) ([]byte, error) {
+	return preflightGIFContext(context.Background(), raw, limits)
+}
+
+func preflightGIFContext(ctx context.Context, raw []byte, limits GIFLimits) ([]byte, error) {
 	if len(raw) < 13 || (string(raw[:6]) != "GIF87a" && string(raw[:6]) != "GIF89a") {
 		return nil, fmt.Errorf("media: decode gif: invalid header")
 	}
@@ -180,6 +228,9 @@ func preflightGIF(raw []byte, limits GIFLimits) ([]byte, error) {
 	frameCount := 0
 	var sourcePixels int64
 	for pos < len(raw) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		switch raw[pos] {
 		case 0x3b:
 			if frameCount == 0 {
@@ -260,6 +311,13 @@ func skipGIFSubBlocks(raw []byte, pos int) (int, error) {
 }
 
 func readEncoded(r io.Reader, maxBytes int64) ([]byte, error) {
+	return readEncodedContext(context.Background(), r, maxBytes)
+}
+
+func readEncodedContext(ctx context.Context, r io.Reader, maxBytes int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxResponseBytes
 	}
@@ -267,14 +325,33 @@ func readEncoded(r io.Reader, maxBytes int64) ([]byte, error) {
 	if readLimit <= 0 { // int64 overflow from an explicitly maximal setting.
 		readLimit = maxBytes
 	}
-	raw, err := io.ReadAll(io.LimitReader(r, readLimit))
+	raw, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, r: r}, readLimit))
 	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if int64(len(raw)) > maxBytes {
 		return nil, fmt.Errorf("encoded media exceeds %d bytes", maxBytes)
 	}
 	return raw, nil
+}
+
+type contextReader struct {
+	ctx context.Context
+	r   io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.r.Read(p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
 }
 
 func validateDimensions(width, height int, limits DecodeLimits) error {

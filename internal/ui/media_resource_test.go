@@ -3,6 +3,10 @@ package ui
 import (
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,9 +17,11 @@ import (
 type blockingMediaDoer struct {
 	started  chan struct{}
 	canceled chan struct{}
+	calls    atomic.Int32
 }
 
 func (d *blockingMediaDoer) Do(req *http.Request) (*http.Response, error) {
+	d.calls.Add(1)
 	select {
 	case d.started <- struct{}{}:
 	default:
@@ -54,10 +60,62 @@ func TestChatMediaQueueIsBoundedAndCloseCancelsFetch(t *testing.T) {
 	}
 
 	view.CloseMedia()
+	if got := doer.calls.Load(); got != 1 {
+		t.Fatalf("worker started queued work after cancellation: calls=%d", got)
+	}
 	select {
 	case <-doer.canceled:
 	case <-time.After(time.Second):
 		t.Fatal("CloseMedia did not cancel the in-flight request")
+	}
+}
+
+func TestPrefetchCloseCancelsAndJoinsWorker(t *testing.T) {
+	doer := &blockingMediaDoer{started: make(chan struct{}, 1), canceled: make(chan struct{})}
+	prefetch := newIdleMediaPrefetcher(&media.Fetcher{HTTP: doer, RequestTimeout: time.Minute})
+	prefetch.Start([]string{"https://example.com/one.png", "https://example.com/two.png"})
+	select {
+	case <-doer.started:
+	case <-time.After(time.Second):
+		t.Fatal("prefetch did not start")
+	}
+	prefetch.Close()
+	select {
+	case <-doer.canceled:
+	default:
+		t.Fatal("Close returned before the prefetch request observed cancellation")
+	}
+	if got := doer.calls.Load(); got != 1 {
+		t.Fatalf("prefetch started queued work after close: calls=%d", got)
+	}
+}
+
+func TestDisabledPersistentCacheConstructsMemoryOnlyAndDoesNotPrune(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	dir := filepath.Join(cacheRoot, "tuicord", "media")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, strings.Repeat("a", 64))
+	if err := os.WriteFile(stale, []byte("private"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-30 * 24 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	appCfg := config.Default()
+	appCfg.Privacy.PersistMediaCache = false
+	fetcher := newChatMediaFetcher(chatMediaConfig(appCfg))
+	if fetcher == nil || fetcher.Cache == nil {
+		t.Fatal("memory-only fetcher was not constructed")
+	}
+	if fetcher.Cache.Dir != "" || !fetcher.DisableDiskCache {
+		t.Fatalf("persistent cache was constructed: dir=%q disabled=%v", fetcher.Cache.Dir, fetcher.DisableDiskCache)
+	}
+	if got, err := os.ReadFile(stale); err != nil || string(got) != "private" {
+		t.Fatalf("privacy-disabled construction touched cache file: %q, %v", got, err)
 	}
 }
 

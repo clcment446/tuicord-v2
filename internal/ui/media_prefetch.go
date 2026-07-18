@@ -18,6 +18,7 @@ type idleMediaPrefetcher struct {
 	cancel context.CancelFunc
 	gen    uint64
 	closed bool
+	wg     sync.WaitGroup
 }
 
 func newIdleMediaPrefetcher(fetcher *media.Fetcher) *idleMediaPrefetcher {
@@ -38,8 +39,10 @@ func (p *idleMediaPrefetcher) Start(urls []string) {
 	p.gen++
 	gen := p.gen
 	p.cancel = cancel
+	p.wg.Add(1)
 	p.mu.Unlock()
 	go func() {
+		defer p.wg.Done()
 		for _, url := range urls {
 			if ctx.Err() != nil {
 				return
@@ -66,6 +69,7 @@ func (p *idleMediaPrefetcher) Stop() {
 	if cancel != nil {
 		cancel()
 	}
+	p.wg.Wait()
 }
 
 func (p *idleMediaPrefetcher) Close() {
@@ -81,6 +85,7 @@ func (p *idleMediaPrefetcher) Close() {
 	if cancel != nil {
 		cancel()
 	}
+	p.wg.Wait()
 }
 
 func mediaPrefetchURLs(st *store.Store, active store.GuildID) []string {

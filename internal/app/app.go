@@ -509,6 +509,20 @@ func (a *App) Post(fn func()) {
 	}
 }
 
+// TryPost reports whether the UI event loop accepted fn. Older/test poster
+// implementations retain Post-only behavior; the real tui.App rejects work once
+// shutdown starts so asynchronous resource owners can clean up immediately.
+func (a *App) TryPost(fn func()) bool {
+	if a == nil || a.ui == nil || fn == nil {
+		return false
+	}
+	if p, ok := a.ui.(interface{ TryPost(func()) bool }); ok {
+		return p.TryPost(fn)
+	}
+	a.ui.Post(fn)
+	return true
+}
+
 // WriteRaw queues raw terminal bytes for the UI loop to flush between frames.
 func (a *App) WriteRaw(b []byte) {
 	if a != nil && a.ui != nil {

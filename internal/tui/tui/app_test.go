@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -39,6 +40,17 @@ func TestWriteRawIgnoresWritesAfterShutdown(t *testing.T) {
 	app.WriteRaw([]byte("after"))
 	if len(app.rawWrites) != 0 {
 		t.Fatalf("raw writes retained after shutdown: %q", app.rawWrites)
+	}
+}
+
+func TestTryPostRejectsAfterShutdown(t *testing.T) {
+	app := New()
+	app.stopPosts()
+	if app.TryPost(func() {}) {
+		t.Fatal("TryPost accepted work after shutdown")
+	}
+	if len(app.posts) != 0 {
+		t.Fatalf("post retained after shutdown: %d", len(app.posts))
 	}
 }
 
@@ -97,6 +109,48 @@ func TestCtrlCExitsBeforeWidgetHandling(t *testing.T) {
 	}
 	if root.handled != 0 {
 		t.Fatalf("root handled %d events, want 0", root.handled)
+	}
+}
+
+func TestShutdownClosesRootAndFlushesFinalRawWrite(t *testing.T) {
+	tests := []struct {
+		name   string
+		ctx    func() context.Context
+		events []Event
+	}{
+		{name: "ctrl-c", ctx: context.Background, events: []Event{input.KeyEvent{Key: input.KeyRune, Rune: 'c', Mods: input.Ctrl}}},
+		{name: "five-esc", ctx: context.Background, events: []Event{
+			input.KeyEvent{Key: input.KeyEsc}, input.KeyEvent{Key: input.KeyEsc}, input.KeyEvent{Key: input.KeyEsc}, input.KeyEvent{Key: input.KeyEsc}, input.KeyEvent{Key: input.KeyEsc},
+		}},
+		{name: "signal-context", ctx: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			app := New()
+			var events chan Event
+			if len(tt.events) > 0 {
+				events = make(chan Event, len(tt.events))
+				for _, ev := range tt.events {
+					events <- ev
+				}
+			}
+			root := &closingRoot{handlingWidget: handlingWidget{testWidget: *newTestWidget("root", false)}, app: app}
+			var out bytes.Buffer
+
+			if err := app.run(tt.ctx(), root, &out, events, nil, nil, Size{W: 1, H: 1}); err != nil {
+				t.Fatal(err)
+			}
+			if !root.closed {
+				t.Fatal("root was not closed before event-loop shutdown")
+			}
+			if !bytes.HasSuffix(out.Bytes(), []byte("FINAL_KITTY_DELETE")) {
+				t.Fatalf("final raw delete was not flushed last: %q", out.Bytes())
+			}
+		})
 	}
 }
 
@@ -315,6 +369,17 @@ func (errWriter) Write([]byte) (int, error) { return 0, errors.New("file already
 type handlingWidget struct {
 	testWidget
 	handled int
+}
+
+type closingRoot struct {
+	handlingWidget
+	app    *App
+	closed bool
+}
+
+func (r *closingRoot) Close() {
+	r.closed = true
+	r.app.WriteRaw([]byte("FINAL_KITTY_DELETE"))
 }
 
 type vimFocusWidget struct {

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/png"
@@ -136,6 +137,56 @@ func TestStageTempImageQueuesAndCleansUp(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("temp file not removed on clear (stat err = %v)", err)
+	}
+}
+
+func TestClipboardPasteRemovesTempWhenTryPostRejects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rejected.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, closeLifecycle := context.WithCancel(context.Background())
+	defer closeLifecycle()
+	op, cancelOp := context.WithCancel(context.Background())
+	sh := &Shell{
+		lifecycleCtx: lifecycle,
+		mv:           &MainView{},
+		tryPost:      func(func()) bool { return false },
+	}
+	sh.finishClipboardPaste(op, cancelOp, false, []byte("png"), "png", path, nil)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("rejected post stranded temp file: %v", err)
+	}
+}
+
+func TestClipboardPasteClosureRechecksShellShutdown(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "accepted.png")
+	if err := os.WriteFile(path, []byte("png"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, closeLifecycle := context.WithCancel(context.Background())
+	op, cancelOp := context.WithCancel(context.Background())
+	var posted func()
+	mv := &MainView{}
+	sh := &Shell{
+		lifecycleCtx: lifecycle,
+		mv:           mv,
+		tryPost: func(fn func()) bool {
+			posted = fn
+			return true
+		},
+	}
+	sh.finishClipboardPaste(op, cancelOp, false, []byte("png"), "png", path, nil)
+	if posted == nil {
+		t.Fatal("clipboard completion was not posted")
+	}
+	closeLifecycle()
+	posted()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("shutdown-raced closure stranded temp file: %v", err)
+	}
+	if len(mv.attachments) != 0 {
+		t.Fatal("shutdown-raced closure staged an attachment")
 	}
 }
 
