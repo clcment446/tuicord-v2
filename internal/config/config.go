@@ -101,6 +101,10 @@ type Keys struct {
 	FocusComposer string `toml:"focus_composer"`
 	// Picker opens the emoji/sticker picker over the composer.
 	Picker string `toml:"picker"`
+	// PasteImage attaches an image from the system clipboard. Defaults to
+	// ctrl+v; terminals' text paste is ctrl+shift+v, so this does not shadow it.
+	// Also available as the ;paste command.
+	PasteImage string `toml:"paste_image"`
 }
 
 // Nitro controls how the picker sends emoji and stickers the account cannot use
@@ -255,6 +259,7 @@ func Default() Config {
 			NextPanel:     "tab",
 			FocusComposer: "esc",
 			Picker:        "ctrl+e",
+			PasteImage:    "ctrl+v",
 		},
 		Nitro:         Nitro{Fake: true},
 		Accessibility: Accessibility{MouseOn: true},
@@ -501,6 +506,9 @@ quick_switcher = "ctrl+k"
 help = "ctrl+/"
 next_panel = "tab"
 focus_composer = "esc"
+# Attach an image from the clipboard (also available as ;paste). Set empty to
+# disable; text paste (ctrl+shift+v) is unaffected either way.
+paste_image = "ctrl+v"
 
 [colors]
 # Custom palette values are opt-in. Set enabled = true to use them.
