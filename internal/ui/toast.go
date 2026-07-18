@@ -2,6 +2,7 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
@@ -16,14 +17,30 @@ const (
 
 // Toast is a transient popup for recoverable errors.
 type Toast struct {
-	title    string
-	detail   string
-	styles   Styles
-	expanded bool
+	title     string
+	detail    string
+	styles    Styles
+	expanded  bool
+	expiresAt time.Time // zero means it stays until dismissed
 }
 
 func NewToast(title, detail string, styles Styles) *Toast {
 	return &Toast{title: title, detail: detail, styles: styles}
+}
+
+// SetTTL makes the toast auto-dismiss after d. It stays until dismissed if d is
+// zero or negative. Expanding the toast (Enter) cancels the auto-dismiss so a
+// user reading it isn't interrupted.
+func (t *Toast) SetTTL(d time.Duration) *Toast {
+	if t != nil && d > 0 {
+		t.expiresAt = time.Now().Add(d)
+	}
+	return t
+}
+
+// expired reports whether the toast's auto-dismiss deadline has passed.
+func (t *Toast) expired(now time.Time) bool {
+	return t != nil && !t.expanded && !t.expiresAt.IsZero() && now.After(t.expiresAt)
 }
 
 func (t *Toast) Expanded() bool {
