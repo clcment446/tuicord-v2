@@ -1528,7 +1528,19 @@ func (s *Shell) ShowToast(title string, err error) {
 	if s == nil || err == nil {
 		return
 	}
-	toast := NewToast(title, err.Error(), s.styles)
+	detail := err.Error()
+	for i, toast := range s.toasts {
+		if toast == nil || toast.title != title || toast.detail != detail || !toast.expiresAt.IsZero() || toast.onActivate != nil {
+			continue
+		}
+		toast.repeats = max(toast.repeats, 1) + 1
+		// Bring a repeated older error back to the front without adding another
+		// permanent toast to the stack.
+		s.toasts = append(s.toasts[:i], s.toasts[i+1:]...)
+		s.toasts = append([]*Toast{toast}, s.toasts...)
+		return
+	}
+	toast := NewToast(title, detail, s.styles)
 	s.toasts = append([]*Toast{toast}, s.toasts...)
 }
 

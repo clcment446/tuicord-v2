@@ -330,14 +330,15 @@ type InteractiveComponent interface {
 	_icp()
 }
 
-// TopLevelComponent is the opposite of InteractiveComponent: it describes
-// components that only contain other components. The only component that
-// satisfies that is ActionRow.
+// TopLevelComponent describes components Discord permits directly in a
+// message or modal component list, as opposed to children or accessories that
+// must be nested inside another component.
 //
 // The following types satisfy this interface:
 //
 //   - *ActionRowComponent
 //   - *SectionComponent
+//   - *TextDisplayComponent
 //   - *MediaGalleryComponent
 //   - *FileComponent
 //   - *SeparatorComponent
@@ -1232,6 +1233,7 @@ func (s *TextDisplayComponent) Type() ComponentType {
 }
 
 func (s *TextDisplayComponent) _cmp() {}
+func (s *TextDisplayComponent) _tlc() {}
 
 // MarshalJSON marshals the select in the format Discord expects.
 func (s *TextDisplayComponent) MarshalJSON() ([]byte, error) {
