@@ -39,6 +39,31 @@ func TestLoadGateTracksPaginationExhaustion(t *testing.T) {
 	}
 }
 
+func TestLoadGateInvalidationRejectsStaleCompletion(t *testing.T) {
+	var gate loadGate[int]
+	oldVersion, ok := gate.beginVersion(7)
+	if !ok {
+		t.Fatal("old lifetime did not begin")
+	}
+	gate.invalidate(7)
+	newVersion, ok := gate.beginVersion(7)
+	if !ok || newVersion == oldVersion {
+		t.Fatalf("new lifetime begin = %t version %d, old %d", ok, newVersion, oldVersion)
+	}
+	if gate.finishVersion(7, oldVersion, true) {
+		t.Fatal("stale completion was accepted")
+	}
+	if _, pending := gate.pending[7]; !pending {
+		t.Fatal("stale completion cleared new lifetime pending state")
+	}
+	if !gate.finishVersion(7, newVersion, true) {
+		t.Fatal("new lifetime completion was rejected")
+	}
+	if gate.begin(7) {
+		t.Fatal("successful new lifetime was not cached")
+	}
+}
+
 func TestSingleLoadGateRetriesFailures(t *testing.T) {
 	var gate singleLoadGate
 

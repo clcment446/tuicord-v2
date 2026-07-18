@@ -26,17 +26,28 @@ func (a *App) LoadActiveThreads(guild store.GuildID) {
 	if a == nil || a.threads == nil || guild == 0 || guild == DirectMessagesGuildID {
 		return
 	}
-	if !a.beginThreadLoad(guild) {
+	version, ok := a.beginThreadLoad(guild)
+	if !ok {
 		return
 	}
-	go a.loadActiveThreads(guild)
+	generation := a.store.GuildGeneration(guild)
+	go a.loadActiveThreadsFrom(guild, generation, version)
 }
 
 func (a *App) loadActiveThreads(guild store.GuildID) {
+	a.loadActiveThreadsFrom(guild, a.store.GuildGeneration(guild), a.threadLoadVersion(guild))
+}
+
+func (a *App) loadActiveThreadsFrom(guild store.GuildID, generation, version uint64) {
 	active, err := a.threads.ActiveThreads(discord.GuildID(guild))
 	if err != nil {
-		a.finishThreadLoad(guild, false)
-		a.reportError(err)
+		a.ui.Post(func() {
+			if a.store.GuildGeneration(guild) != generation || !a.threadLoadCurrent(guild, version) {
+				return
+			}
+			a.finishThreadLoad(guild, false)
+			a.reportError(err)
+		})
 		return
 	}
 	threads := make([]store.Channel, 0, len(active.Threads))
@@ -49,6 +60,9 @@ func (a *App) loadActiveThreads(guild store.GuildID) {
 		joined[store.ChannelID(m.ID)] = true
 	}
 	a.ui.Post(func() {
+		if a.store.GuildGeneration(guild) != generation || !a.threadLoadCurrent(guild, version) {
+			return
+		}
 		for _, t := range threads {
 			if t.Thread != nil && joined[t.ID] {
 				t.Thread.Joined = true
@@ -69,19 +83,30 @@ func (a *App) LoadArchivedThreads(channel store.ChannelID) {
 	if a == nil || a.threads == nil || channel == 0 {
 		return
 	}
-	if !a.beginArchivedLoad(channel) {
+	version, ok := a.beginArchivedLoad(channel)
+	if !ok {
 		return
 	}
 	parent, _ := a.store.Channel(channel)
-	go a.loadArchivedThreads(channel, parent.GuildID)
+	generation := a.store.ChannelGeneration(channel)
+	before := a.archivedCursor(channel)
+	go a.loadArchivedThreadsFrom(channel, parent.GuildID, generation, version, before)
 }
 
 func (a *App) loadArchivedThreads(channel store.ChannelID, parentGuild store.GuildID) {
-	before := a.archivedCursor(channel)
+	a.loadArchivedThreadsFrom(channel, parentGuild, a.store.ChannelGeneration(channel), a.archivedLoadVersion(channel), a.archivedCursor(channel))
+}
+
+func (a *App) loadArchivedThreadsFrom(channel store.ChannelID, parentGuild store.GuildID, generation, version uint64, before discord.Timestamp) {
 	page, err := a.threads.PublicArchivedThreads(discord.ChannelID(channel), before, archivedPageLimit)
 	if err != nil {
-		a.finishArchivedLoad(channel, false, false, discord.Timestamp{})
-		a.reportError(err)
+		a.ui.Post(func() {
+			if a.store.ChannelGeneration(channel) != generation || !a.archivedLoadCurrent(channel, version) {
+				return
+			}
+			a.finishArchivedLoad(channel, false, false, discord.Timestamp{})
+			a.reportError(err)
+		})
 		return
 	}
 	threads := make([]store.Channel, 0, len(page.Threads))
@@ -92,6 +117,9 @@ func (a *App) loadArchivedThreads(channel store.ChannelID, parentGuild store.Gui
 		threads = append(threads, convertChannel(t))
 	}
 	a.ui.Post(func() {
+		if a.store.ChannelGeneration(channel) != generation || !a.archivedLoadCurrent(channel, version) {
+			return
+		}
 		for _, t := range threads {
 			a.store.UpsertChannel(t)
 		}
@@ -227,11 +255,22 @@ func (a *App) markThreadsLoaded(guild store.GuildID) {
 	a.threadsGate.markLoaded(guild)
 }
 
-func (a *App) beginThreadLoad(guild store.GuildID) bool {
+func (a *App) beginThreadLoad(guild store.GuildID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.threadsGate.begin(guild)
+	return a.threadsGate.beginVersion(guild)
+}
+
+func (a *App) threadLoadVersion(guild store.GuildID) uint64 {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.threadsGate.version[guild]
+}
+
+func (a *App) threadLoadCurrent(guild store.GuildID, version uint64) bool {
+	return a.threadLoadVersion(guild) == version
 }
 
 func (a *App) finishThreadLoad(guild store.GuildID, ok bool) {
@@ -241,11 +280,22 @@ func (a *App) finishThreadLoad(guild store.GuildID, ok bool) {
 	a.threadsGate.finish(guild, ok)
 }
 
-func (a *App) beginArchivedLoad(channel store.ChannelID) bool {
+func (a *App) beginArchivedLoad(channel store.ChannelID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.archivedGate.begin(channel)
+	return a.archivedGate.beginVersion(channel)
+}
+
+func (a *App) archivedLoadVersion(channel store.ChannelID) uint64 {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.archivedGate.version[channel]
+}
+
+func (a *App) archivedLoadCurrent(channel store.ChannelID, version uint64) bool {
+	return a.archivedLoadVersion(channel) == version
 }
 
 func (a *App) finishArchivedLoad(channel store.ChannelID, ok, more bool, before discord.Timestamp) {

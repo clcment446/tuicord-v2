@@ -1,6 +1,6 @@
 ---
 name: discord-gateway-store-lifecycle-correctness
-summary: History requests must preserve in-flight creates, edits, and deletes; bounded prepends need a revision-aware two-edge window; channel lifetimes guard async completion.
+summary: Async store loaders require generation and gate-version checks; thread sync is authoritative; bounded tombstones need an overflow watermark for in-flight history.
 tags: [#discord, #gateway, #history, #message-update, #store, #race]
 impact: critical
 commit: pending
@@ -16,6 +16,8 @@ An initial REST history response replaced confirmed messages delivered by the ga
 ## Resolution
 
 History requests snapshot the store message revision and channel lifetime on the UI goroutine. Initial completion keeps newer stored versions, appends live arrivals, rejects message-delete tombstones, and discards responses from a deleted/recreated channel lifetime. `PrependMessagesSince` reserves post-request revisions and local echoes, then spends remaining capacity from the fetched oldest edge, preserving live newest-tail arrivals while pagination advances. The local Arikawa `MessageUpdateEvent` unmarshaller records field presence, and app merging changes only present fields. Channel/guild/thread lifecycle handlers post mutations, cascade removals, repair deleted active selections, and notify UI refresh callbacks. All self-ID-dependent gateway classification runs inside posted closures.
+
+All guild/channel/role/thread/archive/forum/directory loader completions also validate store generations and versioned resource gates. Deletion invalidates loaded, pending, exhausted, cursor, and forum-pending state, so an old completion cannot mutate a recreated lifetime or finish its new request. `THREAD_LIST_SYNC` removes only absent cached active threads in the supplied parent scope (or the whole guild when `channel_ids` is nil), preserving archived, out-of-scope, and other-guild threads. Message tombstones are bounded per channel by the history limit; a revision watermark causes any request that overlapped tombstone eviction to be discarded wholesale rather than resurrecting an untracked delete.
 
 ## Testing note
 

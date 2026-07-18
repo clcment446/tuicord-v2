@@ -305,7 +305,7 @@ type App struct {
 	threadsGate      loadGate[store.GuildID]
 	archivedGate     loadGate[store.ChannelID]
 	archivedBefore   map[store.ChannelID]discord.Timestamp
-	forumMetaPending map[store.ChannelID]struct{}
+	forumMetaPending map[store.ChannelID]uint64
 
 	onReady           func()
 	onChange          func()
@@ -495,7 +495,7 @@ func (a *App) ensureResourceMaps() {
 		a.archivedBefore = map[store.ChannelID]discord.Timestamp{}
 	}
 	if a.forumMetaPending == nil {
-		a.forumMetaPending = map[store.ChannelID]struct{}{}
+		a.forumMetaPending = map[store.ChannelID]uint64{}
 	}
 }
 
@@ -669,17 +669,28 @@ func (a *App) handleThreadListSync(e *gateway.ThreadListSyncEvent) {
 		t.GuildID = e.GuildID
 		threads = append(threads, convertChannel(t))
 	}
+	var parents []store.ChannelID
+	if e.ChannelIDs != nil {
+		parents = make([]store.ChannelID, len(e.ChannelIDs))
+		for i, id := range e.ChannelIDs {
+			parents[i] = store.ChannelID(id)
+		}
+	}
 	joined := make(map[store.ChannelID]bool, len(e.Members))
 	for _, m := range e.Members {
 		joined[store.ChannelID(m.ID)] = true
 	}
 	a.ui.Post(func() {
-		for _, t := range threads {
-			if t.Thread != nil && joined[t.ID] {
-				t.Thread.Joined = true
+		for i := range threads {
+			if threads[i].Thread != nil && joined[threads[i].ID] {
+				threads[i].Thread.Joined = true
 			}
-			a.store.UpsertChannel(t)
 		}
+		removed := a.store.SyncActiveThreads(guildID, parents, threads)
+		for _, id := range removed {
+			a.invalidateChannelLoads(id)
+		}
+		a.repairActiveChannel()
 		a.markThreadsLoaded(guildID)
 		if a.onChange != nil {
 			a.onChange()
@@ -805,6 +816,10 @@ func (a *App) handleGuildDelete(e *gateway.GuildDeleteEvent) {
 				a.store.UpsertGuild(store.Guild{ID: id, Unavailable: true})
 			}
 		} else {
+			a.invalidateGuildLoads(id)
+			for _, channel := range a.store.Channels(id) {
+				a.invalidateChannelLoads(channel.ID)
+			}
 			a.store.RemoveGuild(id)
 			if a.activeGuild == id {
 				a.SetActive(0, 0)
@@ -845,7 +860,22 @@ func (a *App) handleChannelUpsert(channel discord.Channel) {
 
 func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 	id := store.ChannelID(e.ID)
+	guildID := store.GuildID(e.GuildID)
 	a.ui.Post(func() {
+		if guildID == 0 {
+			if channel, ok := a.store.Channel(id); ok {
+				guildID = channel.GuildID
+			}
+		}
+		a.invalidateGuildChannelLoads(guildID)
+		for _, guild := range a.store.Guilds() {
+			for _, channel := range a.store.Channels(guild.ID) {
+				if channel.ID == id || channel.ParentID == id {
+					a.invalidateChannelLoads(channel.ID)
+				}
+			}
+		}
+		a.invalidateChannelLoads(id)
 		a.store.RemoveChannel(id)
 		a.repairActiveChannel()
 		if a.onChange != nil {
@@ -856,13 +886,75 @@ func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 
 func (a *App) handleThreadDelete(e *gateway.ThreadDeleteEvent) {
 	id := store.ChannelID(e.ID)
+	guildID := store.GuildID(e.GuildID)
 	a.ui.Post(func() {
+		if guildID == 0 {
+			if channel, ok := a.store.Channel(id); ok {
+				guildID = channel.GuildID
+			}
+		}
+		a.invalidateThreadLoad(guildID)
+		a.invalidateChannelLoads(id)
 		a.store.RemoveThread(id)
 		a.repairActiveChannel()
 		if a.onChange != nil {
 			a.onChange()
 		}
 	})
+}
+
+func (a *App) invalidateGuildLoads(id store.GuildID) {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.rolesGate.invalidate(id)
+	a.channelsGate.invalidate(id)
+	a.threadsGate.invalidate(id)
+	a.guildsGate.invalidate()
+}
+
+func (a *App) invalidateGuildChannelLoads(id store.GuildID) {
+	if id == 0 || id == DirectMessagesGuildID {
+		return
+	}
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.channelsGate.invalidate(id)
+	a.threadsGate.invalidate(id)
+}
+
+func (a *App) invalidateThreadLoad(id store.GuildID) {
+	if id == 0 || id == DirectMessagesGuildID {
+		return
+	}
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.threadsGate.invalidate(id)
+}
+
+func (a *App) invalidateRoleLoad(id store.GuildID) {
+	if id == 0 || id == DirectMessagesGuildID {
+		return
+	}
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.rolesGate.invalidate(id)
+}
+
+func (a *App) invalidateChannelLoads(id store.ChannelID) {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	a.historyGate.invalidate(id)
+	a.archivedGate.invalidate(id)
+	delete(a.archivedBefore, id)
+	delete(a.forumMetaPending, id)
+	// Guild/DM directory hydration can contain this channel. Let a fresh load
+	// start, while its generation snapshot rejects the old completion.
+	a.guildsGate.invalidate()
 }
 
 // repairActiveChannel clears a selection removed by channel or thread
@@ -1396,12 +1488,35 @@ func (a *App) reportError(err error) {
 type historyRequestSnapshot struct {
 	revision          uint64
 	channelGeneration uint64
+	gateVersion       uint64
+}
+
+type directoryRequestSnapshot struct {
+	guilds      map[store.GuildID]uint64
+	channels    map[store.ChannelID]uint64
+	gateVersion uint64
+}
+
+func (a *App) directoryRequestSnapshot() directoryRequestSnapshot {
+	a.resourceMu.Lock()
+	version := a.guildsGate.version
+	a.resourceMu.Unlock()
+	return directoryRequestSnapshot{
+		guilds:      a.store.GuildGenerations(),
+		channels:    a.store.ChannelGenerations(),
+		gateVersion: version,
+	}
 }
 
 func (a *App) historyRequestSnapshot(channel store.ChannelID) historyRequestSnapshot {
+	a.resourceMu.Lock()
+	a.ensureResourceMaps()
+	version := a.historyGate.version[channel]
+	a.resourceMu.Unlock()
 	return historyRequestSnapshot{
 		revision:          a.store.Revision(),
 		channelGeneration: a.store.ChannelGeneration(channel),
+		gateVersion:       version,
 	}
 }
 
@@ -1411,13 +1526,15 @@ func (a *App) LoadHistory(channel store.ChannelID, limit uint) {
 	if a == nil || a.history == nil || channel == 0 {
 		return
 	}
-	if !a.beginHistoryLoad(channel) {
+	version, ok := a.beginHistoryLoad(channel)
+	if !ok {
 		return
 	}
 	// Snapshot on the UI goroutine before starting REST. Message revisions,
 	// delete tombstones, and the channel lifetime protect gateway mutations that
 	// happen while the request is in flight.
 	snapshot := a.historyRequestSnapshot(channel)
+	snapshot.gateVersion = version
 	go a.loadHistoryFrom(channel, limit, snapshot)
 }
 
@@ -1430,8 +1547,11 @@ func (a *App) loadHistory(channel store.ChannelID, limit uint) {
 func (a *App) loadHistoryFrom(channel store.ChannelID, limit uint, snapshot historyRequestSnapshot) {
 	messages, err := a.history.Messages(discord.ChannelID(channel), limit)
 	if err != nil {
-		a.finishHistoryLoad(channel, false)
 		a.ui.Post(func() {
+			if a.store.ChannelGeneration(channel) != snapshot.channelGeneration || !a.historyLoadCurrent(channel, snapshot.gateVersion) {
+				return
+			}
+			a.finishHistoryLoad(channel, false)
 			if a.onError != nil {
 				a.onError(err)
 			}
@@ -1443,9 +1563,14 @@ func (a *App) loadHistoryFrom(channel store.ChannelID, limit uint, snapshot hist
 		converted = append(converted, convertMessage(messages[i]))
 	}
 	a.ui.Post(func() {
-		if a.store.ChannelGeneration(channel) != snapshot.channelGeneration {
-			// The request belongs to a deleted or replaced channel lifetime. Do not
-			// hydrate identities or recreate its message ring.
+		if a.store.ChannelGeneration(channel) != snapshot.channelGeneration || !a.historyLoadCurrent(channel, snapshot.gateVersion) {
+			// The request belongs to a deleted or replaced channel lifetime. Its
+			// gate was invalidated by deletion; do not touch the new lifetime's gate.
+			return
+		}
+		if a.store.TombstonesPrunedSince(channel, snapshot.revision) {
+			// More in-flight deletes arrived than the bounded tombstone cache can
+			// identify. Discard the stale page and allow a fresh request to retry.
 			a.finishHistoryLoad(channel, false)
 			return
 		}
@@ -1514,7 +1639,11 @@ func mergeInitialHistory(st *store.Store, channel store.ChannelID, incoming, cur
 // Calls made while a page is in flight or when Discord has no older messages
 // are ignored.
 func (a *App) LoadOlderHistory(channel store.ChannelID) {
-	if a == nil || a.history == nil || channel == 0 || !a.beginOlderHistoryLoad(channel) {
+	if a == nil || a.history == nil || channel == 0 {
+		return
+	}
+	version, ok := a.beginOlderHistoryLoad(channel)
+	if !ok {
 		return
 	}
 	messages := a.store.Messages(channel)
@@ -1528,6 +1657,7 @@ func (a *App) LoadOlderHistory(channel store.ChannelID) {
 		return
 	}
 	snapshot := a.historyRequestSnapshot(channel)
+	snapshot.gateVersion = version
 	go a.loadOlderHistoryFrom(channel, discord.MessageID(before), 50, snapshot)
 }
 
@@ -1539,8 +1669,13 @@ func (a *App) loadOlderHistory(channel store.ChannelID, before discord.MessageID
 func (a *App) loadOlderHistoryFrom(channel store.ChannelID, before discord.MessageID, limit uint, snapshot historyRequestSnapshot) {
 	messages, err := a.history.MessagesBefore(discord.ChannelID(channel), before, limit)
 	if err != nil {
-		a.finishOlderHistory(channel, false)
-		a.reportError(err)
+		a.ui.Post(func() {
+			if a.store.ChannelGeneration(channel) != snapshot.channelGeneration || !a.historyLoadCurrent(channel, snapshot.gateVersion) {
+				return
+			}
+			a.finishOlderHistory(channel, false)
+			a.reportError(err)
+		})
 		return
 	}
 	converted := make([]store.Message, 0, len(messages))
@@ -1548,7 +1683,10 @@ func (a *App) loadOlderHistoryFrom(channel store.ChannelID, before discord.Messa
 		converted = append(converted, convertMessage(messages[i]))
 	}
 	a.ui.Post(func() {
-		if a.store.ChannelGeneration(channel) != snapshot.channelGeneration {
+		if a.store.ChannelGeneration(channel) != snapshot.channelGeneration || !a.historyLoadCurrent(channel, snapshot.gateVersion) {
+			return
+		}
+		if a.store.TombstonesPrunedSince(channel, snapshot.revision) {
 			a.finishOlderHistory(channel, false)
 			return
 		}
@@ -1572,10 +1710,12 @@ func (a *App) LoadRoles(guild store.GuildID) {
 	if a == nil || a.roles == nil || guild == 0 || guild == DirectMessagesGuildID {
 		return
 	}
-	if !a.beginRoleLoad(guild) {
+	version, ok := a.beginRoleLoad(guild)
+	if !ok {
 		return
 	}
-	go a.loadRoles(guild)
+	generation := a.store.GuildGeneration(guild)
+	go a.loadRolesFrom(guild, generation, version)
 }
 
 // LoadGuilds fetches the cheap directory data needed to render the server and
@@ -1584,18 +1724,30 @@ func (a *App) LoadGuilds(limit uint) {
 	if a == nil || a.dirs == nil {
 		return
 	}
-	if !a.beginGuildLoad() {
+	version, ok := a.beginGuildLoad()
+	if !ok {
 		return
 	}
-	go a.loadGuilds(limit)
+	snapshot := a.directoryRequestSnapshot()
+	snapshot.gateVersion = version
+	go a.loadGuildsFrom(limit, snapshot)
 }
 
 func (a *App) loadGuilds(limit uint) {
+	a.loadGuildsFrom(limit, a.directoryRequestSnapshot())
+}
+
+func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 	guilds, guildErr := a.dirs.Guilds(limit)
 	privateChannels, dmErr := a.dirs.PrivateChannels()
 	if guildErr != nil && dmErr != nil {
-		a.finishGuildLoad(false)
 		a.ui.Post(func() {
+			// Any deletion invalidates the directory gate. Do not let this old
+			// failure clear a newer request's pending state.
+			if !a.directorySnapshotCurrent(snapshot, nil, nil) {
+				return
+			}
+			a.finishGuildLoad(false)
 			if a.onError != nil {
 				a.onError(guildErr)
 			}
@@ -1604,6 +1756,11 @@ func (a *App) loadGuilds(limit uint) {
 	}
 	privateChannels = a.hydratePrivateChannels(privateChannels)
 	a.ui.Post(func() {
+		if !a.directorySnapshotCurrent(snapshot, guilds, privateChannels) {
+			// A returned guild/channel was deleted or replaced while this directory
+			// request (including DM detail hydration) was in flight.
+			return
+		}
 		for _, guild := range guilds {
 			a.store.UpsertGuild(store.Guild{ID: store.GuildID(guild.ID), Name: guild.Name})
 		}
@@ -1620,6 +1777,34 @@ func (a *App) loadGuilds(limit uint) {
 			a.onReady()
 		}
 	})
+}
+
+func (a *App) directorySnapshotCurrent(snapshot directoryRequestSnapshot, _ []discord.Guild, _ []discord.Channel) bool {
+	a.resourceMu.Lock()
+	currentVersion := a.guildsGate.version
+	a.resourceMu.Unlock()
+	if currentVersion != snapshot.gateVersion {
+		return false
+	}
+	guilds := a.store.GuildGenerations()
+	if len(guilds) != len(snapshot.guilds) {
+		return false
+	}
+	for id, generation := range guilds {
+		if snapshot.guilds[id] != generation {
+			return false
+		}
+	}
+	channels := a.store.ChannelGenerations()
+	if len(channels) != len(snapshot.channels) {
+		return false
+	}
+	for id, generation := range channels {
+		if snapshot.channels[id] != generation {
+			return false
+		}
+	}
+	return true
 }
 
 // hydratePrivateChannels fills recipient data omitted by some user-session
@@ -1654,10 +1839,12 @@ func (a *App) LoadChannels(guild store.GuildID) {
 	if a == nil || a.chans == nil || guild == 0 || guild == DirectMessagesGuildID {
 		return
 	}
-	if !a.beginChannelLoad(guild) {
+	version, ok := a.beginChannelLoad(guild)
+	if !ok {
 		return
 	}
-	go a.loadChannels(guild)
+	generation := a.store.GuildGeneration(guild)
+	go a.loadChannelsFrom(guild, generation, version)
 }
 
 // LoadForumMetadata refreshes a forum channel from Discord's channel endpoint.
@@ -1667,18 +1854,27 @@ func (a *App) LoadForumMetadata(channel store.ChannelID) {
 	if a == nil || a.channelDetail == nil || channel == 0 {
 		return
 	}
+	generation := a.store.ChannelGeneration(channel)
 	a.resourceMu.Lock()
 	a.ensureResourceMaps()
 	if _, ok := a.forumMetaPending[channel]; ok {
 		a.resourceMu.Unlock()
 		return
 	}
-	a.forumMetaPending[channel] = struct{}{}
+	a.forumMetaPending[channel] = generation
 	a.resourceMu.Unlock()
 	go func() {
 		c, err := a.channelDetail.Channel(discord.ChannelID(channel))
 		a.ui.Post(func() {
+			if a.store.ChannelGeneration(channel) != generation {
+				return
+			}
 			a.resourceMu.Lock()
+			pendingGeneration, pending := a.forumMetaPending[channel]
+			if !pending || pendingGeneration != generation {
+				a.resourceMu.Unlock()
+				return
+			}
 			delete(a.forumMetaPending, channel)
 			a.resourceMu.Unlock()
 			if err != nil || c == nil {
@@ -1699,10 +1895,17 @@ func (a *App) LoadForumMetadata(channel store.ChannelID) {
 }
 
 func (a *App) loadChannels(guild store.GuildID) {
+	a.loadChannelsFrom(guild, a.store.GuildGeneration(guild), a.channelLoadVersion(guild))
+}
+
+func (a *App) loadChannelsFrom(guild store.GuildID, generation, version uint64) {
 	channels, err := a.chans.Channels(discord.GuildID(guild))
 	if err != nil {
-		a.finishChannelLoad(guild, false)
 		a.ui.Post(func() {
+			if a.store.GuildGeneration(guild) != generation || !a.channelLoadCurrent(guild, version) {
+				return
+			}
+			a.finishChannelLoad(guild, false)
 			if a.onError != nil {
 				a.onError(err)
 			}
@@ -1710,6 +1913,9 @@ func (a *App) loadChannels(guild store.GuildID) {
 		return
 	}
 	a.ui.Post(func() {
+		if a.store.GuildGeneration(guild) != generation || !a.channelLoadCurrent(guild, version) {
+			return
+		}
 		for _, channel := range channels {
 			channel.GuildID = discord.GuildID(guild)
 			a.store.UpsertChannel(convertChannel(channel))
@@ -1722,10 +1928,17 @@ func (a *App) loadChannels(guild store.GuildID) {
 }
 
 func (a *App) loadRoles(guild store.GuildID) {
+	a.loadRolesFrom(guild, a.store.GuildGeneration(guild), a.roleLoadVersion(guild))
+}
+
+func (a *App) loadRolesFrom(guild store.GuildID, generation, version uint64) {
 	roles, err := a.roles.Roles(discord.GuildID(guild))
 	if err != nil {
-		a.finishRoleLoad(guild, false)
 		a.ui.Post(func() {
+			if a.store.GuildGeneration(guild) != generation || !a.roleLoadCurrent(guild, version) {
+				return
+			}
+			a.finishRoleLoad(guild, false)
 			if a.onError != nil {
 				a.onError(err)
 			}
@@ -1733,6 +1946,9 @@ func (a *App) loadRoles(guild store.GuildID) {
 		return
 	}
 	a.ui.Post(func() {
+		if a.store.GuildGeneration(guild) != generation || !a.roleLoadCurrent(guild, version) {
+			return
+		}
 		for _, role := range roles {
 			a.store.UpsertRole(guild, convertRole(role))
 		}
@@ -1757,10 +1973,10 @@ func (a *App) markChannelsLoaded(guild store.GuildID) {
 	a.channelsGate.markLoaded(guild)
 }
 
-func (a *App) beginGuildLoad() bool {
+func (a *App) beginGuildLoad() (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	return a.guildsGate.begin()
+	return a.guildsGate.beginVersion()
 }
 
 func (a *App) finishGuildLoad(ok bool) {
@@ -1769,11 +1985,18 @@ func (a *App) finishGuildLoad(ok bool) {
 	a.guildsGate.finish(ok)
 }
 
-func (a *App) beginHistoryLoad(channel store.ChannelID) bool {
+func (a *App) beginHistoryLoad(channel store.ChannelID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.historyGate.begin(channel)
+	return a.historyGate.beginVersion(channel)
+}
+
+func (a *App) historyLoadCurrent(channel store.ChannelID, version uint64) bool {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.historyGate.version[channel] == version
 }
 
 func (a *App) finishHistoryLoad(channel store.ChannelID, ok bool) {
@@ -1783,11 +2006,11 @@ func (a *App) finishHistoryLoad(channel store.ChannelID, ok bool) {
 	a.historyGate.finish(channel, ok)
 }
 
-func (a *App) beginOlderHistoryLoad(channel store.ChannelID) bool {
+func (a *App) beginOlderHistoryLoad(channel store.ChannelID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.historyGate.beginOlder(channel)
+	return a.historyGate.beginOlderVersion(channel)
 }
 
 func (a *App) finishOlderHistory(channel store.ChannelID, exhausted bool) {
@@ -1804,11 +2027,22 @@ func (a *App) markHistoryExhausted(channel store.ChannelID) {
 	a.historyGate.markExhausted(channel)
 }
 
-func (a *App) beginRoleLoad(guild store.GuildID) bool {
+func (a *App) beginRoleLoad(guild store.GuildID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.rolesGate.begin(guild)
+	return a.rolesGate.beginVersion(guild)
+}
+
+func (a *App) roleLoadVersion(guild store.GuildID) uint64 {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.rolesGate.version[guild]
+}
+
+func (a *App) roleLoadCurrent(guild store.GuildID, version uint64) bool {
+	return a.roleLoadVersion(guild) == version
 }
 
 func (a *App) finishRoleLoad(guild store.GuildID, ok bool) {
@@ -1818,11 +2052,22 @@ func (a *App) finishRoleLoad(guild store.GuildID, ok bool) {
 	a.rolesGate.finish(guild, ok)
 }
 
-func (a *App) beginChannelLoad(guild store.GuildID) bool {
+func (a *App) beginChannelLoad(guild store.GuildID) (uint64, bool) {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
 	a.ensureResourceMaps()
-	return a.channelsGate.begin(guild)
+	return a.channelsGate.beginVersion(guild)
+}
+
+func (a *App) channelLoadVersion(guild store.GuildID) uint64 {
+	a.resourceMu.Lock()
+	defer a.resourceMu.Unlock()
+	a.ensureResourceMaps()
+	return a.channelsGate.version[guild]
+}
+
+func (a *App) channelLoadCurrent(guild store.GuildID, version uint64) bool {
+	return a.channelLoadVersion(guild) == version
 }
 
 func (a *App) finishChannelLoad(guild store.GuildID, ok bool) {
