@@ -159,9 +159,31 @@ func (a *App) Handle(ev Event) bool {
 		return a.handleMouse(ev)
 	case input.KeyEvent:
 		return a.handleKey(ev)
+	case input.TickEvent:
+		return a.handleTick(ev)
 	default:
 		return a.handleFocused(ev)
 	}
+}
+
+// handleTick broadcasts a tick to both the focused widget and the root. A tick
+// is a synthetic timer event, not targeted input: the focused widget uses it
+// for its own updates (e.g. cursor blink) but must not starve the root of it,
+// or root-level time-based work like toast auto-dismiss would stall whenever a
+// widget consuming ticks holds focus.
+func (a *App) handleTick(ev Event) bool {
+	handled := false
+	focused := a.Focus.Focused()
+	if focused != nil && focused.Handle(ev) {
+		handled = true
+	}
+	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	if root != nil && !sameWidget(root, focused) && root.Handle(ev) {
+		handled = true
+	}
+	return handled
 }
 
 // Run opens the user's terminal and blocks until the app exits.
