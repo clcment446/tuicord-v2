@@ -117,39 +117,39 @@ func TestShellPopupRendersOverMainView(t *testing.T) {
 
 func TestToastExpandsAndDismisses(t *testing.T) {
 	sh := &Shell{
-		cfg:   config.Default(),
-		mv:    &MainView{Root: widget.NewText("main")},
-		toast: NewToast("Gateway error", "line one line two line three", Styles{}),
+		cfg:    config.Default(),
+		mv:     &MainView{Root: widget.NewText("main")},
+		toasts: []*Toast{NewToast("Gateway error", "line one line two line three", Styles{})},
 	}
 
-	if sh.toast.Expanded() {
+	if sh.Toast().Expanded() {
 		t.Fatal("toast starts expanded")
 	}
-	if !sh.Handle(input.KeyEvent{Key: input.KeyEnter}) || !sh.toast.Expanded() {
+	if !sh.Handle(input.KeyEvent{Key: input.KeyEnter}) || !sh.Toast().Expanded() {
 		t.Fatal("Enter did not expand toast")
 	}
-	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'x'}) || sh.toast != nil {
+	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'x'}) || sh.Toast() != nil {
 		t.Fatal("x did not dismiss toast")
 	}
 }
 
-func TestToastConsumesUnderlyingInput(t *testing.T) {
+func TestToastDoesNotConsumeUnderlyingInput(t *testing.T) {
 	cfg := config.Default()
 	sh := &Shell{
-		cfg:   cfg,
-		mv:    &MainView{Root: widget.NewText("main")},
-		toast: NewToast("Gateway error", "boom", Styles{}),
+		cfg:    cfg,
+		mv:     &MainView{Root: widget.NewText("main")},
+		toasts: []*Toast{NewToast("Gateway error", "boom", Styles{})},
 	}
 
-	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}) {
-		t.Fatal("toast did not consume shortcut input")
+	if sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'z'}) {
+		t.Fatal("passive toast consumed ordinary input")
 	}
 	if sh.overlay != nil {
 		t.Fatal("shortcut leaked through toast and opened overlay")
 	}
 
-	if !sh.Handle(input.MouseEvent{Btn: input.ButtonRight, Kind: input.MousePress}) || sh.toast != nil {
-		t.Fatal("right click did not dismiss toast")
+	if !sh.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'x'}) || sh.Toast() != nil {
+		t.Fatal("x did not dismiss toast")
 	}
 }
 

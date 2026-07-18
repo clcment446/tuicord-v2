@@ -200,6 +200,10 @@ type Message struct {
 	// AuthorID is the snowflake of the sending user, used for role-color and
 	// profile lookups.
 	AuthorID UserID
+	// AuthorAvatarURL is the Discord CDN URL for the author's profile picture.
+	// It is populated from the message author so chat rendering does not depend
+	// on a guild-member cache (which is absent for DMs and webhooks).
+	AuthorAvatarURL string
 	// ApplicationID is set on messages sent by an application (interaction
 	// responses, webhooks). Component interactions are addressed to it; when
 	// zero, the bot author's snowflake doubles as the application ID.
@@ -242,8 +246,11 @@ type Member struct {
 	Name     string
 	Username string
 	Nick     string
-	Color    uint32
-	RoleIDs  []RoleID
+	// AvatarURL prefers the guild-specific profile picture when Discord provides
+	// one, falling back to the user's global avatar.
+	AvatarURL string
+	Color     uint32
+	RoleIDs   []RoleID
 }
 
 // Role is a Discord role used to interpret member role IDs.
@@ -678,6 +685,36 @@ func (s *Store) UpsertMember(guild GuildID, m Member) {
 		s.members[guild] = byUser
 	}
 	byUser[m.ID] = m
+	s.touchMeta()
+}
+
+// RememberMemberIdentity records a message author's identity without replacing
+// guild-specific fields that only member/role gateway payloads can provide.
+func (s *Store) RememberMemberIdentity(guild GuildID, m Member) {
+	if guild == 0 || m.ID == 0 {
+		return
+	}
+	byUser := s.members[guild]
+	if byUser == nil {
+		byUser = map[UserID]Member{}
+		s.members[guild] = byUser
+	}
+	if existing, ok := byUser[m.ID]; ok {
+		// Sparse message authors carry global identity only. Never replace a
+		// guild nickname or guild avatar learned from a member payload.
+		if existing.Name == "" && m.Name != "" {
+			existing.Name = m.Name
+		}
+		if m.Username != "" {
+			existing.Username = m.Username
+		}
+		if existing.AvatarURL == "" && m.AvatarURL != "" {
+			existing.AvatarURL = m.AvatarURL
+		}
+		byUser[m.ID] = existing
+	} else {
+		byUser[m.ID] = m
+	}
 	s.touchMeta()
 }
 

@@ -306,10 +306,11 @@ type App struct {
 	archivedBefore   map[store.ChannelID]discord.Timestamp
 	forumMetaPending map[store.ChannelID]struct{}
 
-	onReady  func()
-	onChange func()
-	onError  func(error)
-	events   EventSink
+	onReady           func()
+	onChange          func()
+	onError           func(error)
+	onIncomingMessage func(store.Message)
+	events            EventSink
 
 	activeGuild   store.GuildID
 	activeChannel store.ChannelID
@@ -554,6 +555,10 @@ func (a *App) OnReady(fn func()) { a.onReady = fn }
 // message updates the store, so the UI can refresh unread badges.
 func (a *App) OnChange(fn func()) { a.onChange = fn }
 
+// OnIncomingMessage registers a callback for a newly received remote message.
+// It runs on the UI goroutine after the message has been added to the store.
+func (a *App) OnIncomingMessage(fn func(store.Message)) { a.onIncomingMessage = fn }
+
 // OnError registers a callback run (on the UI goroutine) when background work
 // fails but the client can keep running.
 func (a *App) OnError(fn func(error)) { a.onError = fn }
@@ -708,20 +713,32 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		copy := *e.Member
 		copy.User = e.Author
 		member = &copy
+	} else if e.GuildID != 0 && e.Author.ID != 0 {
+		member = &discord.Member{User: e.Author}
 	}
 	a.ui.Post(func() {
 		if member != nil {
-			a.store.UpsertMember(store.GuildID(e.GuildID), convertMember(*member))
+			converted := convertMember(*member, e.GuildID)
+			if e.Member != nil {
+				a.store.UpsertMember(store.GuildID(e.GuildID), converted)
+			} else {
+				a.store.RememberMemberIdentity(store.GuildID(e.GuildID), converted)
+			}
 		}
 		// Reconcile an optimistic local echo when possible; otherwise append.
-		if !a.store.ReplaceMessage(msg.Nonce, msg) {
+		appended := !a.store.ReplaceMessage(msg.Nonce, msg)
+		pingsSelf := a.messagePingsSelf(e.Message)
+		if appended {
 			a.store.AppendMessage(msg)
 			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID {
 				a.store.IncrementUnread(msg.ChannelID)
-				if a.messagePingsSelf(e.Message) {
+				if pingsSelf {
 					a.store.IncrementPing(msg.ChannelID)
 				}
 			}
+		}
+		if appended && pingsSelf && msg.AuthorID != 0 && msg.AuthorID != a.selfID && a.onIncomingMessage != nil {
+			a.onIncomingMessage(msg)
 		}
 		if a.onChange != nil {
 			a.onChange()
@@ -895,7 +912,7 @@ func (a *App) handleMembersChunk(e *gateway.GuildMembersChunkEvent) {
 	members := append([]discord.Member(nil), e.Members...)
 	a.ui.Post(func() {
 		for _, member := range members {
-			a.store.UpsertMember(guildID, convertMember(member))
+			a.store.UpsertMember(guildID, convertMember(member, e.GuildID))
 		}
 		if a.onChange != nil {
 			a.onChange()
@@ -906,7 +923,7 @@ func (a *App) handleMembersChunk(e *gateway.GuildMembersChunkEvent) {
 func (a *App) handleMemberUpsert(guild discord.GuildID, member discord.Member) {
 	guildID := store.GuildID(guild)
 	a.ui.Post(func() {
-		a.store.UpsertMember(guildID, convertMember(member))
+		a.store.UpsertMember(guildID, convertMember(member, guild))
 		if a.onChange != nil {
 			a.onChange()
 		}
@@ -1207,6 +1224,12 @@ func (a *App) loadHistory(channel store.ChannelID, limit uint) {
 		converted = append(converted, convertMessage(messages[i]))
 	}
 	a.ui.Post(func() {
+		if ch, ok := a.store.Channel(channel); ok && ch.GuildID != 0 && ch.GuildID != DirectMessagesGuildID {
+			guild := discord.GuildID(ch.GuildID)
+			for _, message := range messages {
+				a.store.RememberMemberIdentity(ch.GuildID, convertMember(discord.Member{User: message.Author}, guild))
+			}
+		}
 		a.store.SetMessages(channel, converted)
 		a.finishHistoryLoad(channel, true)
 		if limit == 0 || len(messages) < int(limit) {
@@ -1250,6 +1273,12 @@ func (a *App) loadOlderHistory(channel store.ChannelID, before discord.MessageID
 		converted = append(converted, convertMessage(messages[i]))
 	}
 	a.ui.Post(func() {
+		if ch, ok := a.store.Channel(channel); ok && ch.GuildID != 0 && ch.GuildID != DirectMessagesGuildID {
+			guild := discord.GuildID(ch.GuildID)
+			for _, message := range messages {
+				a.store.RememberMemberIdentity(ch.GuildID, convertMember(discord.Member{User: message.Author}, guild))
+			}
+		}
 		a.store.PrependMessages(channel, converted)
 		a.finishOlderHistory(channel, len(messages) < int(limit))
 		if len(converted) > 0 && a.onChange != nil {

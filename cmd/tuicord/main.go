@@ -82,6 +82,7 @@ func run() error {
 	})
 	orch.OnReady(mv.Refresh)
 	orch.OnChange(mv.RefreshChannels)
+	orch.OnIncomingMessage(shell.NotifyIncomingMessage)
 	orch.OnError(func(err error) {
 		shell.ShowToast("Discord error", err)
 	})

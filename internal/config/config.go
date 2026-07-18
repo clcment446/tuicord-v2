@@ -146,6 +146,13 @@ type Display struct {
 	ASCII bool `toml:"ascii"`
 	// TTYColors restricts UI colors to the terminal's standard 16-color palette.
 	TTYColors bool `toml:"tty_colors"`
+	// RoleGradients enables Discord gradient role colors when role metadata
+	// provides gradient stops. It is off by default for conservative terminal
+	// color usage.
+	RoleGradients bool `toml:"role_gradients"`
+	// RoleGradientAnimations phase-shifts enabled role gradients on visible
+	// chat rows. It has no effect unless RoleGradients is also enabled.
+	RoleGradientAnimations bool `toml:"role_gradient_animations"`
 }
 
 // Auth controls how interactive Discord authentication is presented.
@@ -274,6 +281,7 @@ func Default() Config {
 		Accessibility: Accessibility{MouseOn: true},
 		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
+			Enabled:    true,
 			Background: "#eff1f5",
 			Text:       "#4c4f69",
 			Muted:      "#8c8fa1",
@@ -525,8 +533,9 @@ video_seek_forward = "right"
 video_replay = "r"
 
 [colors]
-# Custom palette values are opt-in. Set enabled = true to use them.
-enabled = false
+# Catppuccin Latte is enabled by default. Set enabled = false to ignore
+# custom values in this section and use the built-in palette.
+enabled = true
 background = "#eff1f5"
 text = "#4c4f69"
 muted = "#8c8fa1"
@@ -538,6 +547,10 @@ error = "#d20f39"
 [display]
 # Restrict emitted colors to the terminal's standard 16-color palette.
 tty_colors = false
+# Render cached Discord gradient roles on author names.
+role_gradients = false
+# Animate visible gradient role names (requires role_gradients = true).
+role_gradient_animations = false
 ascii = false
 
 [auth]
