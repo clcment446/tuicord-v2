@@ -521,36 +521,23 @@ func overlayColors(base, over Colors) Colors {
 }
 
 func writeDefault(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		// Lost a race or file appeared; not fatal for loading.
-		if errors.Is(err, fs.ErrExist) {
-			return nil
-		}
-		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(defaultConfigTemplate)
-	return err
+	return writeFirstRunFile(path, defaultConfigTemplate)
 }
 
 func writeColorsTemplate(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	return writeFirstRunFile(path, colorsTemplate())
+}
+
+func writeFirstRunFile(path, contents string) error {
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
-			return nil
-		}
+	return atomicfile.Write(path, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, contents)
 		return err
-	}
-	defer f.Close()
-	_, err = f.WriteString(colorsTemplate())
-	return err
+	})
 }
 
 const defaultConfigTemplate = `# tuicord-v2 configuration

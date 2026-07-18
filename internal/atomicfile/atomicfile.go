@@ -11,9 +11,14 @@ import (
 )
 
 // Write creates path's parent directory, writes the file through a temporary
-// sibling, syncs and closes it, then atomically replaces path. The temporary
-// file is removed after every unsuccessful write.
+// sibling, syncs and closes it, then atomically replaces path. On Unix systems
+// that support it, Write also syncs the parent directory after the rename. The
+// temporary file is removed after every unsuccessful write.
 func Write(path string, perm fs.FileMode, encode func(io.Writer) error) error {
+	return write(path, perm, encode, syncParentDirectory)
+}
+
+func write(path string, perm fs.FileMode, encode func(io.Writer) error, syncParent func(string) error) error {
 	if encode == nil {
 		return fmt.Errorf("write %s: nil encoder", path)
 	}
@@ -50,6 +55,9 @@ func Write(path string, perm fs.FileMode, encode func(io.Writer) error) error {
 	closed = true
 	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	if err := syncParent(dir); err != nil {
+		return fmt.Errorf("sync parent directory for %s: %w", path, err)
 	}
 	return nil
 }

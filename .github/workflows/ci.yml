@@ -34,6 +34,8 @@ jobs:
           cache-dependency-path: third_party/arikawa/go.sum
       - name: Test nested arikawa module
         run: go test ./...
+      - name: Race test nested arikawa module
+        run: go test -race ./...
 
   windows-compile:
     runs-on: ubuntu-latest
