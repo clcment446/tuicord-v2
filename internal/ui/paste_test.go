@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/layout"
+	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 )
 
@@ -55,20 +57,53 @@ func TestImageAttachmentsFilters(t *testing.T) {
 	}
 }
 
-func TestDecodePreviewImage(t *testing.T) {
+func TestBuildImagePreview(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "big.png")
 	writePNG(t, path, 400, 300)
 
-	img, ok := decodePreviewImage(path)
+	mv := &MainView{previewCellW: 8, previewCellH: 16, styles: Styles{}}
+	p, ok := mv.buildImagePreview(path)
 	if !ok {
-		t.Fatal("decodePreviewImage failed on a valid PNG")
+		t.Fatal("buildImagePreview failed on a valid PNG")
 	}
-	// It must be downscaled within the preview budget (cols x rows*aspect px).
-	if b := img.Bounds(); b.Dx() > previewMaxCols {
-		t.Fatalf("preview width %d exceeds %d cols budget", b.Dx(), previewMaxCols)
+	// The thumbnail must fit the composer budget.
+	if p.cols < 1 || p.cols > composerPreviewMaxCols {
+		t.Fatalf("cols = %d, want 1..%d", p.cols, composerPreviewMaxCols)
 	}
-	if _, ok := decodePreviewImage(filepath.Join(t.TempDir(), "missing.png")); ok {
-		t.Fatal("decodePreviewImage reported ok for a missing file")
+	if p.rows < 1 || p.rows > composerPreviewMaxRows {
+		t.Fatalf("rows = %d, want 1..%d", p.rows, composerPreviewMaxRows)
+	}
+	// The measured size matches the cell footprint.
+	if got := p.Measure(tui.Size{}); got.W != p.cols || got.H != p.rows {
+		t.Fatalf("Measure = %+v, want %dx%d", got, p.cols, p.rows)
+	}
+	if _, ok := mv.buildImagePreview(filepath.Join(t.TempDir(), "missing.png")); ok {
+		t.Fatal("buildImagePreview reported ok for a missing file")
+	}
+}
+
+func TestUpdateComposerPreviewTracksAttachments(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		composerFiles:   widget.NewText(""),
+		composerPreview: widget.Column(),
+		composerNode:    &layout.Node{Basis: composerBaseBasis},
+		previewCellW:    8,
+		previewCellH:    16,
+		styles:          Styles{},
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if mv.composerPreview.Layout().Hidden || mv.composerNode.Basis <= composerBaseBasis {
+		t.Fatalf("preview not shown/grown: hidden=%v basis=%d", mv.composerPreview.Layout().Hidden, mv.composerNode.Basis)
+	}
+	mv.clearAttachments()
+	if !mv.composerPreview.Layout().Hidden || mv.composerNode.Basis != composerBaseBasis {
+		t.Fatalf("preview not reset after clear: hidden=%v basis=%d", mv.composerPreview.Layout().Hidden, mv.composerNode.Basis)
 	}
 }
 
