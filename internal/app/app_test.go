@@ -18,7 +18,10 @@ import (
 // syncPoster runs posted closures immediately, as if already on the UI goroutine.
 type syncPoster struct{}
 
-func (syncPoster) Post(fn func()) { fn() }
+func (syncPoster) Post(fn func())  { fn() }
+func (syncPoster) WriteRaw([]byte) {}
+func (syncPoster) Invalidate()     {}
+func (syncPoster) ForceRepaint()   {}
 
 // fakeSender records sends and returns a preset error.
 type fakeSender struct {

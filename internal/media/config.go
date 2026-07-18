@@ -23,10 +23,21 @@ type Config struct {
 	// When false custom emoji are rendered as the text form :name:.
 	EmojiImages bool
 
-	// VideoPlayer is the command used to open video attachments when the user
-	// activates an inline video block (e.g. by clicking it). The full URL is
-	// appended as the last argument. Common values: "xdg-open", "mpv", "vlc".
-	VideoPlayer string
+	// MpvPath is the mpv binary used to play videos inline via its Kitty
+	// graphics video output. Videos play inside the terminal, not in a separate
+	// window. Empty means "mpv" on PATH; playback is disabled when it is absent.
+	MpvPath string
+
+	// VideoAudio plays a video's audio track during inline playback. Playback is
+	// a deliberate select-to-play action, but a chat client is a quiet context,
+	// so audio is off by default.
+	VideoAudio bool
+
+	// VideoUseSHM asks mpv to transfer frames via shared memory instead of
+	// escape codes. It is faster but relies on the terminal reading the shm
+	// object, which is unreliable when frames are forwarded through a pty, so it
+	// defaults off.
+	VideoUseSHM bool
 
 	// CellPixelWidth and CellPixelHeight are the pixel dimensions of one
 	// terminal cell, used to convert a cell budget into the pixel budget that
@@ -66,6 +77,6 @@ func DefaultConfig() Config {
 		MaxHeightCells: 12,
 		Animate:        true,
 		EmojiImages:    true,
-		VideoPlayer:    "xdg-open",
+		MpvPath:        "mpv",
 	}
 }

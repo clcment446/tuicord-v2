@@ -69,8 +69,14 @@ func markedFakeNitroEmbed(e store.Embed, markedMedia map[string]bool) bool {
 func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width int, base screen.Style) []chatLine {
 	if pureMediaEmbed(e) {
 		chip := embedMediaChip(e)
-		if url, ok := embedMediaURL(e); ok {
-			return w.mediaLines(url, chip, messageMediaPlacementKey(m, "embed", index, url), base, embedMediaSpec(e, url, width, w.mediaMaxRows()))
+		posterURL, _ := embedMediaURL(e)
+		if embedIsVideo(e) {
+			// Only true video embeds are select-to-play; the poster is the
+			// thumbnail. GIFV (tenor/giphy) is animated inline as a GIF instead.
+			return w.mediaLinesVideo(posterURL, e.VideoURL, chip, messageMediaPlacementKey(m, "embed", index, e.VideoURL), base, embedMediaSpec(e, posterURL, width, w.mediaMaxRows()), false)
+		}
+		if posterURL != "" {
+			return w.mediaLines(posterURL, chip, messageMediaPlacementKey(m, "embed", index, posterURL), base, embedMediaSpec(e, posterURL, width, w.mediaMaxRows()), media.ClassifyURL(posterURL) == media.ClassGIF)
 		}
 		if chip != "" {
 			return []chatLine{{segments: []chatSegment{{text: chip, style: mergeStyle(base, w.styles.Cell("embeds.footer"))}}}}
@@ -116,8 +122,12 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 	if chip := embedMediaChip(e); chip != "" {
 		add(chip, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))
 	}
-	if url, ok := embedMediaURL(e); ok {
-		for _, line := range w.mediaLines(url, embedMediaChip(e), messageMediaPlacementKey(m, "embed", index, url), contentBase, embedMediaSpec(e, url, inner, w.mediaMaxRows())) {
+	if posterURL, videoURL, ok := embedPlayableMedia(e); ok {
+		key := posterURL
+		if videoURL != "" {
+			key = videoURL
+		}
+		for _, line := range w.mediaLinesVideo(posterURL, videoURL, embedMediaChip(e), messageMediaPlacementKey(m, "embed", index, key), contentBase, embedMediaSpec(e, posterURL, inner, w.mediaMaxRows()), videoURL == "" && media.ClassifyURL(posterURL) == media.ClassGIF) {
 			if line.media != nil {
 				content = append(content, line)
 				continue
@@ -263,6 +273,25 @@ func embedMediaURL(e store.Embed) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// embedIsVideo reports whether an embed is a true, mpv-playable video. GIFV
+// (tenor/giphy) is deliberately excluded: users treat it as an animated GIF, so
+// it is animated inline from its thumbnail rather than launched as a video.
+func embedIsVideo(e store.Embed) bool {
+	return e.Kind == store.EmbedVideo && e.VideoURL != ""
+}
+
+// embedPlayableMedia returns an embed's poster image URL and playable video URL.
+// Either may be empty; ok reports whether at least one is present. Used by the
+// framed embed path so video embeds carrying a title/provider still play inline.
+// videoURL is populated only for true video embeds (not GIFV).
+func embedPlayableMedia(e store.Embed) (posterURL, videoURL string, ok bool) {
+	posterURL, _ = embedMediaURL(e)
+	if embedIsVideo(e) {
+		videoURL = e.VideoURL
+	}
+	return posterURL, videoURL, posterURL != "" || videoURL != ""
 }
 
 func embedMediaSpec(e store.Embed, mediaURL string, width, maxRows int) mediaSpec {

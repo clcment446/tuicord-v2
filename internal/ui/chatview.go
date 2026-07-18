@@ -60,16 +60,41 @@ type ChatView struct {
 	focusStopIndex          int
 	renderLineCount         int
 	viewportHeight          int
+	lastRenderWidth         int
 	onMessageAction         func(rune, store.Message)
 	onMessageCopy           func([]store.Message)
-	selectionStart          int
-	selectionActive         bool
-	headerMessageKey        string
-	headerSeq               int
-	selectedComponents      map[string]map[string]bool
-	multiPickers            map[string]bool
-	activePicker            componentAction
-	activePickerSet         bool
+	// Inline video: onPlayVideo starts playback of a chat video in the given
+	// absolute cell region; onStopVideo tears the current playback down. The
+	// widget owns activation and the stop conditions; the Shell owns the player.
+	onPlayVideo func(url string, region media.Rect)
+	onStopVideo func()
+	// onOpenMedia opens a loaded image/GIF frame in the full-screen viewer.
+	onOpenMedia func(url string, img image.Image, frames []media.Frame)
+	// requestRedraw forces a repaint (App.Invalidate). Media loads and delivered
+	// GIF frames call it so a loaded image appears — and a GIF starts animating —
+	// on the next loop turn instead of waiting for the ~500ms idle tick.
+	requestRedraw func()
+	// videoHits are the video blocks drawn last frame, for click/key activation.
+	videoHits []videoHit
+	// chatOriginX/Y are the last Draw region's absolute top-left, used to turn a
+	// chat-local video rect into absolute terminal cells for the player.
+	chatOriginX int
+	chatOriginY int
+	// playingVideo is the URL of the video currently playing (blanked in Draw so
+	// mpv's frames are not fought by the cell diff). videoSnap* capture the layout
+	// at play time; any change stops playback so mpv never renders in stale cells.
+	playingVideo       string
+	videoSnapChannel   store.ChannelID
+	videoSnapWidth     int
+	videoSnapScroll    int
+	selectionStart     int
+	selectionActive    bool
+	headerMessageKey   string
+	headerSeq          int
+	selectedComponents map[string]map[string]bool
+	multiPickers       map[string]bool
+	activePicker       componentAction
+	activePickerSet    bool
 
 	mediaCfg     media.Config
 	mediaFetcher *media.Fetcher
@@ -84,6 +109,10 @@ type ChatView struct {
 	// Animating one that is scrolled out of view, or in another channel, would
 	// invalidate the frame twice a second for nothing.
 	spinnerVisible bool
+	// animatedVisible reports whether the last Draw put a multi-frame GIF on
+	// screen. It raises the tick cadence (via Animating) only while one is
+	// visible, so off-screen and other-channel GIFs cost nothing.
+	animatedVisible bool
 
 	// bodyCache memoizes rendered message bodies. Without it every frame
 	// re-parses markup and re-lays out embeds and components for the whole
@@ -287,22 +316,154 @@ func (w *ChatView) OnMessageAction(fn func(rune, store.Message)) { w.onMessageAc
 // OnMessageCopy receives the messages selected through Vim visual mode.
 func (w *ChatView) OnMessageCopy(fn func([]store.Message)) { w.onMessageCopy = fn }
 
-func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style, spec mediaSpec) []chatLine {
-	state := w.ensureMedia(url)
+// OnPlayVideo registers the callback that starts inline video playback. The
+// region is in absolute terminal cells.
+func (w *ChatView) OnPlayVideo(fn func(url string, region media.Rect)) { w.onPlayVideo = fn }
+
+// OnStopVideo registers the callback that tears down the current playback.
+func (w *ChatView) OnStopVideo(fn func()) { w.onStopVideo = fn }
+
+// OnOpenMedia registers the callback that opens an image/GIF in the viewer.
+func (w *ChatView) OnOpenMedia(fn func(url string, img image.Image, frames []media.Frame)) {
+	w.onOpenMedia = fn
+}
+
+// SetInvalidate registers the repaint hook used to surface loaded media promptly.
+func (w *ChatView) SetInvalidate(fn func()) { w.requestRedraw = fn }
+
+func (w *ChatView) invalidate() {
+	if w.requestRedraw != nil {
+		w.requestRedraw()
+	}
+}
+
+// SetPlayingVideo marks url as the video now playing so Draw reserves (blanks)
+// its region for mpv. An empty url clears the mark. It snapshots the layout so
+// any later change can stop playback before the region moves.
+func (w *ChatView) SetPlayingVideo(url string) {
+	if w == nil {
+		return
+	}
+	w.playingVideo = url
+	w.videoSnapChannel = w.active()
+	w.videoSnapWidth = w.lastRenderWidth
+	w.videoSnapScroll = w.bottomScroll.Offset()
+}
+
+// stopVideoRequest ends playback if one is active and notifies the Shell. It is
+// the single path both widget-side stop conditions and mpv's own exit run
+// through.
+func (w *ChatView) stopVideoRequest() {
+	if w == nil || w.playingVideo == "" {
+		return
+	}
+	w.playingVideo = ""
+	if w.onStopVideo != nil {
+		w.onStopVideo()
+	}
+}
+
+// playVideoHit starts playback for a recorded video block, translating its
+// chat-local rect into absolute terminal cells.
+func (w *ChatView) playVideoHit(h videoHit) bool {
+	if w.onPlayVideo == nil {
+		return false
+	}
+	w.onPlayVideo(h.url, media.Rect{
+		X:    w.chatOriginX + h.x,
+		Y:    w.chatOriginY + h.y,
+		Cols: h.cols,
+		Rows: h.rows,
+	})
+	return true
+}
+
+// playFocusedVideo plays the first video in the focused message, if any. Media
+// placement keys are "<messagePrefix>:<kind>:<index>:<url>", so a HasPrefix on
+// the focused message's prefix identifies its blocks without parsing (the prefix
+// itself may contain colons for pending messages).
+func (w *ChatView) playFocusedVideo() bool {
+	if !w.focusedMessageSet {
+		return false
+	}
+	prefix := messagePlacementPrefix(w.focusedMessage) + ":"
+	for _, h := range w.videoHits {
+		if strings.HasPrefix(h.placementKey, prefix) {
+			return w.playVideoHit(h)
+		}
+	}
+	return false
+}
+
+// openFocusedMedia opens the focused message's media in the viewer: a video
+// plays in the full-screen player, otherwise the first loaded image/GIF frame is
+// shown enlarged.
+func (w *ChatView) openFocusedMedia() bool {
+	if !w.focusedMessageSet {
+		return false
+	}
+	if w.playFocusedVideo() {
+		return true
+	}
+	if w.onOpenMedia == nil {
+		return false
+	}
+	prefix := messagePlacementPrefix(w.focusedMessage) + ":"
+	for _, line := range w.visibleLines {
+		b := line.media
+		if b == nil || b.video() || b.img == nil {
+			continue
+		}
+		if strings.HasPrefix(b.placementKey, prefix) {
+			w.onOpenMedia(b.url, b.img, w.mediaFrames(b.url))
+			return true
+		}
+	}
+	return false
+}
+
+// mediaFrames snapshots an animation for the viewer, whose playback cursor is
+// independent from the inline GIF.
+func (w *ChatView) mediaFrames(url string) []media.Frame {
+	if w == nil || w.media[url] == nil || len(w.media[url].frames) < 2 {
+		return nil
+	}
+	return append([]media.Frame(nil), w.media[url].frames...)
+}
+
+func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style, spec mediaSpec, animated bool) []chatLine {
+	return w.mediaLinesVideo(url, "", label, placementKey, base, spec, animated)
+}
+
+// mediaLinesVideo renders inline media, optionally as a playable video. videoURL
+// marks the block a play target; url (when set) is the poster image. A video
+// without a poster still reserves a placeholder region so it can be played.
+func (w *ChatView) mediaLinesVideo(url, videoURL, label, placementKey string, base screen.Style, spec mediaSpec, animated bool) []chatLine {
 	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
+	if url == "" {
+		if videoURL == "" {
+			return []chatLine{{segments: []chatSegment{{text: label, style: muted}}}}
+		}
+		return w.videoPlaceholderLines(videoURL, placementKey, base, spec)
+	}
+	state := w.ensureMedia(url, animated)
 	switch {
 	case state == nil:
 		return []chatLine{{segments: []chatSegment{{text: label, style: muted}}}}
 	case state.err != nil:
+		// A video whose poster failed still offers a placeholder to play from.
+		if videoURL != "" {
+			return w.videoPlaceholderLines(videoURL, placementKey, base, spec)
+		}
 		return []chatLine{{segments: []chatSegment{{text: label + " (failed)", style: muted}}}}
 	case state.img == nil:
-		return []chatLine{{segments: []chatSegment{{text: label + " " + mediaSpinner(w.spinner), style: muted}}, spinner: true}}
+		return w.loadingPlaceholderLines(label, base, spec)
 	default:
 		variant := w.mediaVariant(state, spec)
 		if placementKey == "" {
 			placementKey = url
 		}
-		block := &inlineMedia{url: url, label: label, placementKey: placementKey, cols: variant.cols, rows: variant.rows, img: variant.img, style: base}
+		block := &inlineMedia{url: url, label: label, placementKey: placementKey, cols: variant.cols, rows: variant.rows, img: variant.img, style: base, animated: state.animated(), videoURL: videoURL}
 		lines := make([]chatLine, variant.rows)
 		for i := range lines {
 			lines[i] = chatLine{media: block, mediaRow: i}
@@ -311,7 +472,62 @@ func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style
 	}
 }
 
-func (w *ChatView) ensureMedia(url string) *chatMediaState {
+// loadingPlaceholderLines renders the loading spinner while reserving the exact
+// number of rows the loaded image will occupy. Reserving the height up front
+// means the async load swaps in place instead of growing the message and
+// shifting the reader's viewport. When the source size is unknown it falls back
+// to a single spinner line.
+func (w *ChatView) loadingPlaceholderLines(label string, base screen.Style, spec mediaSpec) []chatLine {
+	muted := mergeStyle(base, w.styles.Cell("messages.attachment"))
+	spinnerLine := chatLine{segments: []chatSegment{{text: label + " " + mediaSpinner(w.spinner), style: muted}}, spinner: true}
+	rows := w.reservedMediaRows(spec)
+	if rows <= 1 {
+		return []chatLine{spinnerLine}
+	}
+	lines := make([]chatLine, rows)
+	lines[0] = spinnerLine
+	for i := 1; i < rows; i++ {
+		lines[i] = chatLine{segments: []chatSegment{{style: muted}}, spinner: true}
+	}
+	return lines
+}
+
+// reservedMediaRows is the row count a loaded image of spec's source size will
+// occupy, matching mediaVariant's fit so the placeholder and the image are the
+// same height. Returns 1 when the source size is unknown.
+func (w *ChatView) reservedMediaRows(spec mediaSpec) int {
+	if spec.sourceW <= 0 || spec.sourceH <= 0 {
+		return 1
+	}
+	spec = w.normalizeMediaSpec(spec)
+	_, rows := fitMediaCells(spec.sourceW, spec.sourceH, spec.maxCols, spec.maxRows)
+	return max(rows, 1)
+}
+
+// videoPlaceholderLines builds a play region for a video that has no poster
+// image. It reserves rows sized from spec (defaulting to a 16:9 box) so mpv has
+// somewhere to draw and the block can be clicked or played by key.
+func (w *ChatView) videoPlaceholderLines(videoURL, placementKey string, base screen.Style, spec mediaSpec) []chatLine {
+	if spec.sourceW <= 0 || spec.sourceH <= 0 {
+		spec.sourceW, spec.sourceH = 16, 9
+	}
+	spec = w.normalizeMediaSpec(spec)
+	cols, rows := fitMediaCells(spec.sourceW, spec.sourceH, spec.maxCols, spec.maxRows)
+	if placementKey == "" {
+		placementKey = videoURL
+	}
+	block := &inlineMedia{label: "video", placementKey: placementKey, cols: cols, rows: rows, style: base, videoURL: videoURL}
+	lines := make([]chatLine, rows)
+	for i := range lines {
+		lines[i] = chatLine{media: block, mediaRow: i}
+	}
+	return lines
+}
+
+// ensureMedia returns the load state for url, starting an async fetch on first
+// use. animated requests all frames of an animated GIF (subject to
+// Config.Animate); it only matters on the first fetch for a URL.
+func (w *ChatView) ensureMedia(url string, animated bool) *chatMediaState {
 	if w == nil || url == "" || !w.mediaCfg.Enabled {
 		return nil
 	}
@@ -331,7 +547,7 @@ func (w *ChatView) ensureMedia(url string) *chatMediaState {
 	w.media[url] = state
 	w.mediaLoadingCount++
 	w.recordMediaDep(url, state)
-	go w.fetchMedia(url)
+	go w.fetchMedia(url, animated)
 	return state
 }
 
@@ -361,9 +577,21 @@ func (w *ChatView) mediaLoading() bool {
 	return w.mediaLoadingCount > 0
 }
 
-func (w *ChatView) fetchMedia(url string) {
+func (w *ChatView) fetchMedia(url string, animated bool) {
 	w.mediaSlots <- struct{}{}
 	defer func() { <-w.mediaSlots }()
+	if animated && w.mediaCfg.Animate {
+		if frames, err := w.mediaFetcher.FetchGIF(context.Background(), url); err == nil && len(frames) > 0 {
+			frames = w.downscaleFrames(frames)
+			w.post(func() {
+				w.deliverFrames(url, frames)
+				w.invalidate()
+			})
+			return
+		}
+		// A decode/network failure or a non-animated GIF falls through to the
+		// static path below, which serves the first frame from the same cache.
+	}
 	img, err := w.mediaFetcher.Fetch(context.Background(), url)
 	w.post(func() {
 		state := w.media[url]
@@ -381,8 +609,122 @@ func (w *ChatView) fetchMedia(url string) {
 		state.variants = nil
 		// Invalidate any cached body that rendered this media as a placeholder.
 		state.rev++
+		w.invalidate()
 	})
 }
+
+// deliverFrames installs decoded GIF frames on the UI goroutine. A single-frame
+// GIF is stored as a still image so it never drives the animator.
+func (w *ChatView) deliverFrames(url string, frames []media.Frame) {
+	state := w.media[url]
+	if state == nil {
+		state = &chatMediaState{}
+		w.media[url] = state
+	} else if state.loading {
+		w.mediaLoadingCount--
+	}
+	state.loading = false
+	state.err = nil
+	state.img = frames[0].Image
+	if len(frames) > 1 {
+		state.frames = frames
+	} else {
+		state.frames = nil
+	}
+	state.frameIdx = 0
+	state.frameElapsed = 0
+	state.lastTick = time.Time{}
+	state.variants = nil
+	state.rev++
+}
+
+// downscaleFrames shrinks each frame to the fetcher's pixel budget. FetchGIF, unlike
+// Fetch, does not downscale, so the animator would otherwise re-upload full-size
+// frames every tick. Frames are freshly decoded per call, so mutating is safe.
+func (w *ChatView) downscaleFrames(frames []media.Frame) []media.Frame {
+	if w.mediaFetcher == nil {
+		return frames
+	}
+	mp := w.mediaFetcher.MaxPixels
+	if mp.X <= 0 || mp.Y <= 0 {
+		return frames
+	}
+	for i := range frames {
+		frames[i].Image = media.DownscaleToPixels(frames[i].Image, mp.X, mp.Y)
+	}
+	return frames
+}
+
+// gifDefaultFrameDelay clamps GIF frames that declare a zero (or absent) delay,
+// matching how browsers treat such frames instead of spinning at full speed.
+const gifDefaultFrameDelay = 100 * time.Millisecond
+
+// advanceAnimations steps every visible animated GIF by the elapsed wall-clock
+// time and reports whether any repointed to a new frame (and so needs a redraw).
+func (w *ChatView) advanceAnimations() bool {
+	now := time.Now()
+	changed := false
+	seen := make(map[*chatMediaState]struct{})
+	for _, line := range w.visibleLines {
+		if line.media == nil || !line.media.animated {
+			continue
+		}
+		state := w.media[line.media.url]
+		if !state.animated() {
+			continue
+		}
+		if _, ok := seen[state]; ok {
+			continue
+		}
+		seen[state] = struct{}{}
+		if w.advanceFrames(state, now) {
+			changed = true
+		}
+	}
+	return changed
+}
+
+// advanceFrames advances one state's frame index by the time since the last
+// advance, looping at the end. It returns whether the visible frame changed.
+func (w *ChatView) advanceFrames(state *chatMediaState, now time.Time) bool {
+	if state.lastTick.IsZero() {
+		state.lastTick = now
+		return false
+	}
+	dt := now.Sub(state.lastTick)
+	state.lastTick = now
+	if dt <= 0 {
+		return false
+	}
+	if dt > time.Second {
+		// The GIF was off-screen or the app was asleep; resync without a burst of
+		// catch-up frames.
+		state.frameElapsed = 0
+		return false
+	}
+	state.frameElapsed += dt
+	advanced := false
+	for i := 0; i < len(state.frames); i++ {
+		delay := state.frames[state.frameIdx].Delay
+		if delay <= 0 {
+			delay = gifDefaultFrameDelay
+		}
+		if state.frameElapsed < delay {
+			break
+		}
+		state.frameElapsed -= delay
+		state.frameIdx = (state.frameIdx + 1) % len(state.frames)
+		advanced = true
+	}
+	if advanced {
+		state.img = state.frames[state.frameIdx].Image
+	}
+	return advanced
+}
+
+// Animating reports whether a visible GIF needs the fast animation tick. The
+// runtime reads it to raise the tick cadence only while something is moving.
+func (w *ChatView) Animating() bool { return w != nil && w.animatedVisible }
 
 func (w *ChatView) mediaMaxRows() int {
 	maxRows := w.mediaCfg.MaxHeightCells
@@ -400,6 +742,9 @@ func (w *ChatView) mediaVariant(state *chatMediaState, spec mediaSpec) chatMedia
 	key := spec.key()
 	if state.variants != nil {
 		if variant, ok := state.variants[key]; ok {
+			// Sizing is stable across frames, but the current frame is not; refresh
+			// img so an animated GIF advances while reusing the cached cell fit.
+			variant.img = state.img
 			return variant
 		}
 	}
@@ -440,7 +785,10 @@ func (w *ChatView) normalizeMediaSpec(spec mediaSpec) mediaSpec {
 }
 
 func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia, width int, focused bool) {
-	if block == nil || block.img == nil {
+	if block == nil {
+		return
+	}
+	if block.img == nil && !block.video() {
 		return
 	}
 	cols := block.cols
@@ -453,14 +801,60 @@ func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia
 	if focused {
 		style = w.styles.focusedStyle(style)
 	}
-	img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url)).SetZ(-1).SetStyle(style)
-	if block.placementKey != "" {
-		img.SetPlacementID(stableImageID(block.placementKey))
+
+	if block.video() {
+		w.videoHits = append(w.videoHits, videoHit{x: x, y: y, cols: cols, rows: rows, url: block.videoURL, placementKey: block.placementKey})
+		if block.videoURL == w.playingVideo {
+			// mpv owns these cells while playing; keep them blank so the cell diff
+			// leaves them for its frames instead of overwriting them.
+			r.Fill(screen.Rect{X: x, Y: y, W: cols, H: rows}, screen.Cell{Content: " ", Style: style})
+			return
+		}
 	}
-	if b := block.img.Bounds(); b.Dx() > 0 && b.Dy() > 0 {
-		img.SetPixelSize(b.Dx(), b.Dy())
+
+	if block.img != nil {
+		img := widget.NewKittyImageFrom(block.img).SetID(stableImageID(block.url)).SetZ(-1).SetStyle(style)
+		if block.placementKey != "" {
+			img.SetPlacementID(stableImageID(block.placementKey))
+		}
+		if b := block.img.Bounds(); b.Dx() > 0 && b.Dy() > 0 {
+			img.SetPixelSize(b.Dx(), b.Dy())
+		}
+		img.Draw(r.Clip(screen.Rect{X: x, Y: y, W: cols, H: rows}))
+	} else {
+		// A posterless video draws a filled placeholder box as its play region.
+		box := mergeStyle(style, w.styles.Cell("messages.attachment"))
+		r.Fill(screen.Rect{X: x, Y: y, W: cols, H: rows}, screen.Cell{Content: " ", Style: box})
 	}
-	img.Draw(r.Clip(screen.Rect{X: x, Y: y, W: cols, H: rows}))
+
+	if block.video() {
+		w.drawPlayGlyph(r, x, y, cols, rows, style)
+	}
+}
+
+// drawPlayGlyph overlays a ▶ marker at the center of a video block. Inline
+// images render below the text layer (z=-1), so the glyph stays visible on top.
+func (w *ChatView) drawPlayGlyph(r screen.Region, x, y, cols, rows int, style screen.Style) {
+	if cols <= 0 || rows <= 0 {
+		return
+	}
+	s := style
+	s.Attrs |= screen.Reverse
+	r.Set(x+max((cols-1)/2, 0), y+rows/2, screen.Cell{Content: "▶", Style: s})
+}
+
+// stopVideoOnLayoutChange ends playback when the chat has relaid out in a way
+// that would move mpv's region (channel switch, resize, or scroll), so mpv never
+// renders into stale cells.
+func (w *ChatView) stopVideoOnLayoutChange() {
+	if w.playingVideo == "" {
+		return
+	}
+	if w.active() != w.videoSnapChannel ||
+		w.lastRenderWidth != w.videoSnapWidth ||
+		w.bottomScroll.Offset() != w.videoSnapScroll {
+		w.stopVideoRequest()
+	}
 }
 
 // focusedStyle swaps a cell's colors by default. Explicit focused fg/bg rules
@@ -492,6 +886,10 @@ func (w *ChatView) Draw(r screen.Region) {
 	if r.Width() <= 0 || r.Height() <= 0 {
 		return
 	}
+	w.lastRenderWidth = r.Width()
+	w.chatOriginX = r.Bounds().X
+	w.chatOriginY = r.Bounds().Y
+	w.stopVideoOnLayoutChange()
 	w.ensureInitialFocusedMessage()
 	lines := w.render(r.Width())
 	channel := w.active()
@@ -529,10 +927,15 @@ func (w *ChatView) Draw(r screen.Region) {
 	w.visibleStart = start
 	y := 0
 	w.spinnerVisible = false
+	w.animatedVisible = false
+	w.videoHits = w.videoHits[:0]
 	drawnMedia := map[*inlineMedia]struct{}{}
 	for i, line := range displayLines {
 		if line.spinner {
 			w.spinnerVisible = true
+		}
+		if line.media != nil && line.media.animated {
+			w.animatedVisible = true
 		}
 		lineIndex := start + i
 		stop, focused, fillFocus := w.focusedHighlightAt(lineIndex)
@@ -758,6 +1161,24 @@ type inlineMedia struct {
 	rows         int
 	img          image.Image
 	style        screen.Style
+	// animated marks a multi-frame GIF so Draw flags it for the animation tick.
+	animated bool
+	// videoURL, when set, marks the block as a playable video. img (if any) is
+	// the poster frame; a ▶ overlay invites activation. video without img draws a
+	// placeholder box that still reserves the play region.
+	videoURL string
+}
+
+// video reports whether this block is a playable video target.
+func (m *inlineMedia) video() bool { return m != nil && m.videoURL != "" }
+
+// videoHit records an on-screen video block for activation, in chat-local cells.
+type videoHit struct {
+	x, y         int
+	cols         int
+	rows         int
+	url          string
+	placementKey string
 }
 
 type positionedInlineMedia struct {
@@ -776,7 +1197,20 @@ type chatMediaState struct {
 	rev uint32
 	// touched is the render generation that last read this state, for sweeping.
 	touched uint64
+	// frames holds the decoded frames of an animated GIF. When it has more than
+	// one frame the media is animated: the tick advances frameIdx and repoints
+	// img at the current frame. nil (or a single frame) means a static image.
+	frames []media.Frame
+	// frameIdx is the frame img currently points at. frameElapsed accumulates
+	// wall-clock time spent on it; lastTick timestamps the previous advance so
+	// playback speed follows the real clock rather than the tick cadence.
+	frameIdx     int
+	frameElapsed time.Duration
+	lastTick     time.Time
 }
+
+// animated reports whether the state holds a multi-frame animation.
+func (s *chatMediaState) animated() bool { return s != nil && len(s.frames) > 1 }
 
 // mediaDep records the version of one media state a rendered body depended on.
 type mediaDep struct {
@@ -994,7 +1428,9 @@ func (w *ChatView) cachedBody(m store.Message, channel store.ChannelID, width in
 // moving.
 func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int, body []chatLine) {
 	for _, d := range w.bodyDeps {
-		if state := w.media[d.url]; state != nil && state.loading {
+		// Loading bodies animate a spinner; animated bodies swap frames each tick.
+		// Caching either would freeze that motion, so leave them uncached.
+		if state := w.media[d.url]; state != nil && (state.loading || state.animated()) {
 			return
 		}
 	}
@@ -1248,6 +1684,7 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 				w.emojiKeyPrefix+":sticker:"+strconv.Itoa(w.emojiSeq)+":"+span.URL,
 				style,
 				stickerMediaSpec(width),
+				false,
 			)...)
 			continue
 		}
@@ -1264,7 +1701,7 @@ func (w *ChatView) renderContent(content string, width int, base screen.Style) [
 			if width > 0 && used > 0 && used+emojiCols > width {
 				flush()
 			}
-			state := w.ensureMedia(emojiURL)
+			state := w.ensureMedia(emojiURL, false)
 			placeholder := strings.Repeat(" ", emojiCols)
 			if state != nil && state.loading {
 				placeholder = mediaSpinner(w.spinner) + " "
@@ -1540,13 +1977,29 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		if visible {
 			w.spinner++
 		}
-		return w.expireComponentFlashes(time.Now()) || visible
+		animated := w.animatedVisible && w.advanceAnimations()
+		return w.expireComponentFlashes(time.Now()) || visible || animated
 	case input.KeyEvent:
 		if ev.Release {
 			return false
 		}
 		if ev.Key == input.KeyEnter || (ev.Key == input.KeyRune && ev.Rune == ' ') {
 			if w.submitActiveComponentPicker() {
+				return true
+			}
+		}
+		// 'p' plays the focused message's video; 'o' opens its media (video →
+		// player, image/GIF → enlarged viewer) in the full-screen overlay.
+		if ev.Key == input.KeyRune && (ev.Rune == 'p' || ev.Rune == 'o') && w.keyboardFocused && w.focusedMessageSet {
+			if w.playingVideo != "" {
+				w.stopVideoRequest()
+				return true
+			}
+			if ev.Rune == 'o' {
+				if w.openFocusedMedia() {
+					return true
+				}
+			} else if w.playFocusedVideo() {
 				return true
 			}
 		}
@@ -1590,6 +2043,10 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 		switch ev.Key {
 		case input.KeyEsc:
+			if w.playingVideo != "" {
+				w.stopVideoRequest()
+				return true
+			}
 			w.activePickerSet = false
 			w.activePicker = componentAction{}
 			w.expandedComponents = nil
@@ -1815,6 +2272,24 @@ func (w *ChatView) HandleVimFocus(_ bool) bool {
 func (w *ChatView) activateAt(x, y int, shiftMulti bool) bool {
 	if y < 0 || y >= len(w.visibleLines) {
 		return false
+	}
+	// A click inside a video block starts (or, if it is already the playing one,
+	// stops) playback.
+	for _, h := range w.videoHits {
+		if x >= h.x && x < h.x+h.cols && y >= h.y && y < h.y+h.rows {
+			if h.url == w.playingVideo {
+				w.stopVideoRequest()
+				return true
+			}
+			return w.playVideoHit(h)
+		}
+	}
+	// A click on a loaded image/GIF block opens it enlarged in the viewer.
+	if line := w.visibleLines[y]; line.media != nil && !line.media.video() && line.media.img != nil && w.onOpenMedia != nil {
+		if x >= line.mediaX && x < line.mediaX+line.media.cols {
+			w.onOpenMedia(line.media.url, line.media.img, w.mediaFrames(line.media.url))
+			return true
+		}
 	}
 	for _, hit := range w.visibleLines[y].entities {
 		if x >= hit.start && x < hit.end {

@@ -62,11 +62,11 @@ func ExampleDefaultConfig() {
 	fmt.Println("max_height_cells:", cfg.MaxHeightCells)
 	fmt.Println("animate:", cfg.Animate)
 	fmt.Println("emoji_images:", cfg.EmojiImages)
-	fmt.Println("video_player:", cfg.VideoPlayer)
+	fmt.Println("mpv_path:", cfg.MpvPath)
 	// Output:
 	// enabled: true
 	// max_height_cells: 12
 	// animate: true
 	// emoji_images: true
-	// video_player: xdg-open
+	// mpv_path: mpv
 }
