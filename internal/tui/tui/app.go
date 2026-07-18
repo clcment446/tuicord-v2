@@ -48,6 +48,10 @@ type App struct {
 	mouseOn      bool
 	focusSplits  bool
 	ttyColors    bool
+	// pendingFocus retains an exact focus request for a widget that became
+	// focusable during event handling but is not in the focus ring until the
+	// next render (for example Vim i enabling the composer).
+	pendingFocus Widget
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -259,6 +263,16 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	widgets := collectWidgets(root)
 	applyFocusPolicy(widgets, a.focusSplits)
 	a.Focus.Replace(widgets)
+	a.mu.Lock()
+	pendingFocus := a.pendingFocus
+	a.mu.Unlock()
+	if pendingFocus != nil && a.Focus.Set(pendingFocus) {
+		a.mu.Lock()
+		if sameWidget(a.pendingFocus, pendingFocus) {
+			a.pendingFocus = nil
+		}
+		a.mu.Unlock()
+	}
 	applyFocusIndicators(widgets, a.Focus.Focused())
 	drawTree(buf, root, hits)
 
@@ -281,9 +295,13 @@ func (a *App) Handle(ev Event) bool {
 		if !a.mouseOn {
 			return false
 		}
-		return a.handleMouse(ev)
+		handled := a.handleMouse(ev)
+		a.consumeFocusRequest()
+		return handled
 	case input.KeyEvent:
-		return a.handleKey(ev)
+		handled := a.handleKey(ev)
+		a.consumeFocusRequest()
+		return handled
 	case input.TickEvent:
 		return a.handleTick(ev)
 	default:
@@ -431,14 +449,37 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 		a.Invalidate()
 		return true
 	}
-	handled := a.handleFocused(ev)
-	if requester, ok := root.(FocusRequester); ok {
-		if requested := requester.TakeFocusRequest(); requested != nil {
-			a.Focus.Set(requested)
-			a.Invalidate()
-		}
+	return a.handleFocused(ev)
+}
+
+// consumeFocusRequest applies a root-owned exact focus transfer. If the target
+// became focusable while handling this event, it is not present in the current
+// focus ring yet; retain it through the next render instead of dropping it.
+func (a *App) consumeFocusRequest() {
+	if a == nil {
+		return
 	}
-	return handled
+	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	requester, ok := root.(FocusRequester)
+	if !ok {
+		return
+	}
+	requested := requester.TakeFocusRequest()
+	if requested == nil {
+		return
+	}
+	if a.Focus.Set(requested) {
+		a.mu.Lock()
+		a.pendingFocus = nil
+		a.mu.Unlock()
+	} else {
+		a.mu.Lock()
+		a.pendingFocus = requested
+		a.mu.Unlock()
+	}
+	a.Invalidate()
 }
 
 func (a *App) handleFocused(ev Event) bool {

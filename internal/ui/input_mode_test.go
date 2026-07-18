@@ -6,6 +6,7 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
+	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 )
 
@@ -31,6 +32,76 @@ func TestShellInputModeIAndComposerSemicolonQ(t *testing.T) {
 	}
 	if s.TakeFocusRequest() != mv.chat {
 		t.Fatal(";q did not request chat focus")
+	}
+}
+
+func TestVimITransfersRuntimeFocusToNewlyEnabledComposer(t *testing.T) {
+	cfg := config.Config{Accessibility: config.Accessibility{VimNavigation: true}}
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "hello"})
+	chat := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	chat.SetVimNavigation(true)
+	composer := widget.NewTextInput("Message")
+	composer.SetInputFocusEnabled(false)
+	mv := &MainView{
+		cfg:            cfg,
+		composer:       composer,
+		composerStatus: widget.NewText(""),
+		chat:           chat,
+	}
+	mv.Root = widget.Column(chat, composer)
+	shell := &Shell{mv: mv, cfg: cfg}
+	runtime := tui.New()
+	runtime.Render(shell, tui.Size{W: 40, H: 8})
+	if runtime.Focus.Focused() != chat {
+		t.Fatalf("initial focus = %T, want chat", runtime.Focus.Focused())
+	}
+
+	if !runtime.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {
+		t.Fatal("i was not handled")
+	}
+	// The composer becomes focusable during handling and enters the ring on the
+	// invalidated render that follows.
+	runtime.Render(shell, tui.Size{W: 40, H: 8})
+	if runtime.Focus.Focused() != composer {
+		t.Fatalf("focus after i = %T, want composer", runtime.Focus.Focused())
+	}
+	if !shell.inputMode || !composer.CanFocus() {
+		t.Fatal("i did not leave the composer in Vim input mode")
+	}
+}
+
+func TestPopupEditFocusPreemptsChatAndTransfersToComposer(t *testing.T) {
+	cfg := config.Config{Accessibility: config.Accessibility{VimNavigation: true}}
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "me", Content: "old"})
+	chat := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	chat.SetVimNavigation(true)
+	composer := widget.NewTextInput("Message")
+	composer.SetInputFocusEnabled(false)
+	mv := &MainView{cfg: cfg, composer: composer, composerStatus: widget.NewText(""), chat: chat}
+	mv.Root = widget.Column(chat, composer)
+	shell := &Shell{mv: mv, cfg: cfg}
+	shell.popup = widget.NewMenu([]widget.MenuItem{{Label: "Edit", OnSelect: func() {
+		shell.closePopup()
+		mv.BeginEdit(store.Message{ID: 1, ChannelID: 1, Author: "me", Content: "old"})
+		shell.focusComposer()
+	}}})
+	runtime := tui.New()
+	runtime.Render(shell, tui.Size{W: 40, H: 8})
+
+	if !runtime.Handle(input.KeyEvent{Key: input.KeyEnter}) {
+		t.Fatal("popup did not consume Enter")
+	}
+	runtime.Render(shell, tui.Size{W: 40, H: 8})
+	if shell.popup != nil {
+		t.Fatal("Edit popup did not close")
+	}
+	if runtime.Focus.Focused() != composer {
+		t.Fatalf("focus after popup Edit = %T, want composer", runtime.Focus.Focused())
+	}
+	if mv.composerMode != composerEdit || composer.Value() != "old" {
+		t.Fatalf("edit state = mode %v value %q", mv.composerMode, composer.Value())
 	}
 }
 

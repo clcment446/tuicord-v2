@@ -307,6 +307,31 @@ func TestRootFocusRequestMovesFocusAfterHandledKey(t *testing.T) {
 	}
 }
 
+func TestRootFocusRequestWaitsForNewlyFocusableWidget(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", false)
+	root := &focusRequestRoot{
+		splitLikeWidget: splitLikeWidget{children: []Widget{first, second}},
+		target:          second,
+		enableTarget:    true,
+	}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+	if app.Focus.Focused() != first {
+		t.Fatalf("initial focus = %v, want first", app.Focus.Focused())
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'I'}) {
+		t.Fatal("input-mode key was not handled")
+	}
+	if app.Focus.Focused() != first {
+		t.Fatal("focus moved before the newly focusable target entered the ring")
+	}
+	app.Render(root, Size{W: 10, H: 1})
+	if app.Focus.Focused() != second {
+		t.Fatalf("focused after render = %v, want newly focusable second widget", app.Focus.Focused())
+	}
+}
+
 func TestOverlayDrawsAfterChildren(t *testing.T) {
 	child := &drawWidget{
 		testWidget: *newTestWidget("child", false),
@@ -398,13 +423,19 @@ func (w *vimFocusWidget) HandleVimFocus(bool) bool {
 
 type focusRequestRoot struct {
 	splitLikeWidget
-	target Widget
-	ready  bool
+	target       Widget
+	ready        bool
+	enableTarget bool
 }
 
 func (w *focusRequestRoot) Handle(ev Event) bool {
 	key, ok := ev.(input.KeyEvent)
 	if ok && key.Key == input.KeyRune && key.Rune == 'I' {
+		if w.enableTarget {
+			if target, ok := w.target.(*testWidget); ok {
+				target.focus = true
+			}
+		}
 		w.ready = true
 		return true
 	}

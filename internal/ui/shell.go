@@ -671,6 +671,13 @@ func (s *Shell) Animating() bool {
 	return s.mv != nil && s.mv.chat.Animating()
 }
 
+// HandleOverlay gives transient context menus first refusal before the focused
+// retained widget. Menus are drawn above the tree and are modal, so routing
+// them only through Handle would let the chat consume keys and clicks first.
+func (s *Shell) HandleOverlay(ev tui.Event) bool {
+	return s != nil && s.popup != nil && s.popup.Handle(ev)
+}
+
 func (s *Shell) Handle(ev tui.Event) bool {
 	if focus, ok := ev.(input.FocusEvent); ok {
 		s.unfocused = !focus.Focused
