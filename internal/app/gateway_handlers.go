@@ -144,13 +144,7 @@ func (a *App) registerGatewayThreadHandlers() {
 	})
 
 	a.handle.AddHandler(func(e *gateway.ThreadDeleteEvent) {
-		id := store.ChannelID(e.ID)
-		a.ui.Post(func() {
-			a.store.RemoveThread(id)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
+		a.handleThreadDelete(e)
 	})
 
 	a.handle.AddHandler(func(e *gateway.ThreadListSyncEvent) {

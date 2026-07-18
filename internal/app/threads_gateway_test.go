@@ -72,6 +72,25 @@ func TestHandleThreadMembersUpdateOwnJoinLeave(t *testing.T) {
 	}
 }
 
+func TestHandleThreadDeleteRepairsActiveSelection(t *testing.T) {
+	a := &App{store: store.New(0), ui: syncPoster{}}
+	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 1, Kind: store.ChannelText})
+	a.store.UpsertThread(store.Channel{
+		ID: 10, GuildID: 1, ParentID: 100, Thread: &store.ThreadMeta{},
+	})
+	a.store.AppendMessage(store.Message{ID: 1, ChannelID: 10})
+	a.SetActive(1, 10)
+
+	a.handleThreadDelete(&gateway.ThreadDeleteEvent{ID: 10, GuildID: 1, ParentID: 100})
+
+	if _, ok := a.store.Channel(10); ok || a.store.Messages(10) != nil {
+		t.Fatal("deleted active thread or its history remains cached")
+	}
+	if a.ActiveGuild() != 1 || a.ActiveChannel() != 0 {
+		t.Fatalf("active selection = %d/%d, want 1/0", a.ActiveGuild(), a.ActiveChannel())
+	}
+}
+
 func TestHandleThreadMembersUpdateIgnoresOthers(t *testing.T) {
 	a := &App{store: store.New(0), ui: syncPoster{}, selfID: 42}
 	a.store.UpsertChannel(store.Channel{ID: 100, GuildID: 1, Kind: store.ChannelText})

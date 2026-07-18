@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -23,39 +24,62 @@ func (syncPoster) WriteRaw([]byte) {}
 func (syncPoster) Invalidate()     {}
 func (syncPoster) ForceRepaint()   {}
 
+// channelPoster lets race tests execute every posted mutation deterministically
+// on the test goroutine, matching the production UI-thread store model.
+type channelPoster struct {
+	posts chan func()
+}
+
+func newChannelPoster() *channelPoster  { return &channelPoster{posts: make(chan func(), 16)} }
+func (p *channelPoster) Post(fn func()) { p.posts <- fn }
+func (*channelPoster) WriteRaw([]byte)  {}
+func (*channelPoster) Invalidate()      {}
+func (*channelPoster) ForceRepaint()    {}
+func (p *channelPoster) runNext(t *testing.T) {
+	t.Helper()
+	select {
+	case fn := <-p.posts:
+		fn()
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for posted UI mutation")
+	}
+}
+
 // fakeSender records sends and returns a preset error.
 type fakeSender struct {
-	mu             sync.Mutex
-	sent           int
-	lastSend       api.SendMessageData
-	edited         int
-	editContent    string
-	deleted        int
-	pinned         int
-	unpinned       int
-	crossposted    int
-	reacted        int
-	reaction       discord.APIEmoji
-	err            error
-	done           chan struct{}
-	history        []discord.Message
-	historyBefore  []discord.Message
-	historyErr     error
-	historyN       int
-	historyDone    chan struct{}
-	historyRelease chan struct{}
-	roles          []discord.Role
-	rolesErr       error
-	rolesN         int
-	guilds         []discord.Guild
-	guildsErr      error
-	guildsN        int
-	dms            []discord.Channel
-	dmsErr         error
-	channels       []discord.Channel
-	channelsErr    error
-	channelsN      int
-	channelDetail  *discord.Channel
+	mu                   sync.Mutex
+	sent                 int
+	lastSend             api.SendMessageData
+	edited               int
+	editContent          string
+	deleted              int
+	pinned               int
+	unpinned             int
+	crossposted          int
+	reacted              int
+	reaction             discord.APIEmoji
+	err                  error
+	done                 chan struct{}
+	history              []discord.Message
+	historyBefore        []discord.Message
+	historyErr           error
+	historyN             int
+	historyDone          chan struct{}
+	historyRelease       chan struct{}
+	historyBeforeDone    chan struct{}
+	historyBeforeRelease chan struct{}
+	roles                []discord.Role
+	rolesErr             error
+	rolesN               int
+	guilds               []discord.Guild
+	guildsErr            error
+	guildsN              int
+	dms                  []discord.Channel
+	dmsErr               error
+	channels             []discord.Channel
+	channelsErr          error
+	channelsN            int
+	channelDetail        *discord.Channel
 }
 
 func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessageData) (*discord.Message, error) {
@@ -148,6 +172,12 @@ func (f *fakeSender) MessagesBefore(discord.ChannelID, discord.MessageID, uint) 
 	f.mu.Lock()
 	f.historyN++
 	f.mu.Unlock()
+	if f.historyBeforeDone != nil {
+		close(f.historyBeforeDone)
+	}
+	if f.historyBeforeRelease != nil {
+		<-f.historyBeforeRelease
+	}
 	return append([]discord.Message(nil), f.historyBefore...), f.historyErr
 }
 
@@ -748,6 +778,70 @@ func TestLoadHistoryPreservesConfirmedGatewayMessagesArrivingInFlight(t *testing
 	}
 }
 
+func TestLoadHistoryPreservesInFlightEditAndDelete(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fs := &fakeSender{
+		history: []discord.Message{
+			{ID: 102, ChannelID: 42, Content: "stale deleted copy"},
+			{ID: 101, ChannelID: 42, Content: "stale pre-edit copy"},
+		},
+		historyDone: started, historyRelease: release,
+	}
+	ui := newChannelPoster()
+	a := newTestApp(fs)
+	a.ui = ui
+	a.store.UpsertChannel(store.Channel{ID: 42, GuildID: 1, Name: "general"})
+	a.store.SetMessages(42, []store.Message{
+		{ID: 101, Content: "before edit"},
+		{ID: 102, Content: "before delete"},
+	})
+
+	a.LoadHistory(42, 50)
+	<-started
+	a.handleMessageUpdate(&gateway.MessageUpdateEvent{Message: discord.Message{
+		ID: 101, ChannelID: 42, Content: "edited while loading",
+	}})
+	ui.runNext(t)
+	a.handleMessageDelete(&gateway.MessageDeleteEvent{ID: 102, ChannelID: 42})
+	ui.runNext(t)
+	close(release)
+	ui.runNext(t)
+
+	got := a.store.Messages(42)
+	if len(got) != 1 || got[0].ID != 101 || got[0].Content != "edited while loading" {
+		t.Fatalf("history = %+v, want only preserved edited message 101", got)
+	}
+}
+
+func TestLoadHistoryCompletionDoesNotRecreateDeletedChannelRing(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fs := &fakeSender{
+		history:        []discord.Message{{ID: 101, ChannelID: 42, Content: "stale"}},
+		historyDone:    started,
+		historyRelease: release,
+	}
+	ui := newChannelPoster()
+	a := newTestApp(fs)
+	a.ui = ui
+	a.store.UpsertChannel(store.Channel{ID: 42, GuildID: 1, Name: "general"})
+
+	a.LoadHistory(42, 50)
+	<-started
+	a.handleChannelDelete(&gateway.ChannelDeleteEvent{Channel: discord.Channel{ID: 42, GuildID: 1}})
+	ui.runNext(t)
+	close(release)
+	ui.runNext(t)
+
+	if _, ok := a.store.Channel(42); ok {
+		t.Fatal("deleted channel was recreated by history completion")
+	}
+	if got := a.store.Messages(42); got != nil {
+		t.Fatalf("deleted channel history = %+v, want nil", got)
+	}
+}
+
 func messageStoreIDs(messages []store.Message) []store.MessageID {
 	ids := make([]store.MessageID, len(messages))
 	for i, message := range messages {
@@ -837,6 +931,39 @@ func TestLoadOlderHistoryPrependsMessagesBeforeOldest(t *testing.T) {
 	msgs := a.store.Messages(42)
 	if len(msgs) != 4 || msgs[0].ID != 7 || msgs[1].ID != 8 || msgs[2].ID != 9 || msgs[3].ID != 10 {
 		t.Fatalf("history = %+v, want IDs 7,8,9,10", msgs)
+	}
+}
+
+func TestLoadOlderHistoryAtCapacityPreservesLiveArrivalAndAdvancesWindow(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	fs := &fakeSender{
+		historyBefore: []discord.Message{
+			{ID: 4, ChannelID: 42}, {ID: 3, ChannelID: 42},
+			{ID: 2, ChannelID: 42}, {ID: 1, ChannelID: 42},
+		},
+		historyBeforeDone: started, historyBeforeRelease: release,
+	}
+	ui := newChannelPoster()
+	a := newTestApp(fs)
+	a.ui = ui
+	a.store = store.New(4)
+	a.store.UpsertChannel(store.Channel{ID: 42, GuildID: 1, Name: "general"})
+	a.store.SetMessages(42, []store.Message{{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
+
+	a.LoadOlderHistory(42)
+	<-started
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 9, ChannelID: 42, Content: "live while loading older history",
+	}})
+	ui.runNext(t)
+	close(release)
+	ui.runNext(t)
+
+	got := messageStoreIDs(a.store.Messages(42))
+	want := []store.MessageID{1, 2, 3, 9}
+	if !slices.Equal(got, want) {
+		t.Fatalf("history IDs = %v, want %v (older progress plus live tail)", got, want)
 	}
 }
 
