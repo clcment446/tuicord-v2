@@ -371,14 +371,16 @@ func halfBlock(upper, lower bool, on screen.Style) screen.Cell {
 func halfBlockStyled(upper, lower bool, dark, light screen.Style) screen.Cell {
 	// Convention: true = dark module (drawn dark). We invert to keep quiet zones
 	// light so phone cameras can lock on.
+	darkColor := dark.Fg
+	lightColor := light.Fg
 	switch {
 	case upper && lower:
-		return screen.Cell{Content: " ", Style: screen.Style{Bg: dark.Fg}}
+		return screen.Cell{Content: " ", Style: screen.Style{Bg: darkColor}}
 	case !upper && !lower:
-		return screen.Cell{Content: " ", Style: screen.Style{Bg: light.Bg}}
+		return screen.Cell{Content: " ", Style: screen.Style{Bg: lightColor}}
 	case upper && !lower:
-		return screen.Cell{Content: "▀", Style: screen.Style{Fg: dark.Fg, Bg: light.Bg}}
+		return screen.Cell{Content: "▀", Style: screen.Style{Fg: darkColor, Bg: lightColor}}
 	default: // lower only
-		return screen.Cell{Content: "▄", Style: screen.Style{Fg: dark.Fg, Bg: light.Bg}}
+		return screen.Cell{Content: "▄", Style: screen.Style{Fg: darkColor, Bg: lightColor}}
 	}
 }
