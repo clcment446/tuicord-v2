@@ -100,7 +100,9 @@ type ChatView struct {
 	mediaFetcher *media.Fetcher
 	post         func(func())
 	media        map[string]*chatMediaState
-	mediaSlots   chan struct{}
+	mediaCtx     context.Context
+	mediaCancel  context.CancelFunc
+	mediaJobs    chan chatMediaJob
 	spinner      int
 	// mediaLoadingCount tracks in-flight fetches so mediaLoading stays O(1)
 	// as w.media grows.
@@ -238,14 +240,33 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	if w == nil {
 		return
 	}
+	if w.mediaCancel != nil {
+		w.mediaCancel()
+	}
+	cfg = cfg.Bounded()
 	w.mediaFetcher = fetcher
 	w.mediaCfg = cfg
 	w.post = post
-	if w.mediaSlots == nil {
-		w.mediaSlots = make(chan struct{}, 8)
-	}
 	if w.media == nil {
 		w.media = map[string]*chatMediaState{}
+	}
+	w.mediaCtx, w.mediaCancel = context.WithCancel(context.Background())
+	w.mediaJobs = make(chan chatMediaJob, cfg.QueuedFetches)
+	if fetcher == nil || post == nil || !cfg.Enabled {
+		return
+	}
+	for range cfg.ConcurrentFetches {
+		go w.mediaWorker(w.mediaCtx, w.mediaJobs)
+	}
+}
+
+// CloseMedia cancels queued and in-flight chat media requests. Workers use the
+// same context for queue waits and HTTP, so none can remain blocked behind a
+// semaphore after the view is closed.
+func (w *ChatView) CloseMedia() {
+	if w != nil && w.mediaCancel != nil {
+		w.mediaCancel()
+		w.mediaCancel = nil
 	}
 }
 
@@ -585,11 +606,19 @@ func (w *ChatView) ensureMedia(url string, animated bool) *chatMediaState {
 		return nil
 	}
 	state = &chatMediaState{loading: true, touched: w.renderGen}
-	w.media[url] = state
-	w.mediaLoadingCount++
-	w.recordMediaDep(url, state)
-	go w.fetchMedia(url, animated)
-	return state
+	job := chatMediaJob{url: url, animated: animated}
+	select {
+	case w.mediaJobs <- job:
+		w.media[url] = state
+		w.mediaLoadingCount++
+		w.recordMediaDep(url, state)
+		return state
+	default:
+		// The bounded queue is saturated. Do not create a waiting goroutine or a
+		// permanently loading state; a later render can retry after work drains.
+		return nil
+	}
+
 }
 
 // recordMediaDep notes that the body currently being rendered read state, so
@@ -618,42 +647,57 @@ func (w *ChatView) mediaLoading() bool {
 	return w.mediaLoadingCount > 0
 }
 
-func (w *ChatView) fetchMedia(url string, animated bool) {
-	w.mediaSlots <- struct{}{}
-	defer func() { <-w.mediaSlots }()
+type chatMediaJob struct {
+	url      string
+	animated bool
+}
+
+func (w *ChatView) mediaWorker(ctx context.Context, jobs <-chan chatMediaJob) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case job := <-jobs:
+			w.fetchMedia(ctx, job.url, job.animated)
+		}
+	}
+}
+
+func (w *ChatView) fetchMedia(ctx context.Context, url string, animated bool) {
 	if animated && w.mediaCfg.Animate {
-		if frames, err := w.mediaFetcher.FetchGIF(context.Background(), url); err == nil && len(frames) > 0 {
+		if frames, err := w.mediaFetcher.FetchGIF(ctx, url); err == nil && len(frames) > 0 {
 			if len(frames) > maxAnimatedGIFFrames {
-				capped := make([]media.Frame, maxAnimatedGIFFrames)
-				copy(capped, frames[:maxAnimatedGIFFrames])
-				frames = capped
+				frames = append([]media.Frame(nil), frames[:maxAnimatedGIFFrames]...)
 			}
 			frames = w.downscaleFrames(frames)
-			w.post(func() {
-				w.deliverFrames(url, frames)
-				w.invalidate()
-			})
+			if ctx.Err() == nil {
+				w.post(func() {
+					w.deliverFrames(url, frames)
+					w.invalidate()
+				})
+			}
 			return
 		}
-		// A decode/network failure or a non-animated GIF falls through to the
-		// static path below, which serves the first frame from the same cache.
+		if ctx.Err() != nil {
+			return
+		}
 	}
-	img, err := w.mediaFetcher.Fetch(context.Background(), url)
+	img, err := w.mediaFetcher.Fetch(ctx, url)
+	if ctx.Err() != nil {
+		return
+	}
 	w.post(func() {
 		state := w.media[url]
 		if state == nil {
-			// The state was dropped while the fetch was in flight; it was not
-			// counted as loading, so resurrect it without decrementing.
-			state = &chatMediaState{}
-			w.media[url] = state
-		} else if state.loading {
+			return
+		}
+		if state.loading {
 			w.mediaLoadingCount--
 		}
 		state.loading = false
 		state.img = img
 		state.err = err
 		state.variants = nil
-		// Invalidate any cached body that rendered this media as a placeholder.
 		state.rev++
 		w.invalidate()
 	})

@@ -1,8 +1,11 @@
 package term
 
 import (
+	"context"
+	"errors"
 	"os/exec"
 	"testing"
+	"time"
 )
 
 func TestPickImageMime(t *testing.T) {
@@ -55,6 +58,22 @@ func TestPickImageMime(t *testing.T) {
 				t.Fatalf("got (%q, %q), want (%q, %q)", mime, ext, tc.wantMime, tc.wantExt)
 			}
 		})
+	}
+}
+
+func TestClipboardCommandOutputCapsAtMaxPlusOne(t *testing.T) {
+	_, err := commandOutput(context.Background(), 4, "sh", "-c", "printf 12345")
+	if !errors.Is(err, ErrClipboardImageTooLarge) {
+		t.Fatalf("commandOutput error = %v, want too large", err)
+	}
+}
+
+func TestClipboardCommandOutputHonorsContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := commandOutput(ctx, 1024, "sh", "-c", "while :; do :; done")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("commandOutput error = %v, want deadline exceeded", err)
 	}
 }
 

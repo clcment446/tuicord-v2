@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
@@ -39,9 +40,10 @@ const (
 // MainView owns the widget tree and the index→ID maps needed to translate list
 // selections back into store identifiers.
 type MainView struct {
-	app    *app.App
-	cfg    config.Config
-	styles Styles
+	app      *app.App
+	cfg      config.Config
+	styles   Styles
+	mediaCfg media.Config
 
 	guildList        *widget.ItemList
 	channelList      *widget.ItemList
@@ -101,7 +103,8 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	if state == nil {
 		state = &uistate.State{}
 	}
-	mv := &MainView{app: a, cfg: cfg, styles: styles, state: state,
+	mediaCfg := chatMediaConfig(cfg)
+	mv := &MainView{app: a, cfg: cfg, styles: styles, mediaCfg: mediaCfg, state: state,
 		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != ""}
 
 	mv.guildList = widget.NewItemList(nil)
@@ -131,7 +134,6 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
 	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)
 	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
-	mediaCfg := chatMediaConfig()
 	if fetcher := newChatMediaFetcher(mediaCfg); fetcher != nil {
 		mv.chat.SetMedia(fetcher, mediaCfg, a.Post)
 		mv.chat.SetInvalidate(a.Invalidate)
@@ -146,7 +148,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 
 	// Inline image thumbnails render above the composer; size them against the
 	// terminal's cell pixel geometry so Kitty graphics are crisp.
-	mv.previewCellW, mv.previewCellH = chatMediaConfig().CellPixels()
+	mv.previewCellW, mv.previewCellH = mediaCfg.CellPixels()
 	mv.composerPreview = widget.Column()
 	mv.composerPreview.Layout().Grow = 0
 	mv.composerPreview.Layout().Hidden = true
@@ -269,25 +271,88 @@ func newChatMediaFetcher(cfg media.Config) *media.Fetcher {
 	if err != nil {
 		return nil
 	}
-	return &media.Fetcher{Cache: cache, MaxPixels: chatMediaPixelBudget(cfg)}
+	cfg = cfg.Bounded()
+	cache.ConfigureDisk(cfg.DiskCacheMaxBytes, cfg.DiskCacheTTL)
+	return &media.Fetcher{
+		Cache:              cache,
+		MaxPixels:          chatMediaPixelBudget(cfg),
+		MaxResponseBytes:   cfg.MaxResponseBytes,
+		MaxSourcePixels:    cfg.MaxSourcePixels,
+		MaxSourceDimension: cfg.MaxSourceDimension,
+		GIFMaxFrames:       cfg.GIFMaxFrames,
+		GIFMaxMemoryBytes:  cfg.GIFMaxMemoryBytes,
+		RequestTimeout:     cfg.RequestTimeout,
+		DisableDiskCache:   !cfg.DiskCacheEnabled,
+	}
 }
 
-// chatMediaConfig resolves the media settings for this terminal, filling in the
-// cell pixel size when the terminal reports one. A terminal that reports
-// nothing (tmux, some emulators) leaves the zero values, and media.Config
-// substitutes conventional defaults.
-func chatMediaConfig() media.Config {
-	cfg := media.DefaultConfig()
-	// Local Kitty shared-memory frames keep playback commands small enough that
-	// input and controls remain responsive. Remote terminals cannot access the
-	// host's shared-memory objects and retain streamed payloads.
-	cfg.VideoUseSHM = os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""
+// newViewerMediaFetcher uses the viewer's separately configured (larger, but
+// still bounded) response/decode limits and deliberately avoids inline
+// downscaling so enlargement does not magnify the chat thumbnail.
+func newViewerMediaFetcher(cfg media.Config) *media.Fetcher {
+	fetcher := newChatMediaFetcher(cfg)
+	if fetcher != nil {
+		fetcher.MaxPixels = image.Point{}
+	}
+	return fetcher
+}
+
+// chatMediaConfig projects user media/privacy settings into the media package
+// and fills terminal cell geometry when available.
+func chatMediaConfig(appCfg config.Config) media.Config {
+	defaults := media.DefaultConfig()
+	m := appCfg.Media
+	cfg := media.Config{
+		Enabled:            m.Enabled && appCfg.Privacy.FetchExternalMedia,
+		MaxHeightCells:     m.MaxHeightCells,
+		Animate:            m.AnimateGIFs,
+		EmojiImages:        m.EmojiImages,
+		MaxResponseBytes:   m.MaxResponseBytes,
+		MaxSourcePixels:    m.MaxSourcePixels,
+		MaxSourceDimension: m.MaxSourceDimension,
+		GIFMaxFrames:       m.MaxGIFFrames,
+		GIFMaxMemoryBytes:  m.MaxGIFMemoryBytes,
+		RequestTimeout:     time.Duration(m.RequestTimeoutSeconds) * time.Second,
+		ConcurrentFetches:  m.ConcurrentFetches,
+		QueuedFetches:      m.QueuedFetches,
+		DiskCacheEnabled:   appCfg.Privacy.PersistMediaCache,
+		DiskCacheMaxBytes:  m.CacheMaxBytes,
+		DiskCacheTTL:       time.Duration(m.CacheTTLHours) * time.Hour,
+		Prefetch:           appCfg.Privacy.PrefetchMedia,
+		MpvPath:            m.MpvPath,
+		VideoEnabled:       m.VideoEnabled && appCfg.Privacy.PlayVideos,
+		VideoAudio:         m.VideoAudio,
+	}
+	cfg = cfg.Bounded()
+	local := os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""
+	switch strings.ToLower(strings.TrimSpace(m.VideoUseSHM)) {
+	case "true", "yes", "on":
+		cfg.VideoUseSHM = true
+	case "false", "no", "off":
+		cfg.VideoUseSHM = false
+	default:
+		cfg.VideoUseSHM = local
+	}
+	if m.MpvPath == "" {
+		cfg.MpvPath = defaults.MpvPath
+	}
 	if sz, err := term.ProbeSize(); err == nil {
 		if w, h, ok := sz.CellPixels(); ok {
 			cfg.CellPixelWidth, cfg.CellPixelHeight = w, h
 		}
 	}
 	return cfg
+}
+
+func viewerMediaConfig(appCfg config.Config) media.Config {
+	cfg := chatMediaConfig(appCfg)
+	m := appCfg.Media
+	cfg.MaxResponseBytes = m.ViewerMaxResponseBytes
+	cfg.MaxSourcePixels = m.ViewerMaxSourcePixels
+	cfg.MaxSourceDimension = m.ViewerMaxSourceDimension
+	cfg.GIFMaxFrames = m.ViewerMaxGIFFrames
+	cfg.GIFMaxMemoryBytes = m.ViewerMaxGIFMemoryBytes
+	return cfg.Bounded()
 }
 
 // chatMediaPixelBudget is the largest pixel size an inline media block can
@@ -715,6 +780,10 @@ func (mv *MainView) openForum(id store.ChannelID) {
 		mv.forumView.onFilterMenu = mv.onForumFilter
 		mv.forumView.onNavigate = mv.navigateForum
 		mv.forumPreview = NewChatView(mv.app.Store(), func() store.ChannelID { return mv.forumPreviewID }, mv.resolver, mv.styles)
+		if fetcher := newChatMediaFetcher(mv.mediaCfg); fetcher != nil {
+			mv.forumPreview.SetMedia(fetcher, mv.mediaCfg, mv.app.Post)
+			mv.forumPreview.SetInvalidate(mv.app.Invalidate)
+		}
 		mv.forumPreviewBox = mv.titled("Post preview", mv.forumPreview)
 		mv.forumView.SetPreview(mv.forumPreviewBox)
 		mv.forumView.onPreview = func(post store.ChannelID) {

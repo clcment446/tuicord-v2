@@ -1,55 +1,70 @@
 package media
 
+import "time"
+
+const (
+	DefaultMaxResponseBytes   int64 = 25 << 20
+	DefaultMaxSourcePixels    int64 = 40_000_000
+	DefaultMaxSourceDimension       = 16_384
+	DefaultGIFMaxFrames             = 120
+	DefaultGIFMaxMemoryBytes  int64 = 192 << 20
+	DefaultRequestTimeout           = 15 * time.Second
+	DefaultConcurrentFetches        = 6
+	DefaultQueuedFetches            = 48
+	MaxConcurrentFetches            = 32
+	MaxQueuedFetches                = 1024
+	DefaultDiskCacheMaxBytes  int64 = 256 << 20
+	DefaultDiskCacheTTL             = 7 * 24 * time.Hour
+)
+
 // Config holds the user-facing settings for the media subsystem.
 // The application is responsible for reading these from its configuration
 // source and passing them to the relevant constructors at startup.
 type Config struct {
 	// Enabled controls whether media is fetched and displayed at all.
-	// When false the package produces text-chip placeholders only and makes
-	// no network requests.
 	Enabled bool
 
 	// MaxHeightCells is the maximum number of terminal rows an inline media
-	// block may occupy. Images taller than this are downscaled to fit.
-	// The aspect ratio is always preserved.
+	// block may occupy. The aspect ratio is always preserved.
 	MaxHeightCells int
 
-	// Animate enables multi-frame GIF playback in the chat renderer. When false
-	// the first frame is shown with a "[GIF]" badge.
+	// Animate enables multi-frame GIF playback in the chat renderer.
 	Animate bool
 
-	// EmojiImages renders custom Discord emoji as small inline images (one
-	// cell, two columns) via the Kitty graphics protocol when true.
-	// When false custom emoji are rendered as the text form :name:.
+	// EmojiImages renders custom Discord emoji as small inline images.
 	EmojiImages bool
 
-	// MpvPath is the mpv binary used to play videos inline via its Kitty
-	// graphics video output. Videos play inside the terminal, not in a separate
-	// window. Empty means "mpv" on PATH; playback is disabled when it is absent.
-	MpvPath string
+	// Network and decode limits apply before expensive image allocation or GIF
+	// frame composition. Zero values are replaced by the bounded defaults above.
+	MaxResponseBytes   int64
+	MaxSourcePixels    int64
+	MaxSourceDimension int
+	GIFMaxFrames       int
+	GIFMaxMemoryBytes  int64
+	RequestTimeout     time.Duration
+	ConcurrentFetches  int
+	QueuedFetches      int
 
-	// VideoAudio plays a video's audio track during inline playback. Playback is
-	// a deliberate select-to-play action, but a chat client is a quiet context,
-	// so audio is off by default.
-	VideoAudio bool
+	// Disk cache policy. DiskCacheEnabled is explicit because privacy settings
+	// may disable persistent media while retaining the in-memory decoded LRU.
+	DiskCacheEnabled  bool
+	DiskCacheMaxBytes int64
+	DiskCacheTTL      time.Duration
 
-	// VideoUseSHM asks mpv to transfer frames via shared memory instead of
-	// escape codes. It is faster but relies on the terminal reading the shm
-	// object, which is unreliable when frames are forwarded through a pty, so it
-	// defaults off.
-	VideoUseSHM bool
+	// Prefetch controls idle emoji/sticker cache warming.
+	Prefetch bool
 
-	// CellPixelWidth and CellPixelHeight are the pixel dimensions of one
-	// terminal cell, used to convert a cell budget into the pixel budget that
-	// Kitty graphics needs. Zero means the terminal did not report a size; use
-	// CellPixels for the defaulted values rather than reading these directly.
+	// MpvPath is the mpv binary used to play videos via its Kitty output.
+	MpvPath      string
+	VideoEnabled bool
+	VideoAudio   bool
+	VideoUseSHM  bool
+
+	// CellPixelWidth and CellPixelHeight convert cell budgets to pixels.
 	CellPixelWidth  int
 	CellPixelHeight int
 }
 
-// Default cell pixel size, used when the terminal does not report one. Chosen
-// to match a typical monospace cell at common font sizes; being slightly off
-// costs a little image quality, never correctness.
 const (
 	defaultCellPixelWidth  = 10
 	defaultCellPixelHeight = 20
@@ -68,15 +83,66 @@ func (c Config) CellPixels() (w, h int) {
 	return w, h
 }
 
-// DefaultConfig returns a Config with sensible defaults for a first-run
-// experience. Media is enabled, animations play, custom emoji render inline,
-// and the system's default URI handler opens videos.
+// Bounded fills zero/negative resource fields with safe defaults.
+func (c Config) Bounded() Config {
+	if c.MaxResponseBytes <= 0 {
+		c.MaxResponseBytes = DefaultMaxResponseBytes
+	}
+	if c.MaxSourcePixels <= 0 {
+		c.MaxSourcePixels = DefaultMaxSourcePixels
+	}
+	if c.MaxSourceDimension <= 0 {
+		c.MaxSourceDimension = DefaultMaxSourceDimension
+	}
+	if c.GIFMaxFrames <= 0 {
+		c.GIFMaxFrames = DefaultGIFMaxFrames
+	}
+	if c.GIFMaxMemoryBytes <= 0 {
+		c.GIFMaxMemoryBytes = DefaultGIFMaxMemoryBytes
+	}
+	if c.RequestTimeout <= 0 {
+		c.RequestTimeout = DefaultRequestTimeout
+	}
+	if c.ConcurrentFetches <= 0 {
+		c.ConcurrentFetches = DefaultConcurrentFetches
+	} else if c.ConcurrentFetches > MaxConcurrentFetches {
+		c.ConcurrentFetches = MaxConcurrentFetches
+	}
+	if c.QueuedFetches <= 0 {
+		c.QueuedFetches = DefaultQueuedFetches
+	} else if c.QueuedFetches > MaxQueuedFetches {
+		c.QueuedFetches = MaxQueuedFetches
+	}
+	if c.DiskCacheMaxBytes <= 0 {
+		c.DiskCacheMaxBytes = DefaultDiskCacheMaxBytes
+	}
+	if c.DiskCacheTTL <= 0 {
+		c.DiskCacheTTL = DefaultDiskCacheTTL
+	}
+	return c
+}
+
+// DefaultConfig returns a Config with bounded, privacy-conscious defaults while
+// retaining the existing visible media, animation, prefetch, and video behavior.
 func DefaultConfig() Config {
 	return Config{
-		Enabled:        true,
-		MaxHeightCells: 12,
-		Animate:        true,
-		EmojiImages:    true,
-		MpvPath:        "mpv",
+		Enabled:            true,
+		MaxHeightCells:     12,
+		Animate:            true,
+		EmojiImages:        true,
+		MaxResponseBytes:   DefaultMaxResponseBytes,
+		MaxSourcePixels:    DefaultMaxSourcePixels,
+		MaxSourceDimension: DefaultMaxSourceDimension,
+		GIFMaxFrames:       DefaultGIFMaxFrames,
+		GIFMaxMemoryBytes:  DefaultGIFMaxMemoryBytes,
+		RequestTimeout:     DefaultRequestTimeout,
+		ConcurrentFetches:  DefaultConcurrentFetches,
+		QueuedFetches:      DefaultQueuedFetches,
+		DiskCacheEnabled:   true,
+		DiskCacheMaxBytes:  DefaultDiskCacheMaxBytes,
+		DiskCacheTTL:       DefaultDiskCacheTTL,
+		Prefetch:           true,
+		MpvPath:            "mpv",
+		VideoEnabled:       true,
 	}
 }

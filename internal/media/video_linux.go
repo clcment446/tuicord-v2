@@ -38,6 +38,7 @@ type videoSession struct {
 	cmd        *exec.Cmd
 	master     *os.File
 	readerDone chan struct{}
+	done       chan struct{}
 	ipcPath    string
 	shmMu      sync.Mutex
 	shmFiles   []string
@@ -51,7 +52,7 @@ func NewVideoPlayer(cfg Config) *VideoPlayer { return &VideoPlayer{cfg: cfg} }
 // Available reports whether inline video can run: the mpv binary must resolve on
 // PATH (or as an absolute path).
 func (p *VideoPlayer) Available() bool {
-	if p == nil {
+	if p == nil || !p.cfg.VideoEnabled {
 		return false
 	}
 	_, err := exec.LookPath(p.mpvPath())
@@ -89,7 +90,7 @@ func (p *VideoPlayer) Playing() (string, bool) {
 // entire screen black. A region-sized pty keeps that clear confined to the
 // playback area.
 func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit func()) error {
-	if p == nil {
+	if p == nil || !p.cfg.VideoEnabled {
 		return ErrVideoUnsupported
 	}
 	if region.Empty() {
@@ -130,7 +131,7 @@ func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit fun
 	// The child owns the slave now; the parent keeps only the master.
 	_ = slave.Close()
 
-	session := &videoSession{url: url, region: region, cmd: cmd, master: master, readerDone: make(chan struct{}), ipcPath: ipcPath}
+	session := &videoSession{url: url, region: region, cmd: cmd, master: master, readerDone: make(chan struct{}), done: make(chan struct{}), ipcPath: ipcPath}
 	p.mu.Lock()
 	p.session = session
 	p.mu.Unlock()
@@ -173,6 +174,7 @@ func (p *VideoPlayer) Play(url string, region Rect, out func([]byte), onExit fun
 
 	// Reap the process and notify when it ends by itself.
 	go func() {
+		defer close(session.done)
 		_ = cmd.Wait()
 		_ = master.Close()
 		// Ensure mpv's final Kitty delete has been queued before notifying the UI
@@ -275,10 +277,19 @@ func (p *VideoPlayer) Stop() {
 		return
 	}
 	if session.cmd.Process != nil {
+		// mpv owns a session/process group and may launch helpers for remote
+		// streams. Kill the group first, then the leader as a portable fallback.
+		_ = syscall.Kill(-session.cmd.Process.Pid, syscall.SIGKILL)
 		_ = session.cmd.Process.Kill()
 	}
 	_ = session.master.Close()
 	_ = os.Remove(session.ipcPath)
+	select {
+	case <-session.done:
+	case <-time.After(2 * time.Second):
+		// Process.Kill has been issued; avoid making UI shutdown hang forever on
+		// a platform/kernel edge while still bounding cleanup wait time.
+	}
 }
 
 // args builds mpv's command line for inline Kitty playback pinned to region.
@@ -304,6 +315,9 @@ func (p *VideoPlayer) args(url string, r Rect, ipcPath string) []string {
 		// therefore makes later video frames jump into unrelated rows.
 		fmt.Sprintf("--vo-kitty-left=%d", r.X+1),
 		fmt.Sprintf("--vo-kitty-top=%d", r.Y+1),
+	}
+	if p.cfg.RequestTimeout > 0 {
+		args = append(args, fmt.Sprintf("--network-timeout=%.3f", p.cfg.RequestTimeout.Seconds()))
 	}
 	if !p.cfg.VideoAudio {
 		args = append(args, "--no-audio")

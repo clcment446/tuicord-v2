@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -53,31 +54,38 @@ type PluginHost interface {
 // Children returns whichever subtree is active, so focus, hit-testing, and
 // drawing all follow.
 type Shell struct {
-	mv             *MainView
-	app            *app.App
-	cfg            config.Config
-	styles         Styles
-	plugins        PluginHost
-	overlay        tui.Widget // nil = show the main view
-	popup          tui.Widget // small interactive layer drawn over current()
-	toasts         []*Toast
-	notifier       desktopNotifier
-	dispatch       func(func())
-	post           func(func())
-	unfocused      bool
-	now            func() time.Time
-	forumPreview   *forumPreview
-	completionSync bool
-	commandLoading bool
-	inputMode      bool
-	focusRequest   tui.Widget
-	prefetch       *idleMediaPrefetcher
-	prefetchIdle   bool
-	lastActivity   time.Time
-	cancel         context.CancelFunc
-	node           layout.Node
-	video          *media.VideoPlayer
-	videoRegion    media.Rect
+	mv              *MainView
+	app             *app.App
+	cfg             config.Config
+	styles          Styles
+	plugins         PluginHost
+	overlay         tui.Widget // nil = show the main view
+	popup           tui.Widget // small interactive layer drawn over current()
+	toasts          []*Toast
+	notifier        desktopNotifier
+	dispatch        func(func())
+	post            func(func())
+	unfocused       bool
+	now             func() time.Time
+	forumPreview    *forumPreview
+	completionSync  bool
+	commandLoading  bool
+	inputMode       bool
+	focusRequest    tui.Widget
+	prefetch        *idleMediaPrefetcher
+	prefetchIdle    bool
+	lastActivity    time.Time
+	cancel          context.CancelFunc
+	lifecycleCtx    context.Context
+	lifecycleCancel context.CancelFunc
+	viewerCancel    context.CancelFunc
+	clipboardCancel context.CancelFunc
+	clipboardBusy   bool
+	closeOnce       sync.Once
+	mediaCfg        media.Config
+	node            layout.Node
+	video           *media.VideoPlayer
+	videoRegion     media.Rect
 }
 
 // SetPluginHost registers the Lua plugin manager for command and key dispatch.
@@ -131,9 +139,12 @@ end run`
 
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, node: layout.Node{Grow: 1}}
-	mediaCfg := chatMediaConfig()
-	s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
+	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
+	mediaCfg := chatMediaConfig(cfg)
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, node: layout.Node{Grow: 1}}
+	if mediaCfg.Enabled && mediaCfg.Prefetch {
+		s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
+	}
 	s.video = media.NewVideoPlayer(mediaCfg)
 	mv.chat.OnPlayVideo(s.playVideo)
 	mv.chat.OnStopVideo(s.teardownVideo)
@@ -211,8 +222,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 		}
 		s.ShowNotice("Local commands", detail)
 	case "quit":
-		s.prefetch.Stop()
-		s.teardownVideo()
+		s.Close()
 		if s.cancel != nil {
 			s.cancel()
 		}
@@ -248,6 +258,10 @@ func (s *Shell) runLocalCommand(input string) bool {
 // overlay, where mpv's black backdrop reads as the intended player. The inline
 // poster + ▶ stays as the trigger.
 func (s *Shell) playVideo(url string, _ media.Rect) {
+	if !s.mediaCfg.VideoEnabled {
+		s.ShowNotice("Video", "Video playback is disabled in media/privacy settings")
+		return
+	}
 	if s.video == nil || !s.video.Available() {
 		s.ShowNotice("Video", "Install mpv to play videos inline")
 		return
@@ -333,15 +347,19 @@ func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Fram
 	// Inline media is deliberately downscaled before caching. The full-screen
 	// viewer refetches from the raw disk cache (or network) with no pixel cap so
 	// enlargement does not magnify a thumbnail.
-	cache, err := media.NewCache(0, "")
-	if err != nil {
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+	}
+	ctx, cancel := context.WithCancel(s.lifecycleCtx)
+	s.viewerCancel = cancel
+	fetcher := newViewerMediaFetcher(viewerMediaConfig(s.cfg))
+	if fetcher == nil {
 		return
 	}
-	fetcher := &media.Fetcher{Cache: cache}
 	animated := len(frames) > 1 || media.ClassifyURL(url) == media.ClassGIF
 	go func() {
 		if animated {
-			fullFrames, err := fetcher.FetchGIF(context.Background(), url)
+			fullFrames, err := fetcher.FetchGIF(ctx, url)
 			if err != nil || len(fullFrames) == 0 {
 				return
 			}
@@ -352,7 +370,7 @@ func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Fram
 			})
 			return
 		}
-		full, err := fetcher.Fetch(context.Background(), url)
+		full, err := fetcher.Fetch(ctx, url)
 		if err != nil {
 			return
 		}
@@ -391,34 +409,73 @@ func (s *Shell) pasteImage() { s.tryPasteImage(false) }
 // bracketed-paste hook); otherwise it surfaces as a toast. It reports whether an
 // image was attached.
 func (s *Shell) tryPasteImage(quiet bool) bool {
-	data, ext, err := term.ReadClipboardImage()
-	if err != nil {
-		if quiet && errors.Is(err, term.ErrNoClipboardImage) {
-			return false
+	if s == nil || !s.cfg.Privacy.ClipboardImages {
+		if !quiet && s != nil {
+			s.ShowTimedNotice("Paste image", "Clipboard image access is disabled in [privacy]", pasteNoticeTTL)
 		}
-		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
 		return false
 	}
-	f, err := os.CreateTemp("", "tuicord-paste-*."+ext)
-	if err != nil {
-		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
-		return false
+	if s.clipboardBusy {
+		return true
 	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(f.Name())
-		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
-		return false
+	timeout := time.Duration(s.cfg.Privacy.ClipboardTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 5 * time.Second
 	}
-	f.Close()
-	filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
-	if err := s.mv.StageTempImage(f.Name(), filename, int64(len(data))); err != nil {
-		_ = os.Remove(f.Name())
-		s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
-		return false
+	maxBytes := s.cfg.Privacy.ClipboardMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 25 << 20
 	}
-	// The staged image previews inline above the composer via updateAttachmentChips.
-	s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
+	ctx, cancel := context.WithTimeout(s.lifecycleCtx, timeout)
+	s.clipboardCancel = cancel
+	s.clipboardBusy = true
+	go func() {
+		data, ext, err := term.ReadClipboardImageContext(ctx, maxBytes)
+		var tempPath string
+		if err == nil {
+			f, createErr := os.CreateTemp("", "tuicord-paste-*."+ext)
+			if createErr != nil {
+				err = createErr
+			} else {
+				tempPath = f.Name()
+				if _, writeErr := f.Write(data); writeErr != nil {
+					err = writeErr
+				}
+				if closeErr := f.Close(); err == nil && closeErr != nil {
+					err = closeErr
+				}
+			}
+		}
+		if s.lifecycleCtx.Err() != nil {
+			if tempPath != "" {
+				_ = os.Remove(tempPath)
+			}
+			cancel()
+			return
+		}
+		s.app.Post(func() {
+			s.clipboardBusy = false
+			s.clipboardCancel = nil
+			cancel()
+			if err != nil {
+				if tempPath != "" {
+					_ = os.Remove(tempPath)
+				}
+				if quiet && errors.Is(err, term.ErrNoClipboardImage) {
+					return
+				}
+				s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+				return
+			}
+			filename := fmt.Sprintf("pasted-%d.%s", time.Now().Unix(), ext)
+			if err := s.mv.StageTempImage(tempPath, filename, int64(len(data))); err != nil {
+				_ = os.Remove(tempPath)
+				s.ShowTimedNotice("Paste image", err.Error(), pasteNoticeTTL)
+				return
+			}
+			s.ShowTimedNotice("Image attached", filename+" ("+formatAttachmentSize(int64(len(data)))+") · press Enter to send", pasteNoticeTTL)
+		})
+	}()
 	return true
 }
 
@@ -885,7 +942,7 @@ func (s *Shell) openPicker() {
 	p.SetGIFSearch(s.app.SearchGIFs)
 	p.SetRecentStickers(s.mv.recentStickers())
 	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers(), s.mv.toggleFavorite)
-	p.SetMedia(newChatMediaFetcher(chatMediaConfig()), chatMediaConfig(), s.app.Post)
+	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
 	p.SetStickerSelect(func(id uint64) {
 		s.app.SendSticker(id)
 	})
@@ -962,7 +1019,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 			s.app.LoadHistory(channel, 50)
 		}
 	})
-	p.SetMedia(newChatMediaFetcher(chatMediaConfig()), chatMediaConfig(), s.app.Post)
+	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
 	s.overlay = p
 }
 
@@ -1327,7 +1384,19 @@ func (s *Shell) canManageMessages(channel store.ChannelID) bool {
 	return false
 }
 
+type overlayCloser interface{ Close() }
+
 func (s *Shell) closeOverlay() {
+	if s == nil {
+		return
+	}
+	if closer, ok := s.overlay.(overlayCloser); ok {
+		closer.Close()
+	}
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+		s.viewerCancel = nil
+	}
 	playingVideo := !s.videoRegion.Empty()
 	if playingVideo {
 		s.teardownVideo()
@@ -1337,6 +1406,44 @@ func (s *Shell) closeOverlay() {
 		// mpv painted over the screen outside our frame diff; re-emit everything.
 		s.app.ForceRepaint()
 	}
+}
+
+// Close cancels every Shell-owned background media operation and stops mpv.
+// It is safe to call repeatedly and is invoked by main on every run exit.
+func (s *Shell) Close() {
+	if s == nil {
+		return
+	}
+	s.closeOnce.Do(func() {
+		if s.lifecycleCancel != nil {
+			s.lifecycleCancel()
+		}
+		if s.viewerCancel != nil {
+			s.viewerCancel()
+			s.viewerCancel = nil
+		}
+		if s.clipboardCancel != nil {
+			s.clipboardCancel()
+			s.clipboardCancel = nil
+		}
+		if s.prefetch != nil {
+			s.prefetch.Close()
+		}
+		if s.mv != nil {
+			if s.mv.chat != nil {
+				s.mv.chat.CloseMedia()
+			}
+			if s.mv.forumPreview != nil {
+				s.mv.forumPreview.CloseMedia()
+			}
+		}
+		if closer, ok := s.overlay.(overlayCloser); ok {
+			closer.Close()
+		}
+		s.popup = nil
+		s.overlay = nil
+		s.teardownVideo()
+	})
 }
 
 func (s *Shell) closePopup() { s.popup = nil }
@@ -1380,7 +1487,13 @@ func (s *Shell) showIncomingMessageToast(message store.Message, title, body stri
 	toast := newExpiringToast(title, body, s.styles, s.clock())
 	if message.ChannelID != 0 && s.mv != nil {
 		channelID := message.ChannelID
-		toast.onActivate = func() { s.mv.NavigateToChannel(channelID) }
+		toast.onActivate = func() {
+			// Navigation must not leave a modal or mpv surface covering the newly
+			// activated channel. Clear all actionable layers first.
+			s.popup = nil
+			s.closeOverlay()
+			s.mv.NavigateToChannel(channelID)
+		}
 	}
 	s.toasts = append([]*Toast{toast}, s.toasts...)
 }

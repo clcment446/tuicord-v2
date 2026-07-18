@@ -122,6 +122,51 @@ type Nitro struct {
 	Fake bool `toml:"fake"`
 }
 
+// Media controls network, decode, cache, and player resource limits. Byte and
+// pixel values are direct limits so operators can audit the exact bounds.
+type Media struct {
+	Enabled               bool  `toml:"enabled"`
+	AnimateGIFs           bool  `toml:"animate_gifs"`
+	EmojiImages           bool  `toml:"emoji_images"`
+	MaxHeightCells        int   `toml:"max_height_cells"`
+	MaxResponseBytes      int64 `toml:"max_response_bytes"`
+	MaxSourcePixels       int64 `toml:"max_source_pixels"`
+	MaxSourceDimension    int   `toml:"max_source_dimension"`
+	MaxGIFFrames          int   `toml:"max_gif_frames"`
+	MaxGIFMemoryBytes     int64 `toml:"max_gif_memory_bytes"`
+	RequestTimeoutSeconds int   `toml:"request_timeout_seconds"`
+	ConcurrentFetches     int   `toml:"concurrent_fetches"`
+	QueuedFetches         int   `toml:"queued_fetches"`
+	CacheMaxBytes         int64 `toml:"cache_max_bytes"`
+	CacheTTLHours         int   `toml:"cache_ttl_hours"`
+
+	ViewerMaxResponseBytes   int64 `toml:"viewer_max_response_bytes"`
+	ViewerMaxSourcePixels    int64 `toml:"viewer_max_source_pixels"`
+	ViewerMaxSourceDimension int   `toml:"viewer_max_source_dimension"`
+	ViewerMaxGIFFrames       int   `toml:"viewer_max_gif_frames"`
+	ViewerMaxGIFMemoryBytes  int64 `toml:"viewer_max_gif_memory_bytes"`
+
+	VideoEnabled bool   `toml:"video_enabled"`
+	MpvPath      string `toml:"mpv_path"`
+	VideoAudio   bool   `toml:"video_audio"`
+	// VideoUseSHM is "auto", "true", or "false". Auto enables shared memory
+	// only for local sessions, preserving the established SSH behavior.
+	VideoUseSHM string `toml:"video_use_shm"`
+}
+
+// Privacy controls which media-related operations may touch the network, disk,
+// or system clipboard. Defaults preserve existing behavior and can be disabled
+// independently without disabling text chat.
+type Privacy struct {
+	FetchExternalMedia      bool  `toml:"fetch_external_media"`
+	PersistMediaCache       bool  `toml:"persist_media_cache"`
+	PrefetchMedia           bool  `toml:"prefetch_media"`
+	ClipboardImages         bool  `toml:"clipboard_images"`
+	ClipboardMaxBytes       int64 `toml:"clipboard_max_bytes"`
+	ClipboardTimeoutSeconds int   `toml:"clipboard_timeout_seconds"`
+	PlayVideos              bool  `toml:"play_videos"`
+}
+
 // Colors holds hex colors (e.g. "#5865F2") applied to the widget tree.
 //
 // Default() ships Catppuccin Latte so the client looks cohesive out of the box
@@ -207,6 +252,8 @@ type Config struct {
 	Keys          Keys          `toml:"keys"`
 	Colors        Colors        `toml:"colors"`
 	Nitro         Nitro         `toml:"nitro"`
+	Media         Media         `toml:"media"`
+	Privacy       Privacy       `toml:"privacy"`
 	Display       Display       `toml:"display"`
 	Auth          Auth          `toml:"auth"`
 	Accessibility Accessibility `toml:"accessibility"`
@@ -279,7 +326,40 @@ func Default() Config {
 			VideoSeekForward:  "right",
 			VideoReplay:       "r",
 		},
-		Nitro:         Nitro{Fake: true},
+		Nitro: Nitro{Fake: true},
+		Media: Media{
+			Enabled:                  true,
+			AnimateGIFs:              true,
+			EmojiImages:              true,
+			MaxHeightCells:           12,
+			MaxResponseBytes:         25 << 20,
+			MaxSourcePixels:          40_000_000,
+			MaxSourceDimension:       16_384,
+			MaxGIFFrames:             120,
+			MaxGIFMemoryBytes:        192 << 20,
+			RequestTimeoutSeconds:    15,
+			ConcurrentFetches:        6,
+			QueuedFetches:            48,
+			CacheMaxBytes:            256 << 20,
+			CacheTTLHours:            7 * 24,
+			ViewerMaxResponseBytes:   50 << 20,
+			ViewerMaxSourcePixels:    80_000_000,
+			ViewerMaxSourceDimension: 24_576,
+			ViewerMaxGIFFrames:       180,
+			ViewerMaxGIFMemoryBytes:  384 << 20,
+			VideoEnabled:             true,
+			MpvPath:                  "mpv",
+			VideoUseSHM:              "auto",
+		},
+		Privacy: Privacy{
+			FetchExternalMedia:      true,
+			PersistMediaCache:       true,
+			PrefetchMedia:           true,
+			ClipboardImages:         true,
+			ClipboardMaxBytes:       25 << 20,
+			ClipboardTimeoutSeconds: 5,
+			PlayVideos:              true,
+		},
 		Accessibility: Accessibility{MouseOn: true},
 		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
@@ -549,6 +629,41 @@ highlight_focus_block = false
 
 [nitro]
 fake = true
+
+[media]
+enabled = true
+animate_gifs = true
+emoji_images = true
+max_height_cells = 12
+max_response_bytes = 26214400
+max_source_pixels = 40000000
+max_source_dimension = 16384
+max_gif_frames = 120
+max_gif_memory_bytes = 201326592
+request_timeout_seconds = 15
+concurrent_fetches = 6
+queued_fetches = 48
+cache_max_bytes = 268435456
+cache_ttl_hours = 168
+viewer_max_response_bytes = 52428800
+viewer_max_source_pixels = 80000000
+viewer_max_source_dimension = 24576
+viewer_max_gif_frames = 180
+viewer_max_gif_memory_bytes = 402653184
+video_enabled = true
+mpv_path = "mpv"
+video_audio = false
+video_use_shm = "auto"
+
+[privacy]
+# Disable any of these independently to prevent the corresponding external IO.
+fetch_external_media = true
+persist_media_cache = true
+prefetch_media = true
+clipboard_images = true
+clipboard_max_bytes = 26214400
+clipboard_timeout_seconds = 5
+play_videos = true
 
 [integrations.slash_commands]
 enabled = false

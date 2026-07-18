@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -11,6 +12,13 @@ import (
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 )
+
+type recordingOverlayCloser struct {
+	*widget.Text
+	closed bool
+}
+
+func (o *recordingOverlayCloser) Close() { o.closed = true }
 
 type recordingDesktopNotifier struct {
 	titles []string
@@ -59,6 +67,23 @@ func TestShellRoutesIncomingMessageByWindowFocus(t *testing.T) {
 	sh.NotifyIncomingMessage(message)
 	if len(notifier.titles) != 1 || len(sh.Toasts()) != 1 {
 		t.Fatalf("focused notification = desktop %v, toasts %d; want in-app only", notifier.titles, len(sh.Toasts()))
+	}
+}
+
+func TestIncomingNotificationClosesActionLayersBeforeNavigation(t *testing.T) {
+	overlay := &recordingOverlayCloser{Text: widget.NewText("overlay")}
+	_, cancel := context.WithCancel(context.Background())
+	sh := &Shell{
+		cfg:          config.Default(),
+		mv:           &MainView{Root: widget.NewText("main")},
+		overlay:      overlay,
+		popup:        widget.NewText("popup"),
+		viewerCancel: cancel,
+	}
+	sh.showIncomingMessageToast(store.Message{ChannelID: 9}, "Mina", "hello")
+	sh.toasts[0].onActivate()
+	if !overlay.closed || sh.overlay != nil || sh.popup != nil || sh.viewerCancel != nil {
+		t.Fatalf("activation left action layers open: closed=%v overlay=%v popup=%v cancel=%v", overlay.closed, sh.overlay, sh.popup, sh.viewerCancel)
 	}
 }
 

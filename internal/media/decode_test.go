@@ -149,6 +149,50 @@ func TestDecodeGIF_FramesBounds(t *testing.T) {
 	}
 }
 
+func TestDecodeWithLimitsCapsEncodedInputAtMaxPlusOne(t *testing.T) {
+	_, err := DecodeWithLimits(bytes.NewReader([]byte("12345")), DecodeLimits{MaxEncodedBytes: 4, MaxDimension: 100, MaxPixels: 100})
+	if err == nil {
+		t.Fatal("DecodeWithLimits accepted oversized encoded input")
+	}
+}
+
+func TestDecodeWithLimitsRejectsDimensionsBeforeFullDecode(t *testing.T) {
+	raw := makePNG(t, 8, 7, color.RGBA{A: 255})
+	if _, err := DecodeWithLimits(bytes.NewReader(raw), DecodeLimits{MaxDimension: 6, MaxPixels: 1_000}); err == nil {
+		t.Fatal("DecodeWithLimits accepted oversized source dimension")
+	}
+	if _, err := DecodeWithLimits(bytes.NewReader(raw), DecodeLimits{MaxDimension: 100, MaxPixels: 55}); err == nil {
+		t.Fatal("DecodeWithLimits accepted oversized source pixel count")
+	}
+}
+
+func TestDecodeGIFCapsFramesBeforeComposition(t *testing.T) {
+	raw := makeGIF(t, 4, 4, 5, 10)
+	frames, err := DecodeGIFWithLimits(bytes.NewReader(raw), GIFLimits{
+		DecodeLimits:   DecodeLimits{MaxDimension: 100, MaxPixels: 1_000},
+		MaxFrames:      2,
+		MaxMemoryBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(frames) != 2 {
+		t.Fatalf("frames = %d, want capped 2", len(frames))
+	}
+}
+
+func TestDecodeGIFRejectsAggregateCompositionMemory(t *testing.T) {
+	raw := makeGIF(t, 10, 10, 3, 10)
+	_, err := DecodeGIFWithLimits(bytes.NewReader(raw), GIFLimits{
+		DecodeLimits:   DecodeLimits{MaxDimension: 100, MaxPixels: 1_000},
+		MaxFrames:      3,
+		MaxMemoryBytes: 1_000,
+	})
+	if err == nil {
+		t.Fatal("DecodeGIFWithLimits accepted aggregate composition over limit")
+	}
+}
+
 func TestDecodeGIF_InvalidData(t *testing.T) {
 	// Arrange.
 	raw := []byte("not a gif")

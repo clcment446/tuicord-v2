@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // blankImg returns a trivially small image for cache tests.
@@ -156,6 +157,58 @@ func TestCache_Disk_PathIsURLInsensitive(t *testing.T) {
 	// Assert.
 	if string(gotA) != "a" || string(gotB) != "b" {
 		t.Errorf("disk paths collided: gotA=%q gotB=%q", gotA, gotB)
+	}
+}
+
+func TestCacheDiskCallerLimitRejectsBeforeRead(t *testing.T) {
+	c := newTempCache(t, 4)
+	c.ConfigureDisk(100, time.Hour)
+	if err := c.PutDisk("large", []byte("123456")); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := c.GetDiskLimit("large", 5); err != nil || got != nil {
+		t.Fatalf("GetDiskLimit = %q, %v; want miss", got, err)
+	}
+	if _, err := os.Stat(c.diskPath("large")); !os.IsNotExist(err) {
+		t.Fatalf("oversized cache file was not removed: %v", err)
+	}
+}
+
+func TestCacheDiskEvictsOldestToByteBudget(t *testing.T) {
+	c := newTempCache(t, 4)
+	c.ConfigureDisk(5, time.Hour)
+	if err := c.PutDisk("old", []byte("1234")); err != nil {
+		t.Fatal(err)
+	}
+	oldTime := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(c.diskPath("old"), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutDisk("new", []byte("5678")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := c.GetDisk("old"); got != nil {
+		t.Fatal("oldest entry survived byte-budget eviction")
+	}
+	if got, _ := c.GetDisk("new"); string(got) != "5678" {
+		t.Fatalf("new entry = %q", got)
+	}
+}
+
+func TestCacheDiskExpiresByTTL(t *testing.T) {
+	c := newTempCache(t, 4)
+	c.ConfigureDisk(1<<20, time.Hour)
+	if err := c.PutDisk("expired", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	old := now.Add(-2 * time.Hour)
+	if err := os.Chtimes(c.diskPath("expired"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	c.now = func() time.Time { return now }
+	if got, err := c.GetDisk("expired"); err != nil || got != nil {
+		t.Fatalf("expired GetDisk = %q, %v", got, err)
 	}
 }
 

@@ -11,6 +11,37 @@ import (
 	"awesomeProject/internal/tui/screen"
 )
 
+func TestWriteRawIsNonBlockingBoundedAndAtomic(t *testing.T) {
+	app := New()
+	for i := 0; i < 100; i++ {
+		app.WriteRaw([]byte{byte(i), byte(i + 1)})
+	}
+	if got := len(app.rawWrites); got != 8 {
+		t.Fatalf("queued raw writes = %d, want 8", got)
+	}
+	for _, command := range app.rawWrites {
+		if len(command) != 2 {
+			t.Fatalf("fragmented command = %v", command)
+		}
+	}
+	input := []byte("complete kitty command")
+	app.WriteRaw(input)
+	input[0] = 'X'
+	if got := app.rawWrites[len(app.rawWrites)-1][0]; got != 'c' {
+		t.Fatalf("queued command aliases caller buffer: %q", got)
+	}
+}
+
+func TestWriteRawIgnoresWritesAfterShutdown(t *testing.T) {
+	app := New()
+	app.WriteRaw([]byte("before"))
+	app.stopRawWrites()
+	app.WriteRaw([]byte("after"))
+	if len(app.rawWrites) != 0 {
+		t.Fatalf("raw writes retained after shutdown: %q", app.rawWrites)
+	}
+}
+
 func TestPostRunsInFIFOOrder(t *testing.T) {
 	app := New()
 	var got []int

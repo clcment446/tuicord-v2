@@ -17,6 +17,7 @@ type idleMediaPrefetcher struct {
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	gen    uint64
+	closed bool
 }
 
 func newIdleMediaPrefetcher(fetcher *media.Fetcher) *idleMediaPrefetcher {
@@ -28,8 +29,12 @@ func (p *idleMediaPrefetcher) Start(urls []string) {
 		return
 	}
 	p.Stop()
-	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
 	p.gen++
 	gen := p.gen
 	p.cancel = cancel
@@ -54,6 +59,21 @@ func (p *idleMediaPrefetcher) Stop() {
 		return
 	}
 	p.mu.Lock()
+	p.gen++
+	cancel := p.cancel
+	p.cancel = nil
+	p.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (p *idleMediaPrefetcher) Close() {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	p.closed = true
 	p.gen++
 	cancel := p.cancel
 	p.cancel = nil

@@ -3,26 +3,30 @@ package media
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image/color"
 	"io"
 	"net/http"
 	"testing"
+	"time"
 )
 
 // stubDoer is a fake HTTP transport that always returns the same body.
 type stubDoer struct {
-	status int
-	body   []byte
-	header http.Header
-	calls  int
+	status        int
+	body          []byte
+	header        http.Header
+	contentLength int64
+	calls         int
 }
 
 func (s *stubDoer) Do(req *http.Request) (*http.Response, error) {
 	s.calls++
 	return &http.Response{
-		StatusCode: s.status,
-		Header:     s.header,
-		Body:       io.NopCloser(bytes.NewReader(s.body)),
+		StatusCode:    s.status,
+		Header:        s.header,
+		Body:          io.NopCloser(bytes.NewReader(s.body)),
+		ContentLength: s.contentLength,
 	}, nil
 }
 
@@ -170,6 +174,36 @@ func TestFetcher_Fetch_NilCache(t *testing.T) {
 		t.Fatal("Fetch without cache: got nil image")
 	}
 }
+
+func TestFetcherRejectsContentLengthBeforeRead(t *testing.T) {
+	stub := &stubDoer{status: http.StatusOK, contentLength: 9, body: []byte("x")}
+	f := &Fetcher{HTTP: stub, MaxResponseBytes: 8}
+	if _, err := f.Fetch(context.Background(), "https://example.com/large.png"); err == nil {
+		t.Fatal("Fetch accepted oversized Content-Length")
+	}
+}
+
+func TestFetcherRejectsChunkedBodyAtMaxPlusOne(t *testing.T) {
+	stub := &stubDoer{status: http.StatusOK, contentLength: -1, body: []byte("123456789")}
+	f := &Fetcher{HTTP: stub, MaxResponseBytes: 8}
+	if _, err := f.Fetch(context.Background(), "https://example.com/large.png"); err == nil {
+		t.Fatal("Fetch accepted oversized body without Content-Length")
+	}
+}
+
+func TestFetcherRequestTimeoutCancelsTransport(t *testing.T) {
+	f := &Fetcher{HTTP: doerFunc(func(req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		return nil, req.Context().Err()
+	}), RequestTimeout: 10 * time.Millisecond}
+	if _, err := f.Fetch(context.Background(), "https://example.com/slow.png"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Fetch error = %v, want deadline exceeded", err)
+	}
+}
+
+type doerFunc func(*http.Request) (*http.Response, error)
+
+func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
 
 func TestFetcher_Fetch_ContextCancelled(t *testing.T) {
 	// Arrange: immediately cancelled context.

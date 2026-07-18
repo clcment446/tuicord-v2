@@ -77,6 +77,7 @@ func run() error {
 
 	mv := ui.NewMainView(orch, cfg, styles)
 	shell := ui.NewShell(orch, mv, cfg, styles, stop)
+	defer shell.Close()
 	mv.OnPersistError(func(err error) {
 		shell.ShowToast("View state", err)
 	})

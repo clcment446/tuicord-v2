@@ -40,7 +40,8 @@ type App struct {
 	forceRepaint bool
 	posts        []func()
 	wake         chan struct{}
-	rawWrites    chan []byte
+	rawWrites    [][]byte
+	rawStopped   bool
 	theme        Theme
 	escExits     int
 	mouseOn      bool
@@ -56,11 +57,10 @@ type App struct {
 // New returns an App with default runtime state.
 func New(opts ...Option) *App {
 	a := &App{
-		dirty:     true,
-		wake:      make(chan struct{}, 1),
-		rawWrites: make(chan []byte, 8),
-		escExits:  5,
-		mouseOn:   true,
+		dirty:    true,
+		wake:     make(chan struct{}, 1),
+		escExits: 5,
+		mouseOn:  true,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -99,18 +99,54 @@ func (a *App) Post(fn func()) {
 	a.signal()
 }
 
-// WriteRaw queues raw bytes to be written to the terminal between frame renders,
-// on the event-loop goroutine. It is the seam for terminal output produced
-// outside the widget tree — currently mpv's inline video graphics. Serializing
-// through the loop keeps these bytes from interleaving mid-escape with the cell
-// diff. It is safe to call from any goroutine and blocks only if the loop is
-// briefly behind.
+// WriteRaw queues one indivisible raw terminal command/transmission. It never
+// blocks a producer: when the small queue is full it drops the oldest complete
+// item, never a fragment, preserving Kitty command integrity. Calls after the
+// event loop shuts down are ignored.
 func (a *App) WriteRaw(b []byte) {
 	if a == nil || len(b) == 0 {
 		return
 	}
-	a.rawWrites <- b
+	command := append([]byte(nil), b...)
+	a.mu.Lock()
+	if a.rawStopped {
+		a.mu.Unlock()
+		return
+	}
+	const maxRawWrites = 8
+	if len(a.rawWrites) >= maxRawWrites {
+		copy(a.rawWrites, a.rawWrites[1:])
+		a.rawWrites[len(a.rawWrites)-1] = command
+	} else {
+		a.rawWrites = append(a.rawWrites, command)
+	}
+	a.mu.Unlock()
 	a.signal()
+}
+
+func (a *App) takeRaw() []byte {
+	a.mu.Lock()
+	if len(a.rawWrites) == 0 {
+		a.mu.Unlock()
+		return nil
+	}
+	b := a.rawWrites[0]
+	copy(a.rawWrites, a.rawWrites[1:])
+	a.rawWrites[len(a.rawWrites)-1] = nil
+	a.rawWrites = a.rawWrites[:len(a.rawWrites)-1]
+	more := len(a.rawWrites) > 0
+	a.mu.Unlock()
+	if more {
+		a.signal()
+	}
+	return b
+}
+
+func (a *App) stopRawWrites() {
+	a.mu.Lock()
+	a.rawStopped = true
+	a.rawWrites = nil
+	a.mu.Unlock()
 }
 
 // Invalidate marks the current frame dirty so the next event-loop turn redraws.
@@ -419,6 +455,7 @@ func (a *App) run(
 	resizes <-chan term.Size,
 	size Size,
 ) error {
+	defer a.stopRawWrites()
 	prev := (*screen.Buffer)(nil)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
@@ -467,13 +504,12 @@ func (a *App) run(
 	}
 	flushRaw := func(limit int) error {
 		for i := 0; i < limit; i++ {
-			select {
-			case b := <-a.rawWrites:
-				if err := writeAll(b); err != nil {
-					return err
-				}
-			default:
+			b := a.takeRaw()
+			if len(b) == 0 {
 				return nil
+			}
+			if err := writeAll(b); err != nil {
+				return err
 			}
 		}
 		return nil
@@ -520,13 +556,6 @@ func (a *App) run(
 			}
 			return ctx.Err()
 		case <-a.wake:
-		case b := <-a.rawWrites:
-			// Flush queued raw bytes (mpv video) after the current frame, draining
-			// the whole backlog so playback stays smooth without one render per
-			// chunk. These bytes place graphics the widget tree does not own.
-			if err := writeAll(b); err != nil {
-				return err
-			}
 		case <-ticker.C:
 			if a.Handle(input.TickEvent{}) {
 				a.Invalidate()

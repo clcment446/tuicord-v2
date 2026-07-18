@@ -43,6 +43,9 @@ type InlinePicker struct {
 	onSwitch         func(store.GuildID, store.ChannelID)
 	mediaFetcher     *media.Fetcher
 	mediaCfg         media.Config
+	mediaCtx         context.Context
+	mediaCancel      context.CancelFunc
+	mediaJobs        chan string
 	post             func(func())
 	media            map[string]*pickerMediaState
 	active           store.GuildID
@@ -268,25 +271,56 @@ func (p *InlinePicker) SetQueryChange(fn func(string))                    { p.on
 func (p *InlinePicker) SetTriggerDelete(fn func())                        { p.onTriggerDelete = fn }
 func (p *InlinePicker) SetSwitch(fn func(store.GuildID, store.ChannelID)) { p.onSwitch = fn }
 func (p *InlinePicker) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(func())) {
+	if p.mediaCancel != nil {
+		p.mediaCancel()
+	}
+	p.mediaCtx, p.mediaCancel = context.WithCancel(context.Background())
+	cfg = cfg.Bounded()
 	p.mediaFetcher, p.mediaCfg, p.post = fetcher, cfg, post
+	p.mediaJobs = make(chan string, cfg.QueuedFetches)
+	if fetcher != nil && post != nil && cfg.Enabled && cfg.EmojiImages {
+		for range cfg.ConcurrentFetches {
+			go p.mediaWorker(p.mediaCtx, p.mediaJobs)
+		}
+	}
 	if p.media == nil {
 		p.media = map[string]*pickerMediaState{}
 	}
 	p.refilter()
 }
+func (p *InlinePicker) Close() {
+	if p != nil && p.mediaCancel != nil {
+		p.mediaCancel()
+		p.mediaCancel = nil
+	}
+}
 func (p *InlinePicker) emojiImage(url string) image.Image {
-	if url == "" || !p.mediaCfg.Enabled || p.mediaFetcher == nil || p.post == nil {
+	if url == "" || !p.mediaCfg.Enabled || !p.mediaCfg.EmojiImages || p.mediaFetcher == nil || p.post == nil {
 		return nil
 	}
 	if state := p.media[url]; state != nil {
 		return state.img
 	}
 	p.media[url] = &pickerMediaState{loading: true}
-	go func() {
-		img, _ := p.mediaFetcher.Fetch(context.Background(), url)
-		p.post(func() { p.media[url] = &pickerMediaState{img: img}; p.refilter() })
-	}()
+	select {
+	case p.mediaJobs <- url:
+	default:
+		delete(p.media, url)
+	}
 	return nil
+}
+func (p *InlinePicker) mediaWorker(ctx context.Context, jobs <-chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case url := <-jobs:
+			img, _ := p.mediaFetcher.Fetch(ctx, url)
+			if ctx.Err() == nil {
+				p.post(func() { p.media[url] = &pickerMediaState{img: img}; p.refilter() })
+			}
+		}
+	}
 }
 func (p *InlinePicker) Children() []tui.Widget          { return []tui.Widget{p.body} }
 func (p *InlinePicker) Measure(avail tui.Size) tui.Size { return p.body.Measure(avail) }
