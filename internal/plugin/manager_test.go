@@ -1,9 +1,12 @@
 package plugin
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -267,6 +270,83 @@ func TestFSAbsentWithoutGrant(t *testing.T) {
 	m.Emit(EventReady, nil)
 	if got := recv2(t, c.notify); got != [2]string{"fs", "absent"} {
 		t.Fatalf("expected fs absent, got %v", got)
+	}
+}
+
+func TestFSEmptyDataDirDisablesGrantedAPI(t *testing.T) {
+	dir := writePlugin(t, "empty", `
+		tuicord.on("ready", function()
+			if tuicord.fs == nil then
+				tuicord.notify("fs", "disabled")
+			else
+				tuicord.notify("fs", "exposed")
+			end
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:    dir,
+		Host:   h,
+		Grants: map[string][]string{"empty": {CapFS}},
+		// DataDir is intentionally empty: a grant must not turn it into / or .
+	})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Emit(EventReady, nil)
+	if got := recv2(t, c.notify); got != [2]string{"fs", "disabled"} {
+		t.Fatalf("empty DataDir exposed filesystem API: %v", got)
+	}
+}
+
+func TestFSRejectsAbsoluteTraversalAndSymlinkEscapes(t *testing.T) {
+	dataDir := t.TempDir()
+	pluginDir := filepath.Join(dataDir, "store")
+	outside := t.TempDir()
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(pluginDir, "link")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	body := fmt.Sprintf(`
+		tuicord.on("ready", function()
+			assert(not tuicord.fs.write("../traversal.txt", "bad"))
+			assert(not tuicord.fs.write(%q, "bad"))
+			assert(not tuicord.fs.write("link/symlink.txt", "bad"))
+			local value = tuicord.fs.read("link/secret.txt")
+			assert(value == nil)
+			tuicord.notify("fs", "confined")
+		end)
+	`, filepath.Join(outside, "absolute.txt"))
+	dir := writePlugin(t, "store", body)
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:     dir,
+		DataDir: dataDir,
+		Host:    h,
+		Grants:  map[string][]string{"store": {CapFS}},
+	})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Emit(EventReady, nil)
+	if got := recv2(t, c.notify); got != [2]string{"fs", "confined"} {
+		t.Fatalf("filesystem escape check did not finish: %v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "traversal.txt")); !os.IsNotExist(err) {
+		t.Fatalf("parent traversal created a file: %v", err)
+	}
+	for _, name := range []string{"absolute.txt", "symlink.txt"} {
+		if _, err := os.Stat(filepath.Join(outside, name)); !os.IsNotExist(err) {
+			t.Fatalf("filesystem escape created %s: %v", name, err)
+		}
 	}
 }
 
@@ -568,5 +648,137 @@ func TestMissingDirIsNoError(t *testing.T) {
 	defer m.Close()
 	if errs := m.Load(); len(errs) != 0 {
 		t.Fatalf("missing dir should not error: %v", errs)
+	}
+}
+
+func TestInfiniteStartupIsBounded(t *testing.T) {
+	dir := writePlugin(t, "startup", `
+		tuicord.command("stale", function() end)
+		tuicord.on("stale", function() end)
+		while true do end
+	`)
+	m := NewManager(Options{
+		Dir:            dir,
+		StartupTimeout: 50 * time.Millisecond,
+	})
+	defer m.Close()
+	started := time.Now()
+	errs := m.Load()
+	if len(errs) != 1 {
+		t.Fatalf("infinite startup errors = %v, want one deadline error", errs)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("infinite startup took %v", elapsed)
+	}
+	if m.RunCommand("stale", nil) {
+		t.Fatal("failed startup left a callback to a closed state registered")
+	}
+	m.Emit("stale", nil)
+}
+
+func TestInfiniteCallbackTimesOutAndWorkerContinues(t *testing.T) {
+	dir := writePlugin(t, "loop", `
+		tuicord.on("loop", function()
+			tuicord.notify("loop", "started")
+			while true do end
+		end)
+		tuicord.command("after", function()
+			tuicord.notify("after", "ran")
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:             dir,
+		Host:            h,
+		CallbackTimeout: 50 * time.Millisecond,
+	})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Emit("loop", nil)
+	if got := recv2(t, c.notify); got != [2]string{"loop", "started"} {
+		t.Fatalf("callback did not start: %v", got)
+	}
+	if got := recv2(t, c.notify); got[0] != "Plugin error: loop" {
+		t.Fatalf("infinite callback did not report timeout: %v", got)
+	}
+	if !m.RunCommand("after", nil) {
+		t.Fatal("post-timeout command was not registered")
+	}
+	if got := recv2(t, c.notify); got != [2]string{"after", "ran"} {
+		t.Fatalf("worker did not continue after callback timeout: %v", got)
+	}
+}
+
+func TestCloseCancelsInfiniteCallbackAndIsBounded(t *testing.T) {
+	dir := writePlugin(t, "loop", `
+		tuicord.on("loop", function()
+			tuicord.notify("loop", "started")
+			while true do end
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir:             dir,
+		Host:            h,
+		CallbackTimeout: time.Minute,
+	})
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+	m.Emit("loop", nil)
+	if got := recv2(t, c.notify); got != [2]string{"loop", "started"} {
+		t.Fatalf("callback did not start: %v", got)
+	}
+	started := time.Now()
+	m.Close()
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Close waited %v for infinite callback", elapsed)
+	}
+}
+
+func TestConcurrentEmitAndClose(t *testing.T) {
+	dir := writePlugin(t, "events", `tuicord.on("event", function() end)`)
+	var log bytes.Buffer
+	m := NewManager(Options{Dir: dir, QueueSize: 1, Log: &log})
+	if errs := m.Load(); len(errs) != 0 {
+		t.Fatalf("load errors: %v", errs)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 500 {
+				m.Emit("event", nil)
+			}
+		}()
+	}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		m.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		m.Close()
+	}()
+	close(start)
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("concurrent Emit/Close did not finish")
 	}
 }

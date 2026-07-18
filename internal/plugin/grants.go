@@ -3,7 +3,6 @@ package plugin
 import (
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,7 +20,9 @@ const (
 // the user granted this plugin. Ungranted capabilities are simply absent, so a
 // plugin calling tuicord.fs without the grant gets a clean "nil value" error.
 func installGrants(L *lua.LState, tbl *lua.LTable, pctx *pluginContext) {
-	if pctx.grants[CapFS] {
+	// A grant alone is insufficient: an empty DataDir deliberately leaves
+	// fsRoot nil and therefore exposes no filesystem API.
+	if pctx.grants[CapFS] && pctx.fsRoot != nil {
 		tbl.RawSetString("fs", newFSTable(L, pctx))
 	}
 	if pctx.grants[CapNet] {
@@ -29,30 +30,14 @@ func installGrants(L *lua.LState, tbl *lua.LTable, pctx *pluginContext) {
 	}
 }
 
-// newFSTable exposes read/write/list confined to the plugin's own data
-// directory. Paths are resolved under dataDir and any attempt to escape it
-// (via .. or an absolute path) fails, so the grant cannot reach the wider
-// filesystem.
+// newFSTable exposes read/write/list through os.Root. Root rejects absolute
+// names, parent traversal, and symlinks that resolve outside the plugin's data
+// directory, including path-swap races between validation and use.
 func newFSTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
 	fs := L.NewTable()
 
-	resolve := func(rel string) (string, bool) {
-		clean := filepath.Clean("/" + rel) // force relative, collapse ..
-		full := filepath.Join(pctx.dataDir, clean)
-		if full != pctx.dataDir && !strings.HasPrefix(full, pctx.dataDir+string(os.PathSeparator)) {
-			return "", false
-		}
-		return full, true
-	}
-
 	fs.RawSetString("read", L.NewFunction(func(L *lua.LState) int {
-		path, ok := resolve(L.CheckString(1))
-		if !ok {
-			L.Push(lua.LNil)
-			L.Push(lua.LString("path escapes plugin data dir"))
-			return 2
-		}
-		data, err := os.ReadFile(path)
+		data, err := pctx.fsRoot.ReadFile(L.CheckString(1))
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
@@ -63,18 +48,13 @@ func newFSTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
 	}))
 
 	fs.RawSetString("write", L.NewFunction(func(L *lua.LState) int {
-		path, ok := resolve(L.CheckString(1))
-		if !ok {
-			L.Push(lua.LFalse)
-			L.Push(lua.LString("path escapes plugin data dir"))
-			return 2
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		name := L.CheckString(1)
+		if err := pctx.fsRoot.MkdirAll(filepath.Dir(name), 0o755); err != nil {
 			L.Push(lua.LFalse)
 			L.Push(lua.LString(err.Error()))
 			return 2
 		}
-		if err := os.WriteFile(path, []byte(L.CheckString(2)), 0o644); err != nil {
+		if err := pctx.fsRoot.WriteFile(name, []byte(L.CheckString(2)), 0o644); err != nil {
 			L.Push(lua.LFalse)
 			L.Push(lua.LString(err.Error()))
 			return 2
@@ -84,7 +64,19 @@ func newFSTable(L *lua.LState, pctx *pluginContext) *lua.LTable {
 	}))
 
 	fs.RawSetString("list", L.NewFunction(func(L *lua.LState) int {
-		entries, err := os.ReadDir(pctx.dataDir)
+		rootDir, err := pctx.fsRoot.Open(".")
+		if err != nil {
+			L.Push(lua.LNil)
+			L.Push(lua.LString(err.Error()))
+			return 2
+		}
+		entries, readErr := rootDir.ReadDir(-1)
+		closeErr := rootDir.Close()
+		if readErr != nil {
+			err = readErr
+		} else if closeErr != nil {
+			err = closeErr
+		}
 		if err != nil {
 			L.Push(lua.LNil)
 			L.Push(lua.LString(err.Error()))
