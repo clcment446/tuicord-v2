@@ -24,6 +24,12 @@ clipboard.go. It lists advertised MIME types and picks png>jpeg>gif>webp>bmp
   command, both calling `Shell.pasteImage`. `ctrl+v` is safe as a default
   because terminals' own text paste is `ctrl+shift+v`, which still flows through
   bracketed paste → the composer.
+- **Global shortcuts while typing:** the focused widget gets keys first
+  (`tui.App.handleFocused` → focused.Handle, only bubbling to root Shell on
+  false). `widget.TextInput` used to insert *any* rune, so `ctrl+v` typed a
+  literal "v" (and `ctrl+e`/`ctrl+k` were swallowed) instead of reaching the
+  Shell's global switch. Fixed: TextInput declines Ctrl/Super-modified runes
+  (returns false) so they bubble; Alt is left alone for AltGr-composed chars.
 - **Staging:** `MainView.StageTempImage(path, filename, size)` queues a
   `queuedAttachment{temp: true}`. The pasted bytes are written to an
   `os.CreateTemp` file; `clearAttachments` deletes temp files (on send and on
