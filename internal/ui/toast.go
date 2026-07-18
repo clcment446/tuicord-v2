@@ -10,6 +10,8 @@ import (
 	"awesomeProject/internal/tui/tui"
 )
 
+const notificationTTL = 7 * time.Second
+
 const (
 	toastWidth     = 44
 	toastCollapsed = 4
@@ -17,11 +19,13 @@ const (
 
 // Toast is a transient popup for recoverable errors.
 type Toast struct {
-	title     string
-	detail    string
-	styles    Styles
-	expanded  bool
-	expiresAt time.Time // zero means it stays until dismissed
+	title      string
+	detail     string
+	styles     Styles
+	expanded   bool
+	expiresAt  time.Time
+	onActivate func()
+	bounds     screen.Rect
 }
 
 func NewToast(title, detail string, styles Styles) *Toast {
@@ -40,7 +44,17 @@ func (t *Toast) SetTTL(d time.Duration) *Toast {
 
 // expired reports whether the toast's auto-dismiss deadline has passed.
 func (t *Toast) expired(now time.Time) bool {
-	return t != nil && !t.expanded && !t.expiresAt.IsZero() && now.After(t.expiresAt)
+	return t != nil && !t.expanded && !t.expiresAt.IsZero() && !now.Before(t.expiresAt)
+}
+
+func newExpiringToast(title, detail string, styles Styles, now time.Time) *Toast {
+	toast := NewToast(title, detail, styles)
+	toast.expiresAt = now.Add(notificationTTL)
+	return toast
+}
+
+func (t *Toast) Expired(now time.Time) bool {
+	return t != nil && t.expired(now)
 }
 
 func (t *Toast) Expanded() bool {
@@ -70,6 +84,10 @@ func (t *Toast) Handle(ev tui.Event) bool {
 		case ev.Key == input.KeyEsc:
 			return true
 		case ev.Key == input.KeyEnter:
+			if t.onActivate != nil {
+				t.onActivate()
+				return true
+			}
 			t.Toggle()
 			return true
 		case ev.Key == input.KeyRune && (ev.Rune == ' ' || ev.Rune == 'e'):
@@ -78,15 +96,21 @@ func (t *Toast) Handle(ev tui.Event) bool {
 		case ev.Key == input.KeyRune && (ev.Rune == 'x' || ev.Rune == 'd'):
 			return true
 		}
-		return true
+		return ev.Key == input.KeyEsc || ev.Key == input.KeyEnter ||
+			(ev.Key == input.KeyRune && (ev.Rune == ' ' || ev.Rune == 'e' || ev.Rune == 'x' || ev.Rune == 'd'))
 	case input.MouseEvent:
-		if ev.Kind == input.MousePress && ev.Btn == input.ButtonLeft {
-			t.Toggle()
+		if ev.Kind != input.MousePress || t.onActivate == nil || !t.contains(ev.X, ev.Y) {
+			return false
 		}
+		t.onActivate()
 		return true
 	default:
-		return true
+		return false
 	}
+}
+
+func (t *Toast) contains(x, y int) bool {
+	return t != nil && x >= t.bounds.X && y >= t.bounds.Y && x < t.bounds.X+t.bounds.W && y < t.bounds.Y+t.bounds.H
 }
 
 func (t *Toast) wantsDismiss(ev tui.Event) bool {
@@ -96,9 +120,10 @@ func (t *Toast) wantsDismiss(ev tui.Event) bool {
 			return false
 		}
 		return ev.Key == input.KeyEsc ||
+			(ev.Key == input.KeyEnter && t.onActivate != nil) ||
 			(ev.Key == input.KeyRune && (ev.Rune == 'x' || ev.Rune == 'd'))
 	case input.MouseEvent:
-		return ev.Kind == input.MousePress && (ev.Btn == input.ButtonRight || ev.Btn == input.ButtonMiddle)
+		return ev.Kind == input.MousePress && t.onActivate != nil && t.contains(ev.X, ev.Y)
 	default:
 		return false
 	}
@@ -112,6 +137,14 @@ func (t *Toast) Draw(r screen.Region) {
 	height := t.height(width, r.Height())
 	x0 := max(r.Width()-width-1, 0)
 	y0 := max(r.Height()-height-1, 0)
+	t.drawAt(r, x0, y0, width, height)
+}
+
+func (t *Toast) drawAt(r screen.Region, x0, y0, width, height int) {
+	if t == nil || width <= 0 || height <= 0 {
+		return
+	}
+	t.bounds = screen.Rect{X: x0, Y: y0, W: width, H: height}
 
 	style := t.styles.Cell("toast")
 	if !style.Bg.Set() {

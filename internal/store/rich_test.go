@@ -271,6 +271,21 @@ func TestMemberColor_MemberWithNoRoles(t *testing.T) {
 	}
 }
 
+func TestMemberDisplayRoleReturnsHighestGradientRole(t *testing.T) {
+	s := New(0)
+	s.UpsertMember(1, Member{ID: 10, RoleIDs: []RoleID{100, 200}})
+	s.UpsertRole(1, Role{ID: 100, Position: 5, Color: 0xABCDEF})
+	s.UpsertRole(1, Role{ID: 200, Position: 10, Colors: [3]uint32{0xFF0000, 0x0000FF}})
+
+	role, ok := s.MemberDisplayRole(1, 10)
+	if !ok {
+		t.Fatal("MemberDisplayRole returned no role")
+	}
+	if role.ID != 200 {
+		t.Fatalf("role ID = %d, want 200", role.ID)
+	}
+}
+
 // ── LerpColor ────────────────────────────────────────────────────────────────
 
 func TestLerpColor(t *testing.T) {
