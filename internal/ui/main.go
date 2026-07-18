@@ -51,6 +51,10 @@ type MainView struct {
 	composerBorder   *widget.Border
 	composerStatus   *widget.Text
 	composerFiles    *widget.Text
+	composerPreview  *widget.Node
+	composerNode     *layout.Node
+	previewCellW     int
+	previewCellH     int
 	composer         *widget.TextInput
 	attachments      []queuedAttachment
 	composerMode     composerMode
@@ -138,6 +142,13 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.composerFiles.SetStyle(styles.Cell("messages.attachment"))
 	mv.composerFiles.SetWrap(true)
 
+	// Inline image thumbnails render above the composer; size them against the
+	// terminal's cell pixel geometry so Kitty graphics are crisp.
+	mv.previewCellW, mv.previewCellH = chatMediaConfig().CellPixels()
+	mv.composerPreview = widget.Column()
+	mv.composerPreview.Layout().Grow = 0
+	mv.composerPreview.Layout().Hidden = true
+
 	mv.composer = widget.NewTextInput("Message")
 	mv.composer.SetPreferredFocus(!cfg.Accessibility.VimNavigation)
 	mv.composer.SetInputFocusEnabled(!cfg.Accessibility.VimNavigation)
@@ -162,13 +173,15 @@ func (mv *MainView) compose() tui.Widget {
 	channels := mv.titled("Channels", mv.channelList)
 	members := mv.titled("Members", mv.memberList)
 
-	composerArea := widget.Column(mv.composerStatus, mv.composerFiles, mv.composer)
+	// Order: status, image thumbnails, filename chips, then the input — so a
+	// pasted image previews above its caption and the text field.
+	composerArea := widget.Column(mv.composerStatus, mv.composerPreview, mv.composerFiles, mv.composer)
 	composerArea.Children()[0].Layout().Basis = 1
 	composerArea.Children()[0].Layout().Grow = 0
-	composerArea.Children()[1].Layout().Basis = 1
-	composerArea.Children()[1].Layout().Grow = 0
-	composerArea.Children()[2].Layout().Basis = 4
+	composerArea.Children()[2].Layout().Basis = 1
 	composerArea.Children()[2].Layout().Grow = 0
+	composerArea.Children()[3].Layout().Basis = 4
+	composerArea.Children()[3].Layout().Grow = 0
 
 	mv.chatBorder = mv.titled("Messages", mv.chat)
 	mv.composerBorder = mv.titled("Composer", composerArea)
@@ -180,8 +193,9 @@ func (mv *MainView) compose() tui.Widget {
 	// a compact attachment-chip line.
 	chatColumn.Children()[0].Layout().Grow = 1
 	composerNode := chatColumn.Children()[1].Layout()
-	composerNode.Basis = 8
+	composerNode.Basis = composerBaseBasis
 	composerNode.Grow = 0
+	mv.composerNode = composerNode
 	mv.cfg.Layout.Element("messages").Apply(mv.chatBorder.Layout(), layout.Column)
 	mv.cfg.Layout.Element("composer").Apply(mv.composerBorder.Layout(), layout.Column)
 
@@ -1084,6 +1098,7 @@ func (mv *MainView) updateAttachmentChips() {
 		chips = append(chips, attachment.meta.Filename+" ("+formatAttachmentSize(attachment.meta.Size)+")")
 	}
 	mv.composerFiles.SetContent(strings.Join(chips, " · "))
+	mv.updateComposerPreview()
 }
 
 func formatAttachmentSize(size int64) string {

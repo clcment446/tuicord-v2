@@ -39,11 +39,16 @@ clipboard.go. It lists advertised MIME types and picks png>jpeg>gif>webp>bmp
   (what terminals emit when the clipboard holds an image and the user hits
   ctrl+shift+v — no text target) triggers a quiet image-paste attempt in
   `Shell.Handle`. Real image-less empty pastes are no-ops.
-- **Preview:** `Shell.openAttachmentPreview` decodes staged image attachments
-  (`media.Decode` + `media.Downscale`) and shows them in an overlay via
-  `widget.NewKittyImageFrom` — the same Kitty path (with cell fallback) as inline
-  chat media (chatview.go:456). Opens automatically after a paste and via
-  `;preview`.
+- **Preview (inline, crisp):** staged image attachments render as thumbnails
+  *above the composer* via the `imagePreview` widget
+  (internal/ui/composer_preview.go), rebuilt in `updateAttachmentChips`. It
+  mirrors the chat's inline media: upload the full-res image with
+  `NewKittyImageFrom` + `SetPixelSize`, downscaled to the exact display pixel
+  budget (`cols*cellPxW × rows*cellPxH`) so the terminal renders it 1:1 — the
+  earlier overlay downscaled to ~60px then let Kitty upscale it, which was
+  blurry. `composerNode.Basis` grows by the preview height (capped) while images
+  are staged. Crispness rule: feed high-res pixels + SetPixelSize and let the
+  terminal fit them into the cell footprint; never pre-shrink then upscale.
 - **Live E2E:** `TestReadClipboardImageRoundTrip` (term, gated by
   `TUICORD_CLIP_E2E=1`) wl-copies a PNG and reads it back byte-identical.
 
