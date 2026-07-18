@@ -50,6 +50,8 @@ type ChatView struct {
 	focusedExplicit         bool
 	keyboardFocused         bool
 	vimNavigation           bool
+	vimPendingG             bool
+	vimStickOldest          bool
 	mouseBreakpointTracking bool
 	highlightFocusBlock     bool
 	focusKey                string
@@ -1021,6 +1023,11 @@ func (w *ChatView) Draw(r screen.Region) {
 		w.bottomScroll.Update(len(lines), r.Height())
 	}
 	w.buildFocusIndex(lines, r.Height())
+	if w.lastMessageChannel != 0 && channel != w.lastMessageChannel {
+		w.vimPendingG = false
+		w.vimStickOldest = false
+	}
+	w.applyVimBoundaryFocus()
 	w.lastMessageChannel = channel
 	w.lastFirstMessage = firstMessage
 	w.lastLastMessage = lastMessage
@@ -2189,8 +2196,27 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				return true
 			}
 		}
-		if ev.Key == input.KeyRune && w.vimNavigation {
+		vimRune := ev.Key == input.KeyRune && ev.Mods&(input.Ctrl|input.Alt|input.Super) == 0
+		if w.vimNavigation && !vimRune {
+			w.vimPendingG = false
+			w.vimStickOldest = false
+		}
+		if vimRune && w.vimNavigation {
+			if ev.Rune == 'g' {
+				if w.vimPendingG {
+					w.vimPendingG = false
+					w.scrollToOldest()
+					return true
+				}
+				w.vimPendingG = true
+				return true
+			}
+			w.vimPendingG = false
+			w.vimStickOldest = false
 			switch ev.Rune {
+			case 'G':
+				w.scrollToNewest()
+				return true
 			case 'V':
 				if !w.keyboardFocused || w.focusStopIndex < 0 {
 					return false
@@ -2756,6 +2782,7 @@ func (w *ChatView) TakeComponentAction() (ComponentAction, bool) {
 }
 
 func (w *ChatView) scrollUp() {
+	w.vimStickOldest = false
 	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + 1)
 	if w.onReachTop != nil {
 		w.onReachTop()
@@ -2832,6 +2859,7 @@ func (w *ChatView) moveComponent(delta int) bool {
 }
 
 func (w *ChatView) pageUp() {
+	w.vimStickOldest = false
 	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + max(w.viewportHeight, 1))
 	if w.onReachTop != nil {
 		w.onReachTop()
@@ -2839,11 +2867,49 @@ func (w *ChatView) pageUp() {
 }
 
 func (w *ChatView) pageDown() {
+	w.vimStickOldest = false
 	w.bottomScroll.SetOffset(max(w.bottomScroll.Offset()-max(w.viewportHeight, 1), 0))
 }
 
 func (w *ChatView) scrollDown() {
+	w.vimStickOldest = false
 	if w.bottomScroll.Offset() > 0 {
 		w.bottomScroll.SetOffset(w.bottomScroll.Offset() - 1)
+	}
+}
+
+// scrollToOldest implements Vim's gg motion for the loaded transcript. Asking
+// for older history at the boundary lets a subsequent gg continue toward the
+// channel's true beginning when pagination has more messages available.
+func (w *ChatView) scrollToOldest() {
+	w.vimStickOldest = true
+	w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight, 0))
+	if len(w.focusStops) > 0 {
+		w.setFocusStop(0)
+	}
+	if w.onReachTop != nil {
+		w.onReachTop()
+	}
+}
+
+// scrollToNewest implements Vim's G motion.
+func (w *ChatView) scrollToNewest() {
+	w.vimStickOldest = false
+	w.bottomScroll.SetOffset(0)
+	if len(w.focusStops) > 0 {
+		w.setFocusStop(len(w.focusStops) - 1)
+	}
+}
+
+// applyVimBoundaryFocus keeps gg anchored to the true oldest loaded message
+// when an asynchronous history page is prepended after the key sequence. It
+// also moves the keyboard focus with the viewport, matching Vim's gg motion.
+func (w *ChatView) applyVimBoundaryFocus() {
+	if w == nil || !w.vimStickOldest {
+		return
+	}
+	w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight, 0))
+	if len(w.focusStops) > 0 && w.focusStopIndex != 0 {
+		w.setFocusStop(0)
 	}
 }

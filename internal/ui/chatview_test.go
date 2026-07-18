@@ -764,6 +764,100 @@ func TestChatViewPageKeysScrollByViewport(t *testing.T) {
 	}
 }
 
+func TestChatViewVimGGAndGJumpToTranscriptBounds(t *testing.T) {
+	st := store.New(0)
+	for i := 0; i < 10; i++ {
+		st.AppendMessage(store.Message{ID: store.MessageID(i + 11), ChannelID: 1, Author: "alice", Content: "line"})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	reachedTop := 0
+	view.OnReachTop(func() { reachedTop++ })
+	buf := screen.NewBuffer(20, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'}) ||
+		!view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'}) {
+		t.Fatal("gg was not handled")
+	}
+	wantOldest := max(view.renderLineCount-view.viewportHeight, 0)
+	if got := view.bottomScroll.Offset(); got != wantOldest {
+		t.Fatalf("gg offset = %d, want oldest offset %d", got, wantOldest)
+	}
+	if reachedTop != 1 {
+		t.Fatalf("gg top callbacks = %d, want 1", reachedTop)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 11 {
+		t.Fatalf("gg focused message = %d, want oldest loaded message 11", view.focusedMessage.ID)
+	}
+
+	older := make([]store.Message, 10)
+	for i := range older {
+		older[i] = store.Message{ID: store.MessageID(i + 1), ChannelID: 1, Author: "alice", Content: "older"}
+	}
+	st.PrependMessages(1, older)
+	view.Draw(buf.Clip(buf.Bounds()))
+	wantPrependedOldest := max(view.renderLineCount-view.viewportHeight, 0)
+	if got := view.bottomScroll.Offset(); got != wantPrependedOldest {
+		t.Fatalf("gg offset after prepend = %d, want oldest offset %d", got, wantPrependedOldest)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 1 {
+		t.Fatalf("gg focused message after prepend = %d, want 1", view.focusedMessage.ID)
+	}
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'G', Mods: input.Shift}) {
+		t.Fatal("G was not handled")
+	}
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("G offset = %d, want newest offset 0", got)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 20 {
+		t.Fatalf("G focused message = %d, want newest message 20", view.focusedMessage.ID)
+	}
+}
+
+func TestChatViewVimGReturnsToNewestAfterBoundedHistoryPrepend(t *testing.T) {
+	st := store.New(6)
+	for id := store.MessageID(101); id <= 106; id++ {
+		st.AppendMessage(store.Message{ID: id, ChannelID: 1, Author: "alice", Content: "recent"})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	buf := screen.NewBuffer(20, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+	view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'})
+	view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'})
+
+	older := make([]store.Message, 6)
+	for i := range older {
+		older[i] = store.Message{ID: store.MessageID(95 + i), ChannelID: 1, Author: "alice", Content: "older"}
+	}
+	st.PrependMessages(1, older)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'G', Mods: input.Shift}) {
+		t.Fatal("G was not handled after history prepend")
+	}
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("G offset = %d, want newest offset 0", got)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 106 {
+		t.Fatalf("G focused message = %d, want retained newest message 106", view.focusedMessage.ID)
+	}
+}
+
+func TestChatViewVimGPrefixResetsAfterOtherMotion(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+
+	view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'})
+	view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'})
+	view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'g'})
+	if !view.vimPendingG {
+		t.Fatal("g after another motion should begin a new gg sequence")
+	}
+}
+
 func TestChatViewEscapeKeepsNewestRowVisibleWithStickyAuthor(t *testing.T) {
 	st := store.New(0)
 	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general"})
