@@ -961,7 +961,7 @@ func TestLoadOlderHistoryAtCapacityPreservesLiveArrivalAndAdvancesWindow(t *test
 	ui.runNext(t)
 
 	got := messageStoreIDs(a.store.Messages(42))
-	want := []store.MessageID{1, 2, 3, 9}
+	want := []store.MessageID{1, 7, 8, 9}
 	if !slices.Equal(got, want) {
 		t.Fatalf("history IDs = %v, want %v (older progress plus live tail)", got, want)
 	}

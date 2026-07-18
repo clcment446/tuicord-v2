@@ -743,18 +743,39 @@ func (s *Store) PrependMessagesSince(channel ChannelID, messages []Message, requ
 		return
 	}
 
-	// Reserve every post-request mutation, then spend the remaining capacity
-	// from the oldest edge: fetched page first, followed by the oldest part of
-	// the pre-request window. This guarantees pagination progress.
-	available := s.historyLimit - protected
-	bounded := make([]Message, 0, s.historyLimit)
-	for _, message := range combined {
-		keep := message.Pending || message.Failed || message.rev > requestRevision
-		if !keep && available > 0 {
-			keep = true
-			available--
+	// A paged transcript needs both ends of its bounded window: the oldest edge
+	// for continued pagination and the newest edge so Vim G / returning to the
+	// live conversation never lands on messages evicted merely by scrolling up.
+	// Post-request mutations are always protected. Of the remaining capacity,
+	// reserve up to half for the newest messages and at least one slot for an
+	// older page so pagination still makes progress.
+	keep := make([]bool, len(combined))
+	kept := 0
+	for i, message := range combined {
+		if message.Pending || message.Failed || message.rev > requestRevision {
+			keep[i] = true
+			kept++
 		}
-		if keep {
+	}
+	recentBudget := min((s.historyLimit+1)/2, max(s.historyLimit-kept-1, 0))
+	for i := len(combined) - 1; i >= 0 && recentBudget > 0; i-- {
+		if keep[i] {
+			continue
+		}
+		keep[i] = true
+		kept++
+		recentBudget--
+	}
+	for i := 0; i < len(combined) && kept < s.historyLimit; i++ {
+		if keep[i] {
+			continue
+		}
+		keep[i] = true
+		kept++
+	}
+	bounded := make([]Message, 0, kept)
+	for i, message := range combined {
+		if keep[i] {
 			bounded = append(bounded, message)
 		}
 	}

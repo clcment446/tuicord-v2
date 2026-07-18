@@ -27,6 +27,7 @@ func NewHelpOverlay(cfg config.Config) tui.Widget {
 	if cfg.Accessibility.VimNavigation {
 		lines = append(lines,
 			[2]string{"j / k", "Scroll down/up"},
+			[2]string{"gg / G", "Jump to oldest/newest messages"},
 			[2]string{"J / K", "Move down/up between message stops"},
 			[2]string{"h / l", "Previous/next component or panel"},
 			[2]string{"H / L", "Previous/next panel"},

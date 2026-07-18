@@ -1,6 +1,9 @@
 package store
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestGuildsPreserveFirstSeenOrder(t *testing.T) {
 	s := New(0)
@@ -206,15 +209,15 @@ func TestPrependMessagesKeepsOlderHistoryFirst(t *testing.T) {
 	}
 }
 
-func TestPrependMessagesAtCapacityRetainsFetchedOlderPage(t *testing.T) {
+func TestPrependMessagesAtCapacityRetainsOlderAndNewestEdges(t *testing.T) {
 	s := New(4)
 	s.SetMessages(7, []Message{{ID: 5}, {ID: 6}, {ID: 7}, {ID: 8}})
 
 	s.PrependMessages(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}})
 
 	got := s.Messages(7)
-	if ids := messageIDs(got); len(ids) != 4 || ids[0] != 1 || ids[1] != 2 || ids[2] != 3 || ids[3] != 4 {
-		t.Fatalf("messages = %v, want fetched IDs [1 2 3 4]", ids)
+	if ids := messageIDs(got); len(ids) != 4 || ids[0] != 1 || ids[1] != 2 || ids[2] != 7 || ids[3] != 8 {
+		t.Fatalf("messages = %v, want oldest/newest edges [1 2 7 8]", ids)
 	}
 }
 
@@ -227,7 +230,7 @@ func TestPrependMessagesSinceRetainsPostRequestArrivalAtCapacity(t *testing.T) {
 	s.PrependMessagesSince(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}}, requestRevision)
 
 	got := messageIDs(s.Messages(7))
-	want := []MessageID{1, 2, 3, 9}
+	want := []MessageID{1, 7, 8, 9}
 	if len(got) != len(want) {
 		t.Fatalf("messages = %v, want %v", got, want)
 	}
@@ -286,7 +289,7 @@ func TestPrependMessagesDeduplicatesOverlapAndPreservesOrderAtCapacity(t *testin
 	s.PrependMessages(7, []Message{{ID: 1}, {ID: 2}, {ID: 3}, {ID: 4}, {ID: 4}})
 
 	got := messageIDs(s.Messages(7))
-	want := []MessageID{1, 2, 3, 4, 5}
+	want := []MessageID{1, 2, 6, 7, 8}
 	if len(got) != len(want) {
 		t.Fatalf("messages = %v, want %v", got, want)
 	}
@@ -294,6 +297,21 @@ func TestPrependMessagesDeduplicatesOverlapAndPreservesOrderAtCapacity(t *testin
 		if got[i] != want[i] {
 			t.Fatalf("messages = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestRepeatedPrependPreservesNewestMessages(t *testing.T) {
+	s := New(6)
+	s.SetMessages(7, []Message{{ID: 101}, {ID: 102}, {ID: 103}, {ID: 104}, {ID: 105}, {ID: 106}})
+
+	s.PrependMessages(7, []Message{{ID: 95}, {ID: 96}, {ID: 97}, {ID: 98}, {ID: 99}, {ID: 100}})
+	if got, want := messageIDs(s.Messages(7)), []MessageID{95, 96, 97, 104, 105, 106}; !slices.Equal(got, want) {
+		t.Fatalf("first prepend = %v, want %v", got, want)
+	}
+
+	s.PrependMessages(7, []Message{{ID: 89}, {ID: 90}, {ID: 91}, {ID: 92}, {ID: 93}, {ID: 94}})
+	if got, want := messageIDs(s.Messages(7)), []MessageID{89, 90, 91, 104, 105, 106}; !slices.Equal(got, want) {
+		t.Fatalf("second prepend = %v, want %v", got, want)
 	}
 }
 
