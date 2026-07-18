@@ -21,6 +21,7 @@ require (
 	github.com/danieljoos/wincred v1.2.3 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/gorilla/schema v1.4.1 // indirect
+	github.com/yuin/gopher-lua v1.1.2 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
 

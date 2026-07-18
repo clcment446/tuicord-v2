@@ -138,6 +138,21 @@ func parseAttr(name string) (screen.Attr, error) {
 	}
 }
 
+// SetProperty applies a single color property to a selector at runtime, reusing
+// the same parsing as colors.conf. property is one of fg/bg/attrs or a boolean
+// attribute name (bold, italic, ...); value is a hex color, an attr list, or a
+// boolean. It is the entry point plugins use via tuicord.style. Not safe for
+// concurrent use: callers mutate on the UI goroutine, where styles are read.
+func (o *ColorOverrides) SetProperty(selector, property, value string) error {
+	if o == nil {
+		return fmt.Errorf("nil color overrides")
+	}
+	if o.Rules == nil {
+		o.Rules = make(map[string]ColorRule)
+	}
+	return o.set(selector+"."+property, value)
+}
+
 // Resolve returns the most specific matching rule. A * matches one selector
 // segment; exact rules win over wildcard rules independently per attribute.
 func (o *ColorOverrides) Resolve(selector string) ColorRule {
