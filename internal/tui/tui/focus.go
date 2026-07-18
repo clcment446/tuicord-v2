@@ -2,6 +2,8 @@ package tui
 
 import "reflect"
 
+const focusHistoryLimit = 128
+
 // FocusManager owns the ordered keyboard focus ring.
 //
 // It is a pure state holder: callers decide when to rebuild the ring and how
@@ -29,6 +31,7 @@ func (f *FocusManager) Register(w Widget) {
 	f.ring = append(f.ring, w)
 	if len(f.ring) == 1 {
 		f.current = 0
+		f.recordVisit(w)
 	}
 }
 
@@ -39,6 +42,7 @@ func (f *FocusManager) Replace(widgets []Widget) {
 		return
 	}
 	prev := f.Focused()
+	oldRingLen := len(f.ring)
 	f.ring = f.ring[:0]
 	f.current = -1
 	for _, w := range widgets {
@@ -46,6 +50,10 @@ func (f *FocusManager) Replace(widgets []Widget) {
 			f.ring = append(f.ring, w)
 		}
 	}
+	if len(f.ring) < oldRingLen {
+		clear(f.ring[len(f.ring):oldRingLen])
+	}
+	f.pruneHistory()
 	if len(f.ring) == 0 {
 		return
 	}
@@ -71,8 +79,12 @@ func (f *FocusManager) Clear() {
 	if f == nil {
 		return
 	}
+	clear(f.ring)
+	clear(f.history)
 	f.ring = nil
+	f.history = nil
 	f.current = -1
+	f.historyIndex = -1
 }
 
 // Focused returns the current focus owner, or nil when no widget is focused.
@@ -171,15 +183,23 @@ func (f *FocusManager) Remove(w Widget) bool {
 	if i < 0 {
 		return false
 	}
-	f.ring = append(f.ring[:i], f.ring[i+1:]...)
+	wasFocused := i == f.current
+	copy(f.ring[i:], f.ring[i+1:])
+	f.ring[len(f.ring)-1] = nil
+	f.ring = f.ring[:len(f.ring)-1]
 	if len(f.ring) == 0 {
 		f.current = -1
+		f.pruneHistory()
 		return true
 	}
 	if f.current >= len(f.ring) {
 		f.current = 0
 	} else if i < f.current {
 		f.current--
+	}
+	f.pruneHistory()
+	if wasFocused {
+		f.recordVisit(f.ring[f.current])
 	}
 	return true
 }
@@ -201,10 +221,41 @@ func (f *FocusManager) recordVisit(w Widget) {
 		return
 	}
 	if f.historyIndex+1 < len(f.history) {
+		clear(f.history[f.historyIndex+1:])
 		f.history = f.history[:f.historyIndex+1]
 	}
 	f.history = append(f.history, w)
+	if len(f.history) > focusHistoryLimit {
+		drop := len(f.history) - focusHistoryLimit
+		copy(f.history, f.history[drop:])
+		clear(f.history[len(f.history)-drop:])
+		f.history = f.history[:focusHistoryLimit]
+	}
 	f.historyIndex = len(f.history) - 1
+}
+
+// pruneHistory removes visits to widgets absent from the current ring while
+// preserving the cursor's position relative to retained visits.
+func (f *FocusManager) pruneHistory() {
+	if f == nil {
+		return
+	}
+	oldLen := len(f.history)
+	next := 0
+	newIndex := -1
+	for oldIndex, w := range f.history {
+		if f.index(w) < 0 {
+			continue
+		}
+		f.history[next] = w
+		if oldIndex <= f.historyIndex {
+			newIndex = next
+		}
+		next++
+	}
+	clear(f.history[next:oldLen])
+	f.history = f.history[:next]
+	f.historyIndex = newIndex
 }
 
 func canFocus(w Widget) bool {

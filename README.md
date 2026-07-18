@@ -14,6 +14,19 @@ go build -o tuicord ./cmd/tuicord
 First launch walks you through login (token, QR, or captcha). The token is kept
 in your system keyring afterward.
 
+## Testing
+
+```sh
+go test ./...
+go test -race ./...
+(cd third_party/arikawa && go test ./...)
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -run '^$' -exec=true ./...
+```
+
+`third_party/arikawa` has its own `go.mod`. Go module boundaries mean the root
+`go test ./...` and race command do not include it, so its suite must be run
+separately from that directory.
+
 ## What it does
 
 Servers, channels, and DMs in a keyboard-driven TUI. Embeds and message

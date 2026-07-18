@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  root-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Test root module
+        run: go test ./...
+      - name: Race test root module
+        run: go test -race ./...
+
+  arikawa-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: third_party/arikawa
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: third_party/arikawa/go.mod
+          cache-dependency-path: third_party/arikawa/go.sum
+      - name: Test nested arikawa module
+        run: go test ./...
+
+  windows-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - name: Cross-compile root tests for Windows
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: go test -run '^$' -exec=true ./...

@@ -45,11 +45,13 @@ type Challenge struct {
 // CAPTCHA surface. It intentionally exposes only screenshots and genuine user
 // input actions; it has no synthetic-motion or CAPTCHA-solving helpers.
 type Session struct {
-	conn *websocket.Conn
-	cmd  *exec.Cmd
-	mu   sync.Mutex
-	next int
-	ctx  string
+	conn        *websocket.Conn
+	cmd         *exec.Cmd
+	profile     string
+	ownsProfile bool
+	mu          sync.Mutex
+	next        int
+	ctx         string
 }
 
 type bidiMessage struct {
@@ -79,13 +81,22 @@ func LaunchFirefox(ctx context.Context, opts FirefoxOptions) (*Session, error) {
 		opts.Height = 720
 	}
 	profile := opts.Profile
+	ownsProfile := false
 	if profile == "" {
 		dir, err := os.MkdirTemp("", "tuicord-firefox-")
 		if err != nil {
 			return nil, fmt.Errorf("create Firefox profile: %w", err)
 		}
 		profile = dir
+		ownsProfile = true
 	}
+	s := &Session{profile: profile, ownsProfile: ownsProfile}
+	complete := false
+	defer func() {
+		if !complete {
+			_ = s.Close()
+		}
+	}()
 	if err := os.MkdirAll(profile, 0o700); err != nil {
 		return nil, fmt.Errorf("create Firefox profile: %w", err)
 	}
@@ -105,6 +116,7 @@ func LaunchFirefox(ctx context.Context, opts FirefoxOptions) (*Session, error) {
 		args = append([]string{"--headless"}, args...)
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	s.cmd = cmd
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start Firefox: %w", err)
 	}
@@ -119,21 +131,19 @@ func LaunchFirefox(ctx context.Context, opts FirefoxOptions) (*Session, error) {
 		}
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
 			return nil, ctx.Err()
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
 	if err != nil {
-		_ = cmd.Process.Kill()
 		return nil, fmt.Errorf("connect to Firefox BiDi: %w", err)
 	}
 
-	s := &Session{conn: conn, cmd: cmd}
+	s.conn = conn
 	if err := s.init(ctx); err != nil {
-		_ = s.Close()
 		return nil, err
 	}
+	complete = true
 	return s, nil
 }
 
@@ -296,7 +306,9 @@ func (s *Session) ExchangeRemoteAuth(ctx context.Context, ticket, fingerprint st
 	return body.EncryptedToken, nil
 }
 
-// Close ends the BiDi session and Firefox process.
+// Close ends the BiDi session and Firefox process. Profiles created by
+// LaunchFirefox are removed only after the process has terminated; a profile
+// supplied by the caller is never removed. Close is safe to call repeatedly.
 func (s *Session) Close() error {
 	if s == nil {
 		return nil
@@ -308,10 +320,25 @@ func (s *Session) Close() error {
 		_ = s.conn.Close()
 		s.conn = nil
 	}
-	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+	if s.cmd != nil {
+		cmd := s.cmd
 		s.cmd = nil
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			// Wait releases the process handle before profile removal, which is
+			// required on Windows and prevents zombies on Unix.
+			_ = cmd.Wait()
+		}
 	}
+	if !s.ownsProfile {
+		s.profile = ""
+		return nil
+	}
+	if err := os.RemoveAll(s.profile); err != nil {
+		return fmt.Errorf("remove temporary Firefox profile: %w", err)
+	}
+	s.profile = ""
+	s.ownsProfile = false
 	return nil
 }
 

@@ -14,10 +14,8 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
 	xterm "golang.org/x/term"
 
 	"awesomeProject/internal/tui/screen"
@@ -173,7 +171,7 @@ func open(opts Options) (*Terminal, error) {
 		return nil, fmt.Errorf("initialize terminal: %w", err)
 	}
 	t.publishSize()
-	signal.Notify(t.sig, syscall.SIGWINCH)
+	notifyResize(t.sig)
 	t.wg.Add(1)
 	go t.watchResizes()
 	return t, nil
@@ -309,25 +307,10 @@ func (t *Terminal) publishSize() {
 	}
 }
 
-// size reports the terminal size in cells and, when the terminal supplies it,
-// in pixels. It uses TIOCGWINSZ directly because x/term's GetSize discards the
-// pixel fields, which pixel-addressed graphics protocols need.
+// size reports the terminal size in cells and, when the platform supplies it,
+// in pixels.
 func size(fd int) (Size, error) {
-	ws, err := unix.IoctlGetWinsize(fd, unix.TIOCGWINSZ)
-	if err != nil {
-		// Fall back to x/term so a platform without the ioctl still reports cells.
-		w, h, gerr := xterm.GetSize(fd)
-		if gerr != nil {
-			return Size{}, err
-		}
-		return Size{Width: w, Height: h}, nil
-	}
-	return Size{
-		Width:  int(ws.Col),
-		Height: int(ws.Row),
-		XPixel: int(ws.Xpixel),
-		YPixel: int(ws.Ypixel),
-	}, nil
+	return terminalSize(fd)
 }
 
 func envMap(environ []string) map[string]string {

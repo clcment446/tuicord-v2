@@ -138,6 +138,24 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSaveToAtomicallyReplacesExistingState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ui.toml")
+	if err := os.WriteFile(path, []byte("pinned_guilds = [1]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := &State{PinnedGuilds: []uint64{2}}
+	if err := want.saveTo(path); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PinnedGuilds) != 1 || got.PinnedGuilds[0] != 2 {
+		t.Fatalf("PinnedGuilds = %v, want [2]", got.PinnedGuilds)
+	}
+}
+
 func TestLoadMissingFileIsEmpty(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	st, err := Load()

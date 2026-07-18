@@ -15,10 +15,12 @@ package uistate
 
 import (
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
+	"awesomeProject/internal/atomicfile"
 	"github.com/BurntSushi/toml"
 )
 
@@ -155,24 +157,9 @@ func (s *State) Save() error {
 }
 
 func (s *State) saveTo(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), "ui-*.toml")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	if err := toml.NewEncoder(tmp).Encode(s); err != nil {
-		tmp.Close()
-		os.Remove(tmpName)
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, 0o600, func(w io.Writer) error {
+		return toml.NewEncoder(w).Encode(s)
+	})
 }
 
 // TogglePinnedGuild flips a guild's pinned status and returns the new value.

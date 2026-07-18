@@ -8,10 +8,12 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 
+	"awesomeProject/internal/atomicfile"
 	"awesomeProject/internal/tui/layout"
 	"github.com/BurntSushi/toml"
 )
@@ -344,27 +346,9 @@ func Save(cfg Config) error {
 }
 
 func saveTo(path string, cfg Config) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.toml-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := toml.NewEncoder(tmp).Encode(cfg); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(path, 0o644, func(w io.Writer) error {
+		return toml.NewEncoder(w).Encode(cfg)
+	})
 }
 
 func loadFrom(path string) (Config, error) {

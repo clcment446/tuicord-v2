@@ -106,6 +106,141 @@ func TestFocusHistoryNewVisitDropsForwardEntries(t *testing.T) {
 	}
 }
 
+func TestFocusReplacePrunesHistoryAndRemapsCursor(t *testing.T) {
+	first := newTestWidget("first", true)
+	removed := newTestWidget("removed", true)
+	current := newTestWidget("current", true)
+	forward := newTestWidget("forward", true)
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, removed, current, forward})
+	focus.Set(removed)
+	focus.Set(current)
+	focus.Set(forward)
+	focus.Back()
+	focus.Replace([]Widget{first, current, forward})
+
+	if len(focus.history) != 3 || focus.historyIndex != 1 {
+		t.Fatalf("history len/index = %d/%d, want 3/1", len(focus.history), focus.historyIndex)
+	}
+	for _, visit := range focus.history {
+		if sameWidget(visit, removed) {
+			t.Fatal("removed widget retained in history")
+		}
+	}
+	if got := focus.Back(); !sameWidget(got, first) {
+		t.Fatalf("Back() = %v, want first", got)
+	}
+	if got := focus.Forward(); !sameWidget(got, current) {
+		t.Fatalf("Forward() = %v, want current", got)
+	}
+	if got := focus.Forward(); !sameWidget(got, forward) {
+		t.Fatalf("second Forward() = %v, want forward", got)
+	}
+}
+
+func TestFocusRemovePrunesEveryVisitAndClearsBackingReferences(t *testing.T) {
+	first := newTestWidget("first", true)
+	removed := newTestWidget("removed", true)
+	last := newTestWidget("last", true)
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, removed, last})
+	focus.Set(removed)
+	focus.Set(first)
+	focus.Set(removed)
+	focus.Set(last)
+	oldHistoryLen := len(focus.history)
+
+	if !focus.Remove(removed) {
+		t.Fatal("Remove returned false")
+	}
+	for _, visit := range focus.history {
+		if sameWidget(visit, removed) {
+			t.Fatal("removed widget retained in history")
+		}
+	}
+	backing := focus.history[:oldHistoryLen]
+	for i := len(focus.history); i < oldHistoryLen; i++ {
+		if backing[i] != nil {
+			t.Fatalf("discarded history slot %d retains %v", i, backing[i])
+		}
+	}
+}
+
+func TestFocusRemoveCurrentRecordsReplacement(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	third := newTestWidget("third", true)
+
+	var focus FocusManager
+	focus.Replace([]Widget{first, second, third})
+	focus.Set(second)
+	if !focus.Remove(second) {
+		t.Fatal("Remove returned false")
+	}
+	if got := focus.Focused(); !sameWidget(got, third) {
+		t.Fatalf("Focused() = %v, want third", got)
+	}
+	if got := focus.Back(); !sameWidget(got, first) {
+		t.Fatalf("Back() = %v, want first", got)
+	}
+}
+
+func TestFocusReplaceClearsDiscardedRingReferences(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	third := newTestWidget("third", true)
+	var focus FocusManager
+	focus.Replace([]Widget{first, second, third})
+
+	focus.Replace([]Widget{first})
+	backing := focus.ring[:3]
+	if backing[1] != nil || backing[2] != nil {
+		t.Fatalf("discarded ring slots retain widgets: %v", backing)
+	}
+}
+
+func TestFocusClearReleasesRingAndHistory(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	var focus FocusManager
+	focus.Replace([]Widget{first, second})
+	focus.Set(second)
+
+	focus.Clear()
+	if focus.ring != nil || focus.history != nil {
+		t.Fatalf("Clear retained slices: ring=%v history=%v", focus.ring, focus.history)
+	}
+	if focus.current != -1 || focus.historyIndex != -1 || focus.Focused() != nil {
+		t.Fatalf("Clear indices = %d/%d, want -1/-1", focus.current, focus.historyIndex)
+	}
+}
+
+func TestFocusHistoryIsBounded(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	var focus FocusManager
+	focus.Replace([]Widget{first, second})
+	for i := 0; i < focusHistoryLimit+20; i++ {
+		if i%2 == 0 {
+			focus.Set(second)
+		} else {
+			focus.Set(first)
+		}
+	}
+	if len(focus.history) != focusHistoryLimit {
+		t.Fatalf("history length = %d, want %d", len(focus.history), focusHistoryLimit)
+	}
+	if focus.historyIndex != focusHistoryLimit-1 {
+		t.Fatalf("history index = %d, want %d", focus.historyIndex, focusHistoryLimit-1)
+	}
+	before := focus.Focused()
+	if got := focus.Back(); got == nil || sameWidget(got, before) {
+		t.Fatalf("Back() did not navigate bounded history: %v", got)
+	}
+}
+
 type testWidget struct {
 	name     string
 	focus    bool

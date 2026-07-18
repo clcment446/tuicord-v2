@@ -64,6 +64,25 @@ func TestLoadElementLayoutPolicy(t *testing.T) {
 	}
 }
 
+func TestSaveToAtomicallyReplacesExistingConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("stale config"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := Default()
+	want.Layout.ChannelsWidth = 47
+	if err := saveTo(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Layout.ChannelsWidth != 47 {
+		t.Fatalf("ChannelsWidth = %d, want 47", got.Layout.ChannelsWidth)
+	}
+}
+
 func TestAuthPreferredModeRoundTrips(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	want := Default()
