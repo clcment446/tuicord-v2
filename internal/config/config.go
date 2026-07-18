@@ -531,15 +531,16 @@ func writeColorsTemplate(path string) error {
 }
 
 func writeFirstRunFile(path, contents string) error {
-	if _, err := os.Stat(path); err == nil {
-		return nil
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return atomicfile.Write(path, 0o644, func(w io.Writer) error {
+	err := atomicfile.WriteNew(path, 0o644, func(w io.Writer) error {
 		_, err := io.WriteString(w, contents)
 		return err
 	})
+	// Another process (or the user) may create the file while the template is
+	// being encoded. Atomic no-clobber installation preserves that winner.
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	return err
 }
 
 const defaultConfigTemplate = `# tuicord-v2 configuration

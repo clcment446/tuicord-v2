@@ -14,6 +14,8 @@ A WebSocket command must not hold the same mutex needed by `Close` while blocked
 
 Clipboard readers should try every installed backend in preference order when a backend reports no usable image or command failure. Cancellation, deadline, and output-limit errors are terminal: do not restart work through another tool, and reuse the caller's context so the total operation remains bounded.
 
-Durable atomic replacement requires syncing the temporary file before rename and syncing the parent directory after rename on Unix systems that support directory fsync. First-run config and color templates should go through the same atomic helper while preserving existing files.
+Durable atomic replacement requires syncing the temporary file before rename and syncing the parent directory after rename on Unix systems that support directory fsync. If the helper creates a nested parent tree, create it top-down and sync each parent after adding its child; the final file installation sync then commits the deepest directory.
+
+First-run config and color templates need an atomic no-clobber commit, not a `Stat` followed by the ordinary replace-existing path. A synced temporary sibling can be hard-linked into place on Unix (then unlinked before syncing the directory); Windows can move it with `MoveFileEx` without `MOVEFILE_REPLACE_EXISTING`. Normal saves must retain replace-existing semantics.
 
 The nested Arikawa module is a separate Go module, so both ordinary and race tests must be explicit CI steps from `third_party/arikawa`.

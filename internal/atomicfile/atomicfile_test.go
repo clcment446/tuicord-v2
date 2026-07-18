@@ -2,10 +2,13 @@ package atomicfile
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -59,6 +62,55 @@ func TestWriteSyncsParentAfterRename(t *testing.T) {
 	}
 }
 
+func TestWriteSyncsEveryNewDirectoryEntry(t *testing.T) {
+	root := t.TempDir()
+	one := filepath.Join(root, "one")
+	two := filepath.Join(one, "two")
+	path := filepath.Join(two, "state.toml")
+	var synced []string
+
+	err := write(path, 0o600, func(w io.Writer) error {
+		_, err := io.WriteString(w, "durable tree")
+		return err
+	}, func(dir string) error {
+		synced = append(synced, dir)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{root, one, two}
+	if fmt.Sprint(synced) != fmt.Sprint(want) {
+		t.Fatalf("synced directories = %q, want %q", synced, want)
+	}
+	if contents, err := os.ReadFile(path); err != nil || string(contents) != "durable tree" {
+		t.Fatalf("destination = %q, %v", contents, err)
+	}
+}
+
+func TestWriteReportsNewAncestorSyncFailure(t *testing.T) {
+	wantErr := errors.New("ancestor sync failed")
+	root := t.TempDir()
+	path := filepath.Join(root, "one", "two", "state.toml")
+	var synced []string
+	err := write(path, 0o600, func(io.Writer) error {
+		t.Fatal("encoder called after directory sync failed")
+		return nil
+	}, func(dir string) error {
+		synced = append(synced, dir)
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Write error = %v, want %v", err, wantErr)
+	}
+	if len(synced) != 1 || synced[0] != root {
+		t.Fatalf("synced directories = %q, want only %q", synced, root)
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Fatalf("destination unexpectedly exists: %v", statErr)
+	}
+}
+
 func TestWriteReportsParentSyncFailure(t *testing.T) {
 	wantErr := errors.New("directory sync failed")
 	path := filepath.Join(t.TempDir(), "state.toml")
@@ -71,6 +123,91 @@ func TestWriteReportsParentSyncFailure(t *testing.T) {
 	}
 	if contents, readErr := os.ReadFile(path); readErr != nil || string(contents) != "renamed" {
 		t.Fatalf("renamed destination = %q, %v", contents, readErr)
+	}
+}
+
+func TestWriteNewNeverClobbersConcurrentCreator(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	encoding := make(chan struct{})
+	continueEncoding := make(chan struct{})
+	errCh := make(chan error, 1)
+
+	go func() {
+		errCh <- WriteNew(path, 0o644, func(w io.Writer) error {
+			if _, err := io.WriteString(w, "generated template"); err != nil {
+				return err
+			}
+			close(encoding)
+			<-continueEncoding
+			return nil
+		})
+	}()
+	<-encoding
+	if err := os.WriteFile(path, []byte("user-created"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	close(continueEncoding)
+	if err := <-errCh; !errors.Is(err, fs.ErrExist) {
+		t.Fatalf("WriteNew error = %v, want fs.ErrExist", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "user-created" {
+		t.Fatalf("concurrent file was clobbered: %q", contents)
+	}
+}
+
+func TestWriteNewHasExactlyOneConcurrentWinner(t *testing.T) {
+	const writers = 16
+	path := filepath.Join(t.TempDir(), "colors.conf")
+	start := make(chan struct{})
+	type result struct {
+		content string
+		err     error
+	}
+	results := make(chan result, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		content := fmt.Sprintf("template-%d", i)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			err := WriteNew(path, 0o644, func(w io.Writer) error {
+				_, err := io.WriteString(w, content)
+				return err
+			})
+			results <- result{content: content, err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	winner := ""
+	for result := range results {
+		switch {
+		case result.err == nil:
+			if winner != "" {
+				t.Fatalf("multiple creators won: %q and %q", winner, result.content)
+			}
+			winner = result.content
+		case !errors.Is(result.err, fs.ErrExist):
+			t.Fatalf("WriteNew error = %v, want fs.ErrExist", result.err)
+		}
+	}
+	if winner == "" {
+		t.Fatal("no concurrent creator won")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != winner {
+		t.Fatalf("contents = %q, winning write = %q", contents, winner)
 	}
 }
 
