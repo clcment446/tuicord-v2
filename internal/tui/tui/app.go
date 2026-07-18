@@ -12,7 +12,10 @@ import (
 	"awesomeProject/internal/tui/term"
 )
 
-const tickInterval = 500 * time.Millisecond
+// A short heartbeat keeps animated media responsive. Widgets still decide
+// whether a tick requires redraw, so idle terminals do not repaint at this
+// cadence.
+const tickInterval = 50 * time.Millisecond
 
 // Option configures an App.
 type Option func(*App)
@@ -282,6 +285,19 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 			}
 			a.Invalidate()
 			return true
+		}
+	}
+	if !ev.Release && ev.Key == input.KeyRune && ev.Mods == 0 && (ev.Rune == 'H' || ev.Rune == 'L') {
+		if focused := a.Focus.Focused(); focused != nil {
+			if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
+				if ev.Rune == 'L' {
+					a.Focus.Next()
+				} else {
+					a.Focus.Prev()
+				}
+				a.Invalidate()
+				return true
+			}
 		}
 	}
 	if ev.Key == input.KeyTab && !ev.Release {

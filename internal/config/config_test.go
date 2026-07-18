@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -116,6 +117,9 @@ func TestParseColor(t *testing.T) {
 }
 
 func TestDefaultColorsUseCatppuccinLattePalette(t *testing.T) {
+	if !Default().Colors.Enabled {
+		t.Fatal("Catppuccin Latte should be enabled by default")
+	}
 	styles := Default().Colors.Styles()
 	bg := screen.RGB(0xef, 0xf1, 0xf5) // Catppuccin Latte base
 	if styles.Background != bg {
@@ -135,6 +139,24 @@ func TestDefaultColorsUseCatppuccinLattePalette(t *testing.T) {
 	}
 	if styles.Border.Bg != bg {
 		t.Errorf("default border bg = %+v, want the palette background", styles.Border.Bg)
+	}
+}
+
+func TestDefaultHeadersUseLazyVimCatppuccinRainbow(t *testing.T) {
+	styles := CellStyles(Default().Colors.Styles(), nil)
+	want := []screen.Color{
+		screen.RGB(0xd2, 0x0f, 0x39), // red
+		screen.RGB(0xfe, 0x64, 0x0b), // peach
+		screen.RGB(0xdf, 0x8e, 0x1d), // yellow
+		screen.RGB(0x40, 0xa0, 0x2b), // green
+		screen.RGB(0x20, 0x9f, 0xb5), // sapphire
+		screen.RGB(0x88, 0x39, 0xef), // mauve
+	}
+	for level, color := range want {
+		got := styles[fmt.Sprintf("messages.header%d", level+1)].Fg
+		if got != color {
+			t.Errorf("header%d color = %+v, want %+v", level+1, got, color)
+		}
 	}
 }
 
@@ -248,6 +270,21 @@ func TestLoadFromTTYColorsDisplayOption(t *testing.T) {
 	}
 	if !cfg.Display.TTYColors {
 		t.Fatal("display.tty_colors was not loaded")
+	}
+}
+
+func TestLoadFromRoleGradientDisplayOptions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[display]\nrole_gradients = true\nrole_gradient_animations = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if !cfg.Display.RoleGradients || !cfg.Display.RoleGradientAnimations {
+		t.Fatalf("gradient display options were not loaded: %+v", cfg.Display)
 	}
 }
 

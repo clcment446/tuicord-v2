@@ -6,9 +6,11 @@ import (
 	"image/color"
 	"strings"
 	"testing"
+	"time"
 
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
 )
 
@@ -29,6 +31,140 @@ func TestChatViewColorsAuthorByRole(t *testing.T) {
 	// Assert: the author glyph is drawn in the role color.
 	if got := buf.Cell(0, 0).Style.Fg; got != screen.RGB(0xff, 0x00, 0x00) {
 		t.Errorf("author fg = %+v, want red", got)
+	}
+}
+
+func TestChatViewOptInRoleGradientColorsAuthor(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 5})
+	st.UpsertRole(5, store.Role{ID: 10, Position: 2, Colors: [3]uint32{0xff0000, 0x0000ff}})
+	st.UpsertMember(5, store.Member{ID: 42, Name: "alice", RoleIDs: []store.RoleID{10}})
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 42, Author: "alice", Content: "hi"})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetRoleGradients(true, false)
+	buf := screen.NewBuffer(20, 2)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := buf.Cell(0, 0).Style.Fg; got != screen.RGB(0xff, 0x00, 0x00) {
+		t.Errorf("first author glyph fg = %+v, want red", got)
+	}
+	if got := buf.Cell(4, 0).Style.Fg; got == screen.RGB(0xff, 0x00, 0x00) {
+		t.Errorf("last author glyph fg = %+v, want gradient color distinct from red", got)
+	}
+}
+
+func TestChatViewRendersAuthorAvatarNextToGroupedName(t *testing.T) {
+	const avatarURL = "https://cdn.discordapp.com/avatars/7/avatar.png"
+	st := store.New(0)
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", AuthorAvatarURL: avatarURL, Content: "first"})
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", AuthorAvatarURL: avatarURL, Content: "second"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{avatarURL: {img: solidTestImage(48, 48)}}
+	buf := screen.NewBuffer(24, 3)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 0); got != "  alice" {
+		t.Fatalf("author row = %q, want avatar slot followed by name", got)
+	}
+	if graphics := buf.Graphics(); len(graphics) != 1 || !bytes.Contains(graphics[0].Data, []byte("c=2")) || !bytes.Contains(graphics[0].Data, []byte("r=1")) {
+		t.Fatalf("avatar graphics = %+v, want one 2x1 placement", graphics)
+	}
+}
+
+func TestChatViewPrefersGuildProfileAvatar(t *testing.T) {
+	const guildAvatarURL = "https://cdn.discordapp.com/guilds/5/users/7/avatars/server.png"
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 5})
+	st.UpsertMember(5, store.Member{ID: 7, AvatarURL: guildAvatarURL})
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", AuthorAvatarURL: "https://cdn.discordapp.com/avatars/7/global.png", Content: "hello"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{guildAvatarURL: {img: solidTestImage(48, 48)}}
+	buf := screen.NewBuffer(24, 2)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if graphics := buf.Graphics(); len(graphics) != 1 {
+		t.Fatalf("guild avatar graphics = %d, want 1", len(graphics))
+	}
+	if _, fetchedGlobal := view.media["https://cdn.discordapp.com/avatars/7/global.png"]; fetchedGlobal {
+		t.Fatal("global avatar was fetched instead of the guild profile avatar")
+	}
+}
+
+func TestChatViewAdvancesAnimatedGIFFrames(t *testing.T) {
+	const gifURL = "https://cdn.example.test/spin.gif"
+	first := solidTestImage(8, 8)
+	second := image.NewRGBA(image.Rect(0, 0, 8, 8))
+	st := store.New(0)
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Attachments: []store.Attachment{{URL: gifURL, Filename: "spin.gif", ContentType: "image/gif"}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{gifURL: {
+		img:       first,
+		frames:    []media.Frame{{Image: first, Delay: time.Millisecond}, {Image: second, Delay: time.Millisecond}},
+		nextFrame: time.Now().Add(-time.Millisecond),
+	}}
+	buf := screen.NewBuffer(24, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.TickEvent{}) {
+		t.Fatal("animated GIF tick was not handled")
+	}
+	if got := view.media[gifURL].img; got != second {
+		t.Fatal("animated GIF did not advance to its second frame")
+	}
+}
+
+func TestChatViewShowsPausedGIFBadgeWhenAnimationDisabled(t *testing.T) {
+	const gifURL = "https://cdn.example.test/paused.gif"
+	img := solidTestImage(8, 8)
+	st := store.New(0)
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Attachments: []store.Attachment{{URL: gifURL, Filename: "paused.gif", ContentType: "image/gif"}}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.Config{Enabled: true, Animate: false, MaxHeightCells: 1}, nil)
+	view.media = map[string]*chatMediaState{gifURL: {img: img}}
+	buf := screen.NewBuffer(30, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !strings.Contains(rowsText(buf), "[GIF]") {
+		t.Fatalf("paused GIF badge missing:\n%s", rowsText(buf))
+	}
+}
+
+func TestVideoAttachmentUsesPosterURL(t *testing.T) {
+	attachment := store.Attachment{
+		URL:      "https://cdn.discordapp.com/attachments/1/2/clip.mp4",
+		ProxyURL: "https://media.discordapp.net/attachments/1/2/clip.mp4?width=640&height=360",
+		Filename: "clip.mp4", ContentType: "video/mp4", W: 640, H: 360,
+	}
+	poster, ok := attachmentMediaURL(attachment)
+	if !ok || !strings.Contains(poster, "format=jpeg") {
+		t.Fatalf("video poster = %q, %t; want Discord JPEG proxy", poster, ok)
+	}
+
+	st := store.New(0)
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Attachments: []store.Attachment{attachment}})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.Config{Enabled: true, MaxHeightCells: 2}, nil)
+	view.media = map[string]*chatMediaState{poster: {img: solidTestImage(640, 360)}}
+	buf := screen.NewBuffer(24, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+	if graphics := buf.Graphics(); len(graphics) != 1 {
+		t.Fatalf("video poster graphics = %d, want 1", len(graphics))
+	}
+	if !strings.Contains(rowsText(buf), "▶ clip.mp4") {
+		t.Fatalf("video affordance missing:\n%s", rowsText(buf))
+	}
+}
+
+func TestVideoAttachmentWithoutProxyFallsBackToChip(t *testing.T) {
+	attachment := store.Attachment{URL: "https://cdn.discordapp.com/attachments/1/2/clip.mp4", ContentType: "video/mp4"}
+	if poster, ok := attachmentMediaURL(attachment); ok || poster != "" {
+		t.Fatalf("direct video poster = %q, %t; want no image fetch", poster, ok)
 	}
 }
 

@@ -141,6 +141,17 @@ func TestMemberAndChannelResolution(t *testing.T) {
 	}
 }
 
+func TestRememberMemberIdentityPreservesCachedRoleData(t *testing.T) {
+	s := New(0)
+	s.UpsertMember(1, Member{ID: 42, Name: "old", Nick: "ali", AvatarURL: "guild-avatar", RoleIDs: []RoleID{7}})
+	s.RememberMemberIdentity(1, Member{ID: 42, Name: "Alice", Username: "alice", AvatarURL: "global-avatar"})
+
+	got, ok := s.Member(1, 42)
+	if !ok || got.Name != "Alice" || got.Username != "alice" || got.Nick != "ali" || len(got.RoleIDs) != 1 || got.RoleIDs[0] != 7 {
+		t.Fatalf("remembered member = %+v, %t", got, ok)
+	}
+}
+
 func TestChannelRecipientResolution(t *testing.T) {
 	s := New(0)
 	s.UpsertChannel(Channel{ID: 90, GuildID: ^GuildID(0), Name: "alice", Kind: ChannelDM,

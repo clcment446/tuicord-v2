@@ -84,6 +84,14 @@ type ChatView struct {
 	// Animating one that is scrolled out of view, or in another channel, would
 	// invalidate the frame twice a second for nothing.
 	spinnerVisible bool
+	// animationVisible reports whether a multi-frame GIF was drawn in the last
+	// frame. It prevents tick-driven redraws for media outside the viewport.
+	animationVisible       bool
+	visibleAnimations      map[string]bool
+	roleGradients          bool
+	roleGradientAnimations bool
+	roleGradientPhase      float64
+	roleGradientVisible    bool
 
 	// bodyCache memoizes rendered message bodies. Without it every frame
 	// re-parses markup and re-lays out embeds and components for the whole
@@ -216,6 +224,16 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	}
 }
 
+// SetRoleGradients opts author names into cached Discord role gradients. The
+// animation option only repaints while a gradient author is visible.
+func (w *ChatView) SetRoleGradients(enabled, animate bool) {
+	if w == nil {
+		return
+	}
+	w.roleGradients = enabled
+	w.roleGradientAnimations = enabled && animate
+}
+
 // displayContent resolves Discord markup in content into a flat display string
 // (mentions/channels/emoji resolved, markdown delimiters stripped).
 func (w *ChatView) displayContent(content string) string {
@@ -307,6 +325,17 @@ func (w *ChatView) mediaLines(url, label, placementKey string, base screen.Style
 		for i := range lines {
 			lines[i] = chatLine{media: block, mediaRow: i}
 		}
+		// Terminal graphics have no native overlay layer. Keep the GIF state and
+		// video affordance in a compact text row immediately below the image so
+		// users can tell a paused animation from a still and discover videos.
+		switch media.ClassifyURL(url) {
+		case media.ClassGIF:
+			if !w.mediaCfg.Animate {
+				lines = append(lines, chatLine{segments: []chatSegment{{text: "[GIF] " + label, style: muted}}})
+			}
+		case media.ClassVideo:
+			lines = append(lines, chatLine{segments: []chatSegment{{text: label, style: muted}}})
+		}
 		return lines
 	}
 }
@@ -354,6 +383,42 @@ func mediaSpinner(step int) string {
 	return "[" + frames[step%len(frames)] + "]"
 }
 
+// gifFrameDelay normalizes malformed zero-delay GIF frames. Browsers commonly
+// clamp those frames, and doing the same prevents every UI tick from forcing a
+// redraw while retaining the intended quick animation.
+func gifFrameDelay(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return 100 * time.Millisecond
+	}
+	return delay
+}
+
+// advanceVisibleGIFs moves only GIFs that were actually drawn in the last
+// frame. The UI event loop already emits tick events, so no per-GIF goroutine
+// is needed and inactive channels remain idle.
+func (w *ChatView) advanceVisibleGIFs(now time.Time) bool {
+	if w == nil || !w.mediaCfg.Animate || !w.animationVisible {
+		return false
+	}
+	advanced := false
+	for url := range w.visibleAnimations {
+		state := w.media[url]
+		if state == nil {
+			continue
+		}
+		if len(state.frames) < 2 || state.nextFrame.After(now) {
+			continue
+		}
+		state.frame = (state.frame + 1) % len(state.frames)
+		state.img = state.frames[state.frame].Image
+		state.nextFrame = now.Add(gifFrameDelay(state.frames[state.frame].Delay))
+		state.variants = nil
+		state.rev++
+		advanced = true
+	}
+	return advanced
+}
+
 // mediaLoading reports whether any fetch is still in flight. It reads a
 // counter maintained by ensureMedia and fetchMedia rather than scanning
 // w.media, which grows for the lifetime of the session.
@@ -364,7 +429,22 @@ func (w *ChatView) mediaLoading() bool {
 func (w *ChatView) fetchMedia(url string) {
 	w.mediaSlots <- struct{}{}
 	defer func() { <-w.mediaSlots }()
-	img, err := w.mediaFetcher.Fetch(context.Background(), url)
+	var (
+		img    image.Image
+		frames []media.Frame
+		err    error
+	)
+	if media.ClassifyURL(url) == media.ClassGIF {
+		frames, err = w.mediaFetcher.FetchGIF(context.Background(), url)
+		if len(frames) > maxAnimatedGIFFrames {
+			frames = frames[:maxAnimatedGIFFrames]
+		}
+		if len(frames) > 0 {
+			img = frames[0].Image
+		}
+	} else {
+		img, err = w.mediaFetcher.Fetch(context.Background(), url)
+	}
 	w.post(func() {
 		state := w.media[url]
 		if state == nil {
@@ -377,6 +457,15 @@ func (w *ChatView) fetchMedia(url string) {
 		}
 		state.loading = false
 		state.img = img
+		if w.mediaCfg.Animate && len(frames) > 1 {
+			state.frames = frames
+			state.frame = 0
+			state.nextFrame = time.Now().Add(gifFrameDelay(frames[0].Delay))
+		} else {
+			state.frames = nil
+			state.frame = 0
+			state.nextFrame = time.Time{}
+		}
 		state.err = err
 		state.variants = nil
 		// Invalidate any cached body that rendered this media as a placeholder.
@@ -442,6 +531,13 @@ func (w *ChatView) normalizeMediaSpec(spec mediaSpec) mediaSpec {
 func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia, width int, focused bool) {
 	if block == nil || block.img == nil {
 		return
+	}
+	if state := w.media[block.url]; state != nil && len(state.frames) > 1 {
+		w.animationVisible = true
+		if w.visibleAnimations == nil {
+			w.visibleAnimations = make(map[string]bool)
+		}
+		w.visibleAnimations[block.url] = true
 	}
 	cols := block.cols
 	if cols <= 0 || x+cols > width {
@@ -529,8 +625,14 @@ func (w *ChatView) Draw(r screen.Region) {
 	w.visibleStart = start
 	y := 0
 	w.spinnerVisible = false
+	w.animationVisible = false
+	w.roleGradientVisible = false
+	clear(w.visibleAnimations)
 	drawnMedia := map[*inlineMedia]struct{}{}
 	for i, line := range displayLines {
+		if line.roleGradient {
+			w.roleGradientVisible = true
+		}
 		if line.spinner {
 			w.spinnerVisible = true
 		}
@@ -538,6 +640,9 @@ func (w *ChatView) Draw(r screen.Region) {
 		stop, focused, fillFocus := w.focusedHighlightAt(lineIndex)
 		if w.selectionContainsLine(lineIndex) {
 			focused, fillFocus = true, true
+		}
+		if !chatLineHasVisibleContent(line) {
+			focused, fillFocus = false, false
 		}
 		focused = focused && !line.author
 		focusStart, focusEnd := 0, r.Width()
@@ -647,7 +752,8 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 		for _, hit := range line.actions {
 			w.focusStops = append(w.focusStops, chatFocusStop{
 				kind: chatFocusControl, key: hit.action.key(), message: line.message,
-				line: i, start: hit.start, end: hit.end,
+				action: hit.action,
+				line:   i, start: hit.start, end: hit.end,
 			})
 		}
 	}
@@ -687,20 +793,21 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 }
 
 type chatLine struct {
-	text        string
-	style       screen.Style
-	segments    []chatSegment
-	message     store.Message
-	author      bool
-	embedStart  bool
-	embedKey    string
-	media       *inlineMedia
-	mediaRow    int
-	mediaX      int
-	inlineMedia []positionedInlineMedia
-	actions     []componentHit
-	entities    []entityHit
-	header      *headerHit
+	text         string
+	style        screen.Style
+	segments     []chatSegment
+	message      store.Message
+	author       bool
+	roleGradient bool
+	embedStart   bool
+	embedKey     string
+	media        *inlineMedia
+	mediaRow     int
+	mediaX       int
+	inlineMedia  []positionedInlineMedia
+	actions      []componentHit
+	entities     []entityHit
+	header       *headerHit
 	// spinner marks a line that drew a media-loading spinner. Only spinners on
 	// screen need the tick to animate them, so Draw tracks whether any visible
 	// line carries this flag.
@@ -730,6 +837,7 @@ type chatFocusStop struct {
 	kind      chatFocusKind
 	key       string
 	message   store.Message
+	action    componentAction
 	line      int
 	start     int
 	end       int
@@ -766,10 +874,13 @@ type positionedInlineMedia struct {
 }
 
 type chatMediaState struct {
-	loading  bool
-	img      image.Image
-	err      error
-	variants map[string]chatMediaVariant
+	loading   bool
+	img       image.Image
+	frames    []media.Frame
+	frame     int
+	nextFrame time.Time
+	err       error
+	variants  map[string]chatMediaVariant
 	// rev increments whenever loading, img, or err changes. Cached message
 	// bodies record the rev of every media state they read so they can be
 	// invalidated when an image arrives or a state is evicted and refetched.
@@ -1038,6 +1149,11 @@ func (w *ChatView) sweepBodyCache() {
 // that hits that LRU or the disk cache.
 const maxMediaStates = 256
 
+// maxAnimatedGIFFrames bounds per-placement retained frame memory. GIFs can
+// contain thousands of frames; retaining the first loop is preferable to
+// keeping an unbounded decoded animation alive in a long-running chat view.
+const maxAnimatedGIFFrames = 120
+
 // sweepMedia drops media no recent render read. Without it w.media grows for
 // the lifetime of the session, holding a decoded image for every URL seen in
 // every channel visited.
@@ -1078,7 +1194,52 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 	if color := w.store.MemberColor(guild, m.AuthorID); color != 0 && !w.styles.HasCustom("messages.author") {
 		authorStyle.Fg = rgbColor(color)
 	}
-	return chatLine{text: header, style: authorStyle, message: m, author: true}
+	role, gradient := w.store.MemberDisplayRole(guild, m.AuthorID)
+	gradient = gradient && role.Colors[1] != 0 && w.roleGradients && !w.styles.HasCustom("messages.author")
+	avatarURL := m.AuthorAvatarURL
+	if member, ok := w.store.Member(guild, m.AuthorID); ok && member.AvatarURL != "" {
+		avatarURL = member.AvatarURL
+	}
+	if !gradient && (avatarURL == "" || !w.mediaCfg.Enabled) {
+		return chatLine{text: header, style: authorStyle, message: m, author: true}
+	}
+	segments := []chatSegment(nil)
+	if gradient {
+		denominator := float64(len([]rune(header)))
+		if denominator < 1 {
+			denominator = 1
+		}
+		index := 0
+		for cluster := range text.Clusters(header) {
+			position := (float64(index) + w.roleGradientPhase) / denominator
+			style := authorStyle
+			style.Fg = rgbColor(role.GradientAt(position - float64(int(position))))
+			segments = appendChatSegment(segments, chatSegment{text: cluster.Text, style: style})
+			index++
+		}
+	}
+	line := chatLine{
+		segments:     segments,
+		message:      m,
+		author:       true,
+		roleGradient: gradient,
+	}
+	if !gradient {
+		line.segments = []chatSegment{{text: "  " + header, style: authorStyle}}
+	} else if avatarURL != "" && w.mediaCfg.Enabled {
+		line.segments = append([]chatSegment{{text: "  ", style: authorStyle}}, line.segments...)
+	}
+	if avatarURL == "" || !w.mediaCfg.Enabled {
+		return line
+	}
+	if state := w.ensureMedia(avatarURL); state != nil && state.err == nil && state.img != nil {
+		variant := w.mediaVariant(state, mediaSpec{maxCols: 2, maxRows: 1, sourceW: 48, sourceH: 48, square: true})
+		line.inlineMedia = []positionedInlineMedia{{
+			col:   0,
+			media: &inlineMedia{url: avatarURL, placementKey: messagePlacementPrefix(m) + ":avatar", cols: variant.cols, rows: variant.rows, img: variant.img, style: authorStyle},
+		}}
+	}
+	return line
 }
 
 func sameMessageAuthor(a, b store.Message) bool {
@@ -1436,6 +1597,13 @@ func drawFocusedChatLine(r screen.Region, x, y int, line chatLine, focusStart, f
 	if len(segments) == 0 {
 		segments = []chatSegment{{text: line.text, style: line.style}}
 	}
+	// Segmented lines, notably markdown headers, carry their semantic color on
+	// the segment rather than chatLine.style. Use that style for the trailing
+	// focus fill so the whole row shares the header color.
+	focusBase := line.style
+	if len(segments) > 0 {
+		focusBase = segments[0].style
+	}
 	col := x
 	for _, segment := range segments {
 		for cluster := range text.Clusters(segment.text) {
@@ -1455,7 +1623,7 @@ func drawFocusedChatLine(r screen.Region, x, y int, line chatLine, focusStart, f
 		}
 	}
 	if fillFocus {
-		style := Styles{}.focusedStyle(line.style)
+		style := Styles{}.focusedStyle(focusBase)
 		if focus.Fg.Set() || focus.Bg.Set() {
 			style = mergeStyle(style, focus)
 			style.Attrs &^= screen.Reverse
@@ -1540,7 +1708,11 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		if visible {
 			w.spinner++
 		}
-		return w.expireComponentFlashes(time.Now()) || visible
+		roleGradient := w.roleGradientAnimations && w.roleGradientVisible
+		if roleGradient {
+			w.roleGradientPhase += 0.08
+		}
+		return w.expireComponentFlashes(time.Now()) || visible || w.advanceVisibleGIFs(time.Now()) || roleGradient
 	case input.KeyEvent:
 		if ev.Release {
 			return false
@@ -1567,9 +1739,15 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				w.selectionActive = false
 				return true
 			case 'j':
-				w.moveFocus(1)
+				w.scrollDown()
 				return true
 			case 'k':
+				w.scrollUp()
+				return true
+			case 'J':
+				w.moveFocus(1)
+				return true
+			case 'K':
 				w.moveFocus(-1)
 				return true
 			case '-':
@@ -1601,6 +1779,20 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			return true
 		case input.KeyDown:
 			w.moveFocus(1)
+			return true
+		case input.KeyLeft:
+			if w.vimNavigation && w.moveComponent(-1) {
+				return true
+			}
+		case input.KeyRight:
+			if w.vimNavigation && w.moveComponent(1) {
+				return true
+			}
+		case input.KeyPageUp:
+			w.pageUp()
+			return true
+		case input.KeyPageDown:
+			w.pageDown()
 			return true
 		}
 	case input.MouseEvent:
@@ -1791,12 +1983,15 @@ func (w *ChatView) foldFocusedHeader() bool {
 	return true
 }
 
-// HandleVimFocus lets h/l use the global reverse/forward focus ring. A
-// collapsed header gets first refusal and unfolds in place, keeping the user
-// inside the message instead of unexpectedly leaving the chat panel.
-func (w *ChatView) HandleVimFocus(_ bool) bool {
+// HandleVimFocus lets h/l move between adjacent components before falling back
+// to the global focus ring. A collapsed header gets first refusal and unfolds
+// in place, keeping the user inside the message instead of leaving the panel.
+func (w *ChatView) HandleVimFocus(forward bool) bool {
 	if w == nil || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
 		return false
+	}
+	if w.vimNavigation && w.moveComponent(direction(forward)) {
+		return true
 	}
 	stop := w.focusStops[w.focusStopIndex]
 	if stop.kind != chatFocusHeader || stop.headerKey == "" || !w.collapsedHeaders[stop.headerKey] {
@@ -1805,6 +2000,13 @@ func (w *ChatView) HandleVimFocus(_ bool) bool {
 	w.collapsedHeaders[stop.headerKey] = false
 	w.invalidateBodies()
 	return true
+}
+
+func direction(forward bool) int {
+	if forward {
+		return 1
+	}
+	return -1
 }
 
 // activateAt dispatches the component under (x, y). Shift-clicking an option of
@@ -2086,9 +2288,22 @@ func (w *ChatView) moveFocus(delta int) {
 		}
 		return
 	}
-	previousMessage := messagePlacementPrefix(w.focusedMessage)
+	w.setFocusStop(next)
 	stop := w.focusStops[next]
-	w.focusStopIndex = next
+	start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
+	end := min(start+w.viewportHeight, w.renderLineCount)
+	if stop.line < start || stop.line >= end {
+		w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight-stop.line-1, 0))
+	}
+}
+
+func (w *ChatView) setFocusStop(index int) {
+	if w == nil || index < 0 || index >= len(w.focusStops) {
+		return
+	}
+	previousMessage := messagePlacementPrefix(w.focusedMessage)
+	stop := w.focusStops[index]
+	w.focusStopIndex = index
 	w.focusStopKey = stop.key
 	w.focusedMessage = stop.message
 	w.focusKey = messagePlacementPrefix(stop.message)
@@ -2099,11 +2314,36 @@ func (w *ChatView) moveFocus(delta int) {
 		w.activePicker = componentAction{}
 		w.invalidateBodies()
 	}
-	start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
-	end := min(start+w.viewportHeight, w.renderLineCount)
-	if stop.line < start || stop.line >= end {
-		w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight-stop.line-1, 0))
+}
+
+func (w *ChatView) moveComponent(delta int) bool {
+	if w == nil || delta == 0 || w.focusStopIndex < 0 || w.focusStopIndex >= len(w.focusStops) {
+		return false
 	}
+	current := w.focusStops[w.focusStopIndex]
+	messageKey := messagePlacementPrefix(current.message)
+	for index := w.focusStopIndex + delta; index >= 0 && index < len(w.focusStops); index += delta {
+		candidate := w.focusStops[index]
+		if candidate.line != current.line || messagePlacementPrefix(candidate.message) != messageKey {
+			return false
+		}
+		if candidate.kind == chatFocusControl {
+			w.setFocusStop(index)
+			return true
+		}
+	}
+	return false
+}
+
+func (w *ChatView) pageUp() {
+	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + max(w.viewportHeight, 1))
+	if w.onReachTop != nil {
+		w.onReachTop()
+	}
+}
+
+func (w *ChatView) pageDown() {
+	w.bottomScroll.SetOffset(max(w.bottomScroll.Offset()-max(w.viewportHeight, 1), 0))
 }
 
 func (w *ChatView) scrollDown() {

@@ -41,6 +41,18 @@ func TestSplitGivesPaneChildFullWidth(t *testing.T) {
 	}
 }
 
+func TestSplitDividerUsesConfiguredThemeStyle(t *testing.T) {
+	style := screen.Style{Fg: screen.RGB(1, 2, 3), Bg: screen.RGB(4, 5, 6)}
+	split := NewSplit(NewText("left"), NewText("right")).Basis(5)
+	split.SetStyle(style)
+
+	buf := tui.New().Render(split, tui.Size{W: 12, H: 1})
+	got := buf.Cell(5, 0).Style
+	if got.Fg != style.Fg || got.Bg != style.Bg {
+		t.Fatalf("divider style = %+v, want %+v", got, style)
+	}
+}
+
 func TestSplitForwardsUnhandledInputToPane(t *testing.T) {
 	field := NewTextInput("")
 	split := NewSplit(field, NewText("right")).Basis(8)

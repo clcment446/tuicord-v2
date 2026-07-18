@@ -274,19 +274,28 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"preview.background": {Bg: colors.Background}, "preview.border": colors.Border,
 		"preview.title": bold(accent), "preview.body": colors.Text,
 	}
+	// Match LazyVim's rainbow heading progression using Catppuccin Latte's
+	// semantic colors. Keep the configured text background on each heading.
+	headerColors := [...]screen.Color{
+		mustColor("#d20f39"), // red
+		mustColor("#fe640b"), // peach
+		mustColor("#df8e1d"), // yellow
+		mustColor("#40a02b"), // green
+		mustColor("#209fb5"), // sapphire
+		mustColor("#8839ef"), // mauve
+	}
 	for level := 1; level <= 6; level++ {
-		style := accent
+		style := colors.Text
+		style.Fg = headerColors[level-1]
 		switch level {
 		case 1:
-			style = bold(underline(style))
+			style.Attrs |= screen.Bold | screen.Underline
 		case 2:
-			style = bold(style)
+			style.Attrs |= screen.Bold
 		case 3:
-			style = underline(style)
+			style.Attrs |= screen.Underline
 		case 4:
-			style = bold(colors.Text)
-		case 5, 6:
-			style = colors.Text
+			style.Attrs |= screen.Bold
 		}
 		styles[fmt.Sprintf("messages.header%d", level)] = style
 	}

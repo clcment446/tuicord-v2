@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +22,7 @@ import (
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/term"
 	"awesomeProject/internal/tui/text"
+	tuitext "awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 )
@@ -55,7 +58,12 @@ type Shell struct {
 	plugins        PluginHost
 	overlay        tui.Widget // nil = show the main view
 	popup          tui.Widget // small interactive layer drawn over current()
-	toast          *Toast
+	toasts         []*Toast
+	notifier       desktopNotifier
+	dispatch       func(func())
+	post           func(func())
+	unfocused      bool
+	now            func() time.Time
 	forumPreview   *forumPreview
 	completionSync bool
 	commandLoading bool
@@ -93,18 +101,88 @@ func (s *Shell) OpenPluginOverlay(title string, lines []string) {
 	s.overlay = border
 }
 
+type desktopNotifier interface {
+	Notify(title, body string) error
+}
+
+type systemDesktopNotifier struct{}
+
+const desktopNotificationTimeout = 2 * time.Second
+
+func (systemDesktopNotifier) Notify(title, body string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), desktopNotificationTimeout)
+	defer cancel()
+	switch runtime.GOOS {
+	case "linux":
+		return exec.CommandContext(ctx, "notify-send", "--app-name=Tuicord", title, body).Run()
+	case "darwin":
+		return exec.CommandContext(ctx, "osascript", "-e", "display notification $1 with title $2", body, title).Run()
+	default:
+		return fmt.Errorf("desktop notifications are unavailable on %s", runtime.GOOS)
+	}
+}
+
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, node: layout.Node{Grow: 1}}
 	mediaCfg := chatMediaConfig()
 	s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	mv.onNewForumPost = s.openForumPostPrompt
 	mv.onForumFilter = s.openForumFilterMenu
 	mv.onForumHover = s.setForumHover
 	mv.SetComposerChange(s.composerChanged)
+	mv.composer.OnBackspaceEmpty(s.leaveInputMode)
 	mv.SetLocalCommandHandler(s.runLocalCommand)
+	mv.chat.OnMessageAction(s.handleMessageAction)
 	// ForumView is created lazily; MainView invokes this hook when it exists.
 	return s
+}
+
+// handleMessageAction reconnects ChatView's Vim message shortcuts to the
+// shell-owned actions. This callback was lost in the merge, leaving r/e/u/d/a
+// visually handled but with no effect.
+func (s *Shell) handleMessageAction(action rune, msg store.Message) {
+	if s == nil || s.mv == nil {
+		return
+	}
+	switch action {
+	case 'r':
+		s.mv.BeginReply(msg, true)
+		s.focusComposer()
+	case 'e':
+		if s.app != nil && msg.AuthorID != 0 && msg.AuthorID == s.app.SelfID() {
+			s.mv.BeginEdit(msg)
+			s.focusComposer()
+		}
+	case 'u':
+		if msg.AuthorID != 0 {
+			s.openProfile(msg.AuthorID)
+		}
+	case 'd':
+		if s.app != nil && msg.AuthorID != 0 && msg.AuthorID == s.app.SelfID() {
+			s.app.DeleteMessage(msg.ChannelID, msg.ID)
+		}
+	}
+}
+
+func (s *Shell) focusComposer() {
+	if s == nil || s.mv == nil || s.mv.composer == nil {
+		return
+	}
+	if s.cfg.Accessibility.VimNavigation {
+		s.inputMode = true
+		s.mv.SetInputMode(true)
+	}
+	s.focusRequest = s.mv.composer
+}
+
+func (s *Shell) leaveInputMode() {
+	if s == nil || s.mv == nil || !s.inputMode {
+		return
+	}
+	s.inputMode = false
+	s.mv.SetInputMode(false)
+	s.focusRequest = s.mv.chat
 }
 
 func (s *Shell) runLocalCommand(input string) bool {
@@ -286,14 +364,35 @@ func (s *Shell) DrawOverlay(r screen.Region) {
 		s.popup.Measure(tui.Size{W: r.Width(), H: r.Height()})
 		s.popup.Draw(r)
 	}
-	if s != nil && s.toast != nil {
-		s.toast.Draw(r)
+	if s != nil {
+		bottom := r.Height() - 1
+		for _, toast := range s.toasts {
+			if bottom < 0 {
+				break
+			}
+			width := min(toastWidth, r.Width())
+			height := toast.height(width, bottom+1)
+			if height <= 0 {
+				continue
+			}
+			x := max(r.Width()-width-1, 0)
+			y := bottom - height + 1
+			toast.drawAt(r, x, y, width, height)
+			bottom = y - 1
+		}
 	}
 }
 
 // Handle routes global shortcuts and overlay dismissal, delegating everything
 // else to the active subtree.
 func (s *Shell) Handle(ev tui.Event) bool {
+	if focus, ok := ev.(input.FocusEvent); ok {
+		s.unfocused = !focus.Focused
+		return true
+	}
+	if _, tick := ev.(input.TickEvent); tick && s.expireToasts(s.clock()) {
+		return true
+	}
 	if _, idle := ev.(input.TickEvent); idle {
 		if s.prefetch != nil && !s.prefetchIdle && prefetchEligible(s.lastActivity, time.Now()) {
 			s.prefetchIdle = true
@@ -308,19 +407,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	}
 	key, isKey := ev.(input.KeyEvent)
 
-	// Auto-dismiss an expired toast. On a tick, short-circuit so the runtime
-	// invalidates and repaints without it; on real input, drop it and let the
-	// event process normally (it triggers its own repaint).
-	if s.toast != nil && s.toast.expired(time.Now()) {
-		s.toast = nil
-		if _, isTick := ev.(input.TickEvent); isTick {
-			return true
-		}
-	}
-
-	if s.toast != nil && s.toast.Handle(ev) {
-		if s.toast.wantsDismiss(ev) {
-			s.toast = nil
+	if len(s.toasts) > 0 && s.toasts[0].Handle(ev) {
+		if s.toasts[0].wantsDismiss(ev) {
+			s.toasts = s.toasts[1:]
 		}
 		return true
 	}
@@ -370,7 +459,7 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
-		case s.cfg.Accessibility.VimNavigation && !s.inputMode && key.Key == input.KeyRune && key.Rune == 'I' && key.Mods&input.Shift != 0:
+		case s.cfg.Accessibility.VimNavigation && !s.inputMode && key.Key == input.KeyRune && (key.Rune == 'i' || key.Rune == 'I'):
 			s.inputMode = true
 			s.mv.SetInputMode(true)
 			s.focusRequest = s.mv.composer
@@ -635,9 +724,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 		s.completionSync = true
 		s.mv.composer.SetValue(strings.TrimSuffix(value, ";q"))
 		s.completionSync = false
-		s.inputMode = false
-		s.mv.SetInputMode(false)
-		s.focusRequest = s.mv.chat
+		s.leaveInputMode()
 		if _, inline := s.overlay.(*InlinePicker); inline {
 			s.closeOverlay()
 		}
@@ -786,14 +873,17 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 		{Label: "Reply", OnSelect: func() {
 			s.closePopup()
 			s.mv.BeginReply(msg, true)
+			s.focusComposer()
 		}},
 		{Label: "Reply (no mention)", OnSelect: func() {
 			s.closePopup()
 			s.mv.BeginReply(msg, false)
+			s.focusComposer()
 		}},
 		{Label: "Edit", Disabled: !own, OnSelect: func() {
 			s.closePopup()
 			s.mv.BeginEdit(msg)
+			s.focusComposer()
 		}},
 		{Label: "Create thread…", Disabled: !canThread, OnSelect: func() {
 			s.closePopup()
@@ -1067,7 +1157,7 @@ func (s *Shell) ShowToast(title string, err error) {
 	if s == nil || err == nil {
 		return
 	}
-	s.toast = NewToast(title, err.Error(), s.styles)
+	s.showNotification(title, err.Error())
 }
 
 // ShowNotice displays a short dismissible informational popup.
@@ -1075,7 +1165,7 @@ func (s *Shell) ShowNotice(title, detail string) {
 	if s == nil {
 		return
 	}
-	s.toast = NewToast(title, detail, s.styles)
+	s.showNotification(title, detail)
 }
 
 // ShowTimedNotice shows a notice that auto-dismisses after ttl (unless the user
@@ -1084,13 +1174,98 @@ func (s *Shell) ShowTimedNotice(title, detail string, ttl time.Duration) {
 	if s == nil {
 		return
 	}
-	s.toast = NewToast(title, detail, s.styles).SetTTL(ttl)
+	toast := NewToast(title, detail, s.styles).SetTTL(ttl)
+	s.toasts = append([]*Toast{toast}, s.toasts...)
 }
 
-// Toast returns the current popup, if any.
-func (s *Shell) Toast() *Toast {
+func (s *Shell) showNotification(title, detail string) {
 	if s == nil {
+		return
+	}
+	toast := newExpiringToast(title, detail, s.styles, s.clock())
+	s.toasts = append([]*Toast{toast}, s.toasts...)
+}
+
+func (s *Shell) showIncomingMessageToast(message store.Message, title, body string) {
+	toast := newExpiringToast(title, body, s.styles, s.clock())
+	if message.ChannelID != 0 && s.mv != nil {
+		channelID := message.ChannelID
+		toast.onActivate = func() { s.mv.NavigateToChannel(channelID) }
+	}
+	s.toasts = append([]*Toast{toast}, s.toasts...)
+}
+
+// NotifyIncomingMessage routes an incoming Discord ping to the desktop only
+// while this terminal window is unfocused; otherwise it becomes an in-app toast.
+func (s *Shell) NotifyIncomingMessage(message store.Message) {
+	if s == nil {
+		return
+	}
+	title := strings.TrimSpace(message.Author)
+	if title == "" {
+		title = "New message"
+	}
+	body := strings.Join(strings.Fields(message.Content), " ")
+	if body == "" {
+		body = "Sent an attachment or embed"
+	}
+	body = tuitext.Truncate(body, 240, tuitext.Ellipsis)
+	if s.unfocused && s.notifier != nil {
+		s.dispatchNotification(func() {
+			if err := s.notifier.Notify(title, body); err != nil {
+				s.postNotification(func() { s.showIncomingMessageToast(message, title, body) })
+			}
+		})
+		return
+	}
+	s.showIncomingMessageToast(message, title, body)
+}
+
+func (s *Shell) dispatchNotification(fn func()) {
+	if s != nil && s.dispatch != nil {
+		s.dispatch(fn)
+		return
+	}
+	fn()
+}
+
+func (s *Shell) postNotification(fn func()) {
+	if s != nil && s.post != nil {
+		s.post(fn)
+		return
+	}
+	fn()
+}
+
+func (s *Shell) clock() time.Time {
+	if s != nil && s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+func (s *Shell) expireToasts(now time.Time) bool {
+	if s == nil || len(s.toasts) == 0 {
+		return false
+	}
+	kept := make([]*Toast, 0, len(s.toasts))
+	for _, toast := range s.toasts {
+		if !toast.Expired(now) {
+			kept = append(kept, toast)
+		}
+	}
+	changed := len(kept) != len(s.toasts)
+	s.toasts = kept
+	return changed
+}
+
+// Toast returns the newest in-app notification, if any.
+func (s *Shell) Toast() *Toast {
+	if s == nil || len(s.toasts) == 0 {
 		return nil
 	}
-	return s.toast
+	return s.toasts[0]
 }
+
+// Toasts returns the newest-first notification stack.
+func (s *Shell) Toasts() []*Toast { return append([]*Toast(nil), s.toasts...) }

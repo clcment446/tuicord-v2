@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"awesomeProject/internal/media"
@@ -42,6 +43,14 @@ func attachmentMediaURL(a store.Attachment) (string, bool) {
 	if url == "" {
 		return "", false
 	}
+	if strings.HasPrefix(a.ContentType, "video/") || media.ClassifyURL(url) == media.ClassVideo {
+		// Discord's attachment proxy is the only source guaranteed to negotiate
+		// a JPEG poster. Never feed a direct MP4 URL to the image decoder.
+		if a.ProxyURL == "" {
+			return "", false
+		}
+		return videoPosterURL(url), true
+	}
 	if strings.HasPrefix(a.ContentType, "image/") {
 		return url, true
 	}
@@ -51,6 +60,20 @@ func attachmentMediaURL(a store.Attachment) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+// videoPosterURL asks Discord's media proxy for a JPEG poster frame. The
+// source attachment remains the canonical URL for opening the video; this URL
+// is only ever passed through the ordinary image fetcher.
+func videoPosterURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	q := u.Query()
+	q.Set("format", "jpeg")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 func stickerMediaURL(s store.Sticker) (string, bool) {

@@ -164,20 +164,21 @@ func dmName(recipients []discord.User) string {
 // rich content: attachments, embeds, stickers, reactions, and V2 components.
 func convertMessage(m discord.Message) store.Message {
 	return store.Message{
-		ID:            store.MessageID(m.ID),
-		ChannelID:     store.ChannelID(m.ChannelID),
-		AuthorID:      store.UserID(m.Author.ID),
-		ApplicationID: uint64(m.ApplicationID),
-		Author:        m.Author.DisplayOrUsername(),
-		Content:       m.Content,
-		Timestamp:     m.Timestamp.Time(),
-		Nonce:         m.Nonce,
-		Flags:         uint64(m.Flags),
-		Attachments:   convertAttachments(m.Attachments),
-		Embeds:        convertEmbeds(m.Embeds),
-		Stickers:      convertStickers(m.Stickers),
-		Reactions:     convertReactions(m.Reactions),
-		Components:    convertComponents(m.Components),
+		ID:              store.MessageID(m.ID),
+		ChannelID:       store.ChannelID(m.ChannelID),
+		AuthorID:        store.UserID(m.Author.ID),
+		AuthorAvatarURL: m.Author.AvatarURL(),
+		ApplicationID:   uint64(m.ApplicationID),
+		Author:          m.Author.DisplayOrUsername(),
+		Content:         m.Content,
+		Timestamp:       m.Timestamp.Time(),
+		Nonce:           m.Nonce,
+		Flags:           uint64(m.Flags),
+		Attachments:     convertAttachments(m.Attachments),
+		Embeds:          convertEmbeds(m.Embeds),
+		Stickers:        convertStickers(m.Stickers),
+		Reactions:       convertReactions(m.Reactions),
+		Components:      convertComponents(m.Components),
 		ComponentTree: convertComponentTree(
 			m.Components,
 			uint64(m.Flags)&uint64(discord.IsComponentsV2) != 0,
@@ -588,7 +589,7 @@ func proxyOr(proxy, direct string) string {
 }
 
 // convertMember maps an arikawa member into a store.Member.
-func convertMember(m discord.Member) store.Member {
+func convertMember(m discord.Member, guildID discord.GuildID) store.Member {
 	name := m.Nick
 	if name == "" {
 		name = m.User.DisplayOrUsername()
@@ -598,22 +599,38 @@ func convertMember(m discord.Member) store.Member {
 		roles[i] = store.RoleID(role)
 	}
 	return store.Member{
-		ID:       store.UserID(m.User.ID),
-		Name:     name,
-		Username: m.User.Username,
-		Nick:     m.Nick,
-		RoleIDs:  roles,
+		ID:        store.UserID(m.User.ID),
+		Name:      name,
+		Username:  m.User.Username,
+		Nick:      m.Nick,
+		AvatarURL: memberAvatarURL(m, guildID),
+		RoleIDs:   roles,
 	}
+}
+
+func memberAvatarURL(m discord.Member, guildID discord.GuildID) string {
+	if url := m.AvatarURL(guildID); url != "" {
+		return url
+	}
+	return m.User.AvatarURL()
 }
 
 func convertRole(r discord.Role) store.Role {
 	red, green, blue := r.Color.RGB()
 	color := uint32(red)<<16 | uint32(green)<<8 | uint32(blue)
+	primaryR, primaryG, primaryB := r.Colors.PrimaryColor.RGB()
+	secondaryR, secondaryG, secondaryB := r.Colors.SecondaryColor.RGB()
+	tertiaryR, tertiaryG, tertiaryB := r.Colors.TertiaryColor.RGB()
 	return store.Role{
-		ID:          store.RoleID(r.ID),
-		Name:        r.Name,
-		Position:    r.Position,
-		Color:       color,
+		ID:       store.RoleID(r.ID),
+		Name:     r.Name,
+		Position: r.Position,
+		Color:    color,
+		Colors: [3]uint32{
+			uint32(primaryR)<<16 | uint32(primaryG)<<8 | uint32(primaryB),
+			uint32(secondaryR)<<16 | uint32(secondaryG)<<8 | uint32(secondaryB),
+			uint32(tertiaryR)<<16 | uint32(tertiaryG)<<8 | uint32(tertiaryB),
+		},
 		Hoist:       r.Hoist,
 		Mentionable: r.Mentionable,
 		Permissions: store.Permission(r.Permissions),
@@ -705,7 +722,7 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 		s.UpsertChannel(convertChannel(t))
 	}
 	for _, m := range g.Members {
-		s.UpsertMember(store.GuildID(g.ID), convertMember(m))
+		s.UpsertMember(store.GuildID(g.ID), convertMember(m, g.ID))
 	}
 	s.SetGuildEmojis(store.GuildID(g.ID), convertGuildEmojis(g.Emojis))
 	s.SetGuildStickers(store.GuildID(g.ID), convertGuildStickers(g.Stickers))

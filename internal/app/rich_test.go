@@ -14,7 +14,7 @@ func TestConvertMessageMapsRichContent(t *testing.T) {
 	msg := discord.Message{
 		ID:        7,
 		ChannelID: 3,
-		Author:    discord.User{ID: 42, Username: "alice"},
+		Author:    discord.User{ID: 42, Username: "alice", Avatar: "avatarhash"},
 		Content:   "hi",
 		Attachments: []discord.Attachment{{
 			Filename: "cat.png", ContentType: "image/png",
@@ -43,6 +43,9 @@ func TestConvertMessageMapsRichContent(t *testing.T) {
 	// Assert
 	if got.AuthorID != 42 {
 		t.Errorf("AuthorID = %d, want 42", got.AuthorID)
+	}
+	if got.AuthorAvatarURL != "https://cdn.discordapp.com/avatars/42/avatarhash.png" {
+		t.Errorf("AuthorAvatarURL = %q", got.AuthorAvatarURL)
 	}
 	if len(got.Attachments) != 1 || got.Attachments[0].ProxyURL != "https://proxy/cat.png" || got.Attachments[0].Size != 2048 {
 		t.Errorf("attachments = %+v", got.Attachments)
@@ -272,5 +275,14 @@ func TestReactionAddAndRemoveUpdateStore(t *testing.T) {
 	// Assert
 	if got := a.store.Messages(3)[0].Reactions; len(got) != 0 {
 		t.Fatalf("reactions after remove-all = %+v", got)
+	}
+}
+
+func TestConvertRoleMapsGradientStops(t *testing.T) {
+	role := convertRole(discord.Role{Colors: discord.RoleColors{
+		PrimaryColor: 0x112233, SecondaryColor: 0x445566, TertiaryColor: 0x778899,
+	}})
+	if role.Colors != [3]uint32{0x112233, 0x445566, 0x778899} {
+		t.Fatalf("gradient stops = %#v", role.Colors)
 	}
 }
