@@ -137,6 +137,7 @@ type Media struct {
 	RequestTimeoutSeconds int   `toml:"request_timeout_seconds"`
 	ConcurrentFetches     int   `toml:"concurrent_fetches"`
 	QueuedFetches         int   `toml:"queued_fetches"`
+	DecodedCacheMaxBytes  int64 `toml:"decoded_cache_max_bytes"`
 	CacheMaxBytes         int64 `toml:"cache_max_bytes"`
 	CacheTTLHours         int   `toml:"cache_ttl_hours"`
 
@@ -340,6 +341,7 @@ func Default() Config {
 			RequestTimeoutSeconds:    15,
 			ConcurrentFetches:        6,
 			QueuedFetches:            48,
+			DecodedCacheMaxBytes:     64 << 20,
 			CacheMaxBytes:            256 << 20,
 			CacheTTLHours:            7 * 24,
 			ViewerMaxResponseBytes:   50 << 20,

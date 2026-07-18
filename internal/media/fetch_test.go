@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"image"
 	"image/color"
 	"io"
 	"net/http"
@@ -129,6 +130,29 @@ func TestFetcher_Fetch_PopulatesDiskCache(t *testing.T) {
 	}
 }
 
+func TestFetcherFetchGIFCachesOnlyDownscaledFirstFrame(t *testing.T) {
+	raw := makeGIF(t, 20, 10, 3, 10)
+	f, _ := newStubFetcher(t, raw)
+	f.MaxPixels = image.Pt(4, 4)
+	frames, err := f.FetchGIF(context.Background(), "https://example.com/bounded.gif")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := frames[0].Image.Bounds().Size(); got != image.Pt(20, 10) {
+		t.Fatalf("returned animation was downscaled: %v", got)
+	}
+	cached := f.Cache.GetLRU("https://example.com/bounded.gif")
+	if cached == nil {
+		t.Fatal("first frame was not cached")
+	}
+	if got := cached.Bounds().Size(); got.X > 4 || got.Y > 4 {
+		t.Fatalf("cached GIF first frame exceeds pixel budget: %v", got)
+	}
+	if got := f.Cache.LRUBytes(); got > 4*4*4 {
+		t.Fatalf("cached GIF accounting = %d, want <= 64", got)
+	}
+}
+
 func TestFetcher_FetchGIF_ReturnsFrames(t *testing.T) {
 	// Arrange: a 3-frame GIF.
 	raw := makeGIF(t, 8, 8, 3, 10)
@@ -204,6 +228,17 @@ func TestFetcherRequestTimeoutCancelsTransport(t *testing.T) {
 type doerFunc func(*http.Request) (*http.Response, error)
 
 func (f doerFunc) Do(req *http.Request) (*http.Response, error) { return f(req) }
+
+func TestFetcherCanceledContextRejectsLRUHit(t *testing.T) {
+	cache := NewMemoryCache(4, 1024)
+	cache.PutLRU("cached", image.NewRGBA(image.Rect(0, 0, 1, 1)))
+	f := &Fetcher{Cache: cache}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := f.Fetch(ctx, "cached"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Fetch LRU cancellation = %v, want canceled", err)
+	}
+}
 
 func TestFetcher_Fetch_ContextCancelled(t *testing.T) {
 	// Arrange: immediately cancelled context.

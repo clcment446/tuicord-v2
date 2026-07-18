@@ -2,6 +2,8 @@ package media
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/gif"
@@ -146,6 +148,24 @@ func TestDecodeGIF_FramesBounds(t *testing.T) {
 		if b.Dx() != 20 || b.Dy() != 15 {
 			t.Errorf("frame %d: bounds = %v, want 20×15", i, b)
 		}
+	}
+}
+
+func TestDecodeWithLimitsContextStopsBeforeDecode(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DecodeWithLimitsContext(ctx, bytes.NewReader(makePNG(t, 2, 2, color.RGBA{A: 255})), defaultDecodeLimits())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DecodeWithLimitsContext error = %v, want canceled", err)
+	}
+}
+
+func TestDecodeGIFWithLimitsContextStopsBeforeComposition(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := DecodeGIFWithLimitsContext(ctx, bytes.NewReader(makeGIF(t, 2, 2, 2, 1)), defaultGIFLimits())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("DecodeGIFWithLimitsContext error = %v, want canceled", err)
 	}
 }
 

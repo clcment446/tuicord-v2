@@ -13,17 +13,24 @@ import (
 	"time"
 )
 
-const defaultLRUSize = 64
+const (
+	defaultLRUSize = 64
+	// DefaultDecodedCacheMaxBytes independently bounds decoded pixel memory;
+	// the entry count alone is not meaningful for large source images.
+	DefaultDecodedCacheMaxBytes int64 = 64 << 20
+)
 
 // Cache is a bounded decoded-image LRU backed by a TTL and byte-bounded raw
 // disk cache. The zero value is not usable; construct one with NewCache.
 type Cache struct {
 	Dir string
 
-	mu      sync.Mutex
-	lru     *list.List
-	items   map[string]*list.Element
-	maxSize int
+	mu       sync.Mutex
+	lru      *list.List
+	items    map[string]*list.Element
+	maxSize  int
+	maxBytes int64
+	lruBytes int64
 
 	diskMu       sync.Mutex
 	diskMaxBytes int64
@@ -32,8 +39,9 @@ type Cache struct {
 }
 
 type lruEntry struct {
-	key string
-	img image.Image
+	key   string
+	img   image.Image
+	bytes int64
 }
 
 // NewCache returns a cache with safe default disk limits.
@@ -53,6 +61,7 @@ func NewCache(maxLRU int, dir string) (*Cache, error) {
 		lru:          list.New(),
 		items:        make(map[string]*list.Element),
 		maxSize:      maxLRU,
+		maxBytes:     DefaultDecodedCacheMaxBytes,
 		diskMaxBytes: DefaultDiskCacheMaxBytes,
 		diskTTL:      DefaultDiskCacheTTL,
 		now:          time.Now,
@@ -61,6 +70,42 @@ func NewCache(maxLRU int, dir string) (*Cache, error) {
 		_ = c.pruneDiskLocked()
 	}
 	return c, nil
+}
+
+// NewMemoryCache constructs only the decoded LRU. It performs no cache-dir
+// resolution, stat, pruning, deletion, or other disk IO.
+func NewMemoryCache(maxLRU int, maxBytes int64) *Cache {
+	if maxLRU <= 0 {
+		maxLRU = defaultLRUSize
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultDecodedCacheMaxBytes
+	}
+	return &Cache{
+		lru:      list.New(),
+		items:    make(map[string]*list.Element),
+		maxSize:  maxLRU,
+		maxBytes: maxBytes,
+		now:      time.Now,
+	}
+}
+
+// ConfigureLRU sets decoded entry and byte limits and immediately evicts least
+// recently used entries until both limits are met.
+func (c *Cache) ConfigureLRU(maxEntries int, maxBytes int64) {
+	if c == nil {
+		return
+	}
+	if maxEntries <= 0 {
+		maxEntries = defaultLRUSize
+	}
+	if maxBytes <= 0 {
+		maxBytes = DefaultDecodedCacheMaxBytes
+	}
+	c.mu.Lock()
+	c.maxSize, c.maxBytes = maxEntries, maxBytes
+	c.evictLRULocked()
+	c.mu.Unlock()
 }
 
 // ConfigureDisk overrides the persistent cache byte and TTL limits. Nonpositive
@@ -95,28 +140,104 @@ func (c *Cache) GetLRU(url string) image.Image {
 }
 
 func (c *Cache) PutLRU(url string, img image.Image) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if elem, ok := c.items[url]; ok {
-		c.lru.MoveToFront(elem)
-		elem.Value.(*lruEntry).img = img
+	if c == nil || img == nil {
 		return
 	}
-	c.items[url] = c.lru.PushFront(&lruEntry{key: url, img: img})
-	for c.lru.Len() > c.maxSize {
+	bytes := decodedImageBytes(img)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if bytes <= 0 || bytes > c.maxBytes {
+		// Replacing an existing value with an uncacheable image must not leave the
+		// old URL mapped to unrelated pixels.
+		if elem, ok := c.items[url]; ok {
+			c.removeLRULocked(elem)
+		}
+		return
+	}
+	if elem, ok := c.items[url]; ok {
+		entry := elem.Value.(*lruEntry)
+		c.lruBytes -= entry.bytes
+		entry.img, entry.bytes = img, bytes
+		c.lruBytes += bytes
+		c.lru.MoveToFront(elem)
+		c.evictLRULocked()
+		return
+	}
+	c.items[url] = c.lru.PushFront(&lruEntry{key: url, img: img, bytes: bytes})
+	c.lruBytes += bytes
+	c.evictLRULocked()
+}
+
+func (c *Cache) evictLRULocked() {
+	for c.lru.Len() > c.maxSize || c.lruBytes > c.maxBytes {
 		elem := c.lru.Back()
 		if elem == nil {
 			break
 		}
-		delete(c.items, elem.Value.(*lruEntry).key)
-		c.lru.Remove(elem)
+		c.removeLRULocked(elem)
 	}
+}
+
+func (c *Cache) removeLRULocked(elem *list.Element) {
+	entry := elem.Value.(*lruEntry)
+	delete(c.items, entry.key)
+	c.lruBytes -= entry.bytes
+	c.lru.Remove(elem)
+}
+
+// decodedImageBytes estimates retained decoded storage. Known standard image
+// implementations use their actual pixel slices; generic implementations use a
+// conservative four-byte RGBA surface estimate.
+func decodedImageBytes(img image.Image) int64 {
+	if img == nil {
+		return 0
+	}
+	switch img := img.(type) {
+	case *image.RGBA:
+		return int64(len(img.Pix))
+	case *image.NRGBA:
+		return int64(len(img.Pix))
+	case *image.RGBA64:
+		return int64(len(img.Pix))
+	case *image.NRGBA64:
+		return int64(len(img.Pix))
+	case *image.Alpha:
+		return int64(len(img.Pix))
+	case *image.Alpha16:
+		return int64(len(img.Pix))
+	case *image.Gray:
+		return int64(len(img.Pix))
+	case *image.Gray16:
+		return int64(len(img.Pix))
+	case *image.CMYK:
+		return int64(len(img.Pix))
+	case *image.Paletted:
+		return int64(len(img.Pix)) + int64(len(img.Palette))*8
+	case *image.YCbCr:
+		return int64(len(img.Y)) + int64(len(img.Cb)) + int64(len(img.Cr))
+	}
+	b := img.Bounds()
+	pixels, ok := checkedMul(int64(b.Dx()), int64(b.Dy()))
+	if !ok {
+		return 1<<63 - 1
+	}
+	bytes, ok := checkedMul(pixels, 4)
+	if !ok {
+		return 1<<63 - 1
+	}
+	return bytes
 }
 
 func (c *Cache) LRULen() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lru.Len()
+}
+
+func (c *Cache) LRUBytes() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lruBytes
 }
 
 // GetDisk returns a non-expired cache entry. It checks file size before reading

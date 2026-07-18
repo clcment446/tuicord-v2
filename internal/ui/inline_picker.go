@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"awesomeProject/internal/media"
@@ -46,6 +47,7 @@ type InlinePicker struct {
 	mediaCtx         context.Context
 	mediaCancel      context.CancelFunc
 	mediaJobs        chan string
+	mediaWG          sync.WaitGroup
 	post             func(func())
 	media            map[string]*pickerMediaState
 	active           store.GuildID
@@ -273,6 +275,7 @@ func (p *InlinePicker) SetSwitch(fn func(store.GuildID, store.ChannelID)) { p.on
 func (p *InlinePicker) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(func())) {
 	if p.mediaCancel != nil {
 		p.mediaCancel()
+		p.mediaWG.Wait()
 	}
 	p.mediaCtx, p.mediaCancel = context.WithCancel(context.Background())
 	cfg = cfg.Bounded()
@@ -280,6 +283,7 @@ func (p *InlinePicker) SetMedia(fetcher *media.Fetcher, cfg media.Config, post f
 	p.mediaJobs = make(chan string, cfg.QueuedFetches)
 	if fetcher != nil && post != nil && cfg.Enabled && cfg.EmojiImages {
 		for range cfg.ConcurrentFetches {
+			p.mediaWG.Add(1)
 			go p.mediaWorker(p.mediaCtx, p.mediaJobs)
 		}
 	}
@@ -292,6 +296,7 @@ func (p *InlinePicker) Close() {
 	if p != nil && p.mediaCancel != nil {
 		p.mediaCancel()
 		p.mediaCancel = nil
+		p.mediaWG.Wait()
 	}
 }
 func (p *InlinePicker) emojiImage(url string) image.Image {
@@ -310,14 +315,26 @@ func (p *InlinePicker) emojiImage(url string) image.Image {
 	return nil
 }
 func (p *InlinePicker) mediaWorker(ctx context.Context, jobs <-chan string) {
+	defer p.mediaWG.Done()
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case url := <-jobs:
+			if ctx.Err() != nil {
+				return
+			}
 			img, _ := p.mediaFetcher.Fetch(ctx, url)
 			if ctx.Err() == nil {
-				p.post(func() { p.media[url] = &pickerMediaState{img: img}; p.refilter() })
+				p.post(func() {
+					if ctx.Err() == nil {
+						p.media[url] = &pickerMediaState{img: img}
+						p.refilter()
+					}
+				})
 			}
 		}
 	}

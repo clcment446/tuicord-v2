@@ -45,6 +45,19 @@ video remains full-screen mpv with controls, shared-memory stabilization, and
 complete shutdown draining. Actionable notification activation closes popups,
 viewers, and video before channel navigation.
 
-Targeted race tests pass. A root `go test -race ./...` still reports the known,
-unrelated asynchronous `internal/app` test/store races recorded in
-`pr13-media-notification-merge`; ordinary root tests pass.
+Targeted media/UI/TUI race tests and root `go test -race ./...` pass.
+
+## Follow-up lifecycle findings
+
+The decoded LRU needs an independent byte budget in addition to its 64-entry
+cap; GIF fallback entries must be downscaled before insertion (with oversized
+single entries skipped). When persistent media is private/disabled, construct a
+memory-only cache directly: even constructing the disk-backed cache performs
+cache-dir resolution, stat, and pruning IO.
+
+Event-loop exit owns terminal ordering. It must close the root while the raw
+writer is live, let Shell cancellation join media/prefetch/viewer/clipboard/mpv
+workers, reject new posts, drain already accepted shutdown-aware closures, and
+flush the finite final Kitty delete backlog before terminal restoration closes
+the writer. Async temp-file producers use `TryPost`; a rejected post and an
+accepted closure that later observes shutdown both delete the unowned file.

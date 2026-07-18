@@ -267,12 +267,22 @@ func (mv *MainView) termWidthMinusMembers() int {
 }
 
 func newChatMediaFetcher(cfg media.Config) *media.Fetcher {
-	cache, err := media.NewCache(0, "")
-	if err != nil {
+	cfg = cfg.Bounded()
+	if !cfg.Enabled {
 		return nil
 	}
-	cfg = cfg.Bounded()
-	cache.ConfigureDisk(cfg.DiskCacheMaxBytes, cfg.DiskCacheTTL)
+	// Privacy-disabled persistence must not even resolve or inspect the cache
+	// directory. Build a decoded-only LRU in that mode.
+	cache := media.NewMemoryCache(media.DefaultDecodedCacheEntries, cfg.DecodedCacheMaxBytes)
+	if cfg.DiskCacheEnabled {
+		var err error
+		cache, err = media.NewCache(media.DefaultDecodedCacheEntries, "")
+		if err != nil {
+			return nil
+		}
+		cache.ConfigureLRU(media.DefaultDecodedCacheEntries, cfg.DecodedCacheMaxBytes)
+		cache.ConfigureDisk(cfg.DiskCacheMaxBytes, cfg.DiskCacheTTL)
+	}
 	return &media.Fetcher{
 		Cache:              cache,
 		MaxPixels:          chatMediaPixelBudget(cfg),
@@ -303,25 +313,26 @@ func chatMediaConfig(appCfg config.Config) media.Config {
 	defaults := media.DefaultConfig()
 	m := appCfg.Media
 	cfg := media.Config{
-		Enabled:            m.Enabled && appCfg.Privacy.FetchExternalMedia,
-		MaxHeightCells:     m.MaxHeightCells,
-		Animate:            m.AnimateGIFs,
-		EmojiImages:        m.EmojiImages,
-		MaxResponseBytes:   m.MaxResponseBytes,
-		MaxSourcePixels:    m.MaxSourcePixels,
-		MaxSourceDimension: m.MaxSourceDimension,
-		GIFMaxFrames:       m.MaxGIFFrames,
-		GIFMaxMemoryBytes:  m.MaxGIFMemoryBytes,
-		RequestTimeout:     time.Duration(m.RequestTimeoutSeconds) * time.Second,
-		ConcurrentFetches:  m.ConcurrentFetches,
-		QueuedFetches:      m.QueuedFetches,
-		DiskCacheEnabled:   appCfg.Privacy.PersistMediaCache,
-		DiskCacheMaxBytes:  m.CacheMaxBytes,
-		DiskCacheTTL:       time.Duration(m.CacheTTLHours) * time.Hour,
-		Prefetch:           appCfg.Privacy.PrefetchMedia,
-		MpvPath:            m.MpvPath,
-		VideoEnabled:       m.VideoEnabled && appCfg.Privacy.PlayVideos,
-		VideoAudio:         m.VideoAudio,
+		Enabled:              m.Enabled && appCfg.Privacy.FetchExternalMedia,
+		MaxHeightCells:       m.MaxHeightCells,
+		Animate:              m.AnimateGIFs,
+		EmojiImages:          m.EmojiImages,
+		MaxResponseBytes:     m.MaxResponseBytes,
+		MaxSourcePixels:      m.MaxSourcePixels,
+		MaxSourceDimension:   m.MaxSourceDimension,
+		GIFMaxFrames:         m.MaxGIFFrames,
+		GIFMaxMemoryBytes:    m.MaxGIFMemoryBytes,
+		RequestTimeout:       time.Duration(m.RequestTimeoutSeconds) * time.Second,
+		ConcurrentFetches:    m.ConcurrentFetches,
+		QueuedFetches:        m.QueuedFetches,
+		DecodedCacheMaxBytes: m.DecodedCacheMaxBytes,
+		DiskCacheEnabled:     appCfg.Privacy.PersistMediaCache,
+		DiskCacheMaxBytes:    m.CacheMaxBytes,
+		DiskCacheTTL:         time.Duration(m.CacheTTLHours) * time.Hour,
+		Prefetch:             appCfg.Privacy.PrefetchMedia,
+		MpvPath:              m.MpvPath,
+		VideoEnabled:         m.VideoEnabled && appCfg.Privacy.PlayVideos,
+		VideoAudio:           m.VideoAudio,
 	}
 	cfg = cfg.Bounded()
 	local := os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""

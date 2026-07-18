@@ -67,7 +67,13 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 	}
 	if f.Cache != nil {
 		if img := f.Cache.GetLRU(url); img != nil {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			return img, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 	}
 	raw, cacheable, err := f.getRaw(ctx, url)
@@ -75,7 +81,7 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 		return nil, err
 	}
 	limits := f.limits()
-	img, err := DecodeWithLimits(bytes.NewReader(raw), DecodeLimits{
+	img, err := DecodeWithLimitsContext(ctx, bytes.NewReader(raw), DecodeLimits{
 		MaxEncodedBytes: limits.MaxResponseBytes,
 		MaxDimension:    limits.MaxSourceDimension,
 		MaxPixels:       limits.MaxSourcePixels,
@@ -83,10 +89,16 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 	if err != nil {
 		return nil, fmt.Errorf("media: decode %s: %w", url, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.MaxPixels.X > 0 && f.MaxPixels.Y > 0 {
 		img = DownscaleToPixels(img, f.MaxPixels.X, f.MaxPixels.Y)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if f.Cache != nil && cacheable {
+	if f.Cache != nil && cacheable && ctx.Err() == nil {
 		f.Cache.PutLRU(url, img)
 	}
 	return img, nil
@@ -95,12 +107,15 @@ func (f *Fetcher) Fetch(ctx context.Context, url string) (image.Image, error) {
 // FetchGIF downloads and composes all GIF frames within the configured canvas,
 // frame-count, and aggregate-memory limits.
 func (f *Fetcher) FetchGIF(ctx context.Context, url string) ([]Frame, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	raw, cacheable, err := f.getRaw(ctx, url)
 	if err != nil {
 		return nil, err
 	}
 	limits := f.limits()
-	frames, err := DecodeGIFWithLimits(bytes.NewReader(raw), GIFLimits{
+	frames, err := DecodeGIFWithLimitsContext(ctx, bytes.NewReader(raw), GIFLimits{
 		DecodeLimits: DecodeLimits{
 			MaxEncodedBytes: limits.MaxResponseBytes,
 			MaxDimension:    limits.MaxSourceDimension,
@@ -112,16 +127,34 @@ func (f *Fetcher) FetchGIF(ctx context.Context, url string) ([]Frame, error) {
 	if err != nil {
 		return nil, fmt.Errorf("media: decode gif %s: %w", url, err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.Cache != nil && cacheable && len(frames) > 0 {
-		f.Cache.PutLRU(url, frames[0].Image)
+		// Never retain the full composed GIF frame when the caller requested an
+		// inline pixel budget. The returned animation remains unchanged; only its
+		// still-image LRU fallback is downscaled and independently byte bounded.
+		first := frames[0].Image
+		if f.MaxPixels.X > 0 && f.MaxPixels.Y > 0 {
+			first = DownscaleToPixels(first, f.MaxPixels.X, f.MaxPixels.Y)
+		}
+		if ctx.Err() == nil {
+			f.Cache.PutLRU(url, first)
+		}
 	}
 	return frames, nil
 }
 
 func (f *Fetcher) getRaw(ctx context.Context, url string) ([]byte, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	limit := f.limits().MaxResponseBytes
 	if f.Cache != nil && !f.DisableDiskCache {
 		raw, err := f.Cache.GetDiskLimit(url, limit)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, false, ctxErr
+		}
 		if err == nil && raw != nil {
 			if int64(len(raw)) > limit {
 				return nil, false, fmt.Errorf("media: cached response for %s is %d bytes, limit is %d", url, len(raw), limit)
@@ -133,8 +166,14 @@ func (f *Fetcher) getRaw(ctx context.Context, url string) ([]byte, bool, error) 
 	if err != nil {
 		return nil, false, err
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	if f.Cache != nil && !f.DisableDiskCache && cacheable {
 		_ = f.Cache.PutDisk(url, raw)
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 	}
 	return raw, cacheable, nil
 }
@@ -165,7 +204,7 @@ func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, bool, error)
 	if resp.ContentLength > limits.MaxResponseBytes {
 		return nil, false, fmt.Errorf("media: response for %s is %d bytes, limit is %d", url, resp.ContentLength, limits.MaxResponseBytes)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, limits.MaxResponseBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(contextReader{ctx: ctx, r: resp.Body}, limits.MaxResponseBytes+1))
 	if err != nil {
 		return nil, false, fmt.Errorf("media: read body %s: %w", url, err)
 	}

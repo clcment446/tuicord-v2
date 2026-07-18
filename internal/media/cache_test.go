@@ -93,6 +93,43 @@ func TestCache_LRU_GetPromotesToFront(t *testing.T) {
 	}
 }
 
+func TestCacheLRUEvictsByDecodedBytes(t *testing.T) {
+	c := newTempCache(t, 64)
+	c.ConfigureLRU(64, 600)
+	c.PutLRU("old", blankImg(10, 10)) // 400 RGBA bytes
+	c.PutLRU("new", blankImg(10, 10))
+	if got := c.GetLRU("old"); got != nil {
+		t.Fatal("old entry survived decoded-byte eviction")
+	}
+	if got := c.GetLRU("new"); got == nil {
+		t.Fatal("new entry was unexpectedly evicted")
+	}
+	if got := c.LRUBytes(); got != 400 {
+		t.Fatalf("LRUBytes = %d, want 400", got)
+	}
+}
+
+func TestCacheLRUReplacementUpdatesMemoryAccounting(t *testing.T) {
+	c := newTempCache(t, 64)
+	c.ConfigureLRU(64, 1<<20)
+	c.PutLRU("same", blankImg(2, 2))
+	if got := c.LRUBytes(); got != 16 {
+		t.Fatalf("initial LRUBytes = %d, want 16", got)
+	}
+	c.PutLRU("same", blankImg(3, 4))
+	if got := c.LRUBytes(); got != 48 {
+		t.Fatalf("replacement LRUBytes = %d, want 48", got)
+	}
+}
+
+func TestCacheLRUSkipsSingleImageOverByteBudget(t *testing.T) {
+	c := NewMemoryCache(64, 100)
+	c.PutLRU("large", blankImg(10, 10))
+	if c.LRULen() != 0 || c.LRUBytes() != 0 {
+		t.Fatalf("oversized image retained: entries=%d bytes=%d", c.LRULen(), c.LRUBytes())
+	}
+}
+
 func TestCache_LRU_CapacityBound(t *testing.T) {
 	// Arrange: capacity of 5.
 	c := newTempCache(t, 5)
