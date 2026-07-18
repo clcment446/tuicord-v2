@@ -236,3 +236,22 @@ func TestTextInputMultilineWrapAndVerticalCursor(t *testing.T) {
 		t.Fatalf("cursor after down = %d, want %d", got, want)
 	}
 }
+
+func TestTextInputDeclinesCtrlModifiedRunes(t *testing.T) {
+	w := NewTextInput("")
+	// ctrl+v is a shortcut, not text: the input must decline it so it bubbles
+	// to global key handling (e.g. paste-image), not insert "v".
+	if w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'v', Mods: input.Ctrl}) {
+		t.Fatal("text input handled ctrl+v instead of declining it")
+	}
+	if w.Value() != "" {
+		t.Fatalf("ctrl+v inserted %q, want empty", w.Value())
+	}
+	// A plain rune still inserts.
+	if !w.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'v'}) {
+		t.Fatal("plain rune was not inserted")
+	}
+	if w.Value() != "v" {
+		t.Fatalf("value = %q, want \"v\"", w.Value())
+	}
+}

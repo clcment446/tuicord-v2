@@ -36,6 +36,15 @@ type poster interface {
 	Post(func())
 }
 
+// EventSink receives client events for out-of-tree consumers (the Lua plugin
+// system). It is an optional seam: App calls it via emit only when one is set,
+// so this package never depends on the plugin package. Emit must not block —
+// implementations are expected to enqueue and return. Payload snowflake fields
+// are uint64.
+type EventSink interface {
+	Emit(name string, data map[string]any)
+}
+
 // sender is the slice of the arikawa client used to send messages.
 type sender interface {
 	SendMessageComplex(discord.ChannelID, api.SendMessageData) (*discord.Message, error)
@@ -294,6 +303,7 @@ type App struct {
 	onReady  func()
 	onChange func()
 	onError  func(error)
+	events   EventSink
 
 	activeGuild   store.GuildID
 	activeChannel store.ChannelID
@@ -503,6 +513,10 @@ func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
 	if channel != 0 {
 		a.store.ClearUnread(channel)
 	}
+	a.emit("channel.switch", map[string]any{
+		"guild_id":   uint64(guild),
+		"channel_id": uint64(channel),
+	})
 }
 
 // OnReady registers a callback run (on the UI goroutine) after the READY event
@@ -516,6 +530,19 @@ func (a *App) OnChange(fn func()) { a.onChange = fn }
 // OnError registers a callback run (on the UI goroutine) when background work
 // fails but the client can keep running.
 func (a *App) OnError(fn func(error)) { a.onError = fn }
+
+// SetEventSink registers an optional consumer of client events (the plugin
+// system). Pass nil to detach.
+func (a *App) SetEventSink(sink EventSink) { a.events = sink }
+
+// emit forwards an event to the registered sink, if any. Safe to call with a
+// nil receiver or no sink.
+func (a *App) emit(name string, data map[string]any) {
+	if a == nil || a.events == nil {
+		return
+	}
+	a.events.Emit(name, data)
+}
 
 // RegisterHandlers subscribes to the gateway events the client consumes. Each
 // handler marshals its store mutation onto the UI goroutine via Post.
@@ -632,6 +659,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		if a.onReady != nil {
 			a.onReady()
 		}
+		a.emit("ready", nil)
 	})
 }
 
@@ -671,6 +699,15 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		if a.onChange != nil {
 			a.onChange()
 		}
+		a.emit("message.create", map[string]any{
+			"id":         uint64(msg.ID),
+			"channel_id": uint64(msg.ChannelID),
+			"guild_id":   uint64(e.GuildID),
+			"author_id":  uint64(msg.AuthorID),
+			"author":     msg.Author,
+			"content":    msg.Content,
+			"bot":        e.Author.Bot,
+		})
 	})
 }
 
@@ -728,6 +765,13 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 		if a.onChange != nil {
 			a.onChange()
 		}
+		a.emit("message.update", map[string]any{
+			"id":         uint64(id),
+			"channel_id": uint64(channel),
+			"guild_id":   uint64(e.GuildID),
+			"author_id":  uint64(patch.AuthorID),
+			"content":    patch.Content,
+		})
 	})
 }
 
@@ -739,6 +783,10 @@ func (a *App) handleMessageDelete(e *gateway.MessageDeleteEvent) {
 		if a.onChange != nil {
 			a.onChange()
 		}
+		a.emit("message.delete", map[string]any{
+			"id":         uint64(id),
+			"channel_id": uint64(channel),
+		})
 	})
 }
 
@@ -765,11 +813,19 @@ func (a *App) handleReactionAdd(e *gateway.MessageReactionAddEvent) {
 		Count:     1,
 		Me:        store.UserID(e.UserID) == a.selfID && a.selfID != 0,
 	}
+	userID := uint64(e.UserID)
+	emoji := e.Emoji.Name
 	a.ui.Post(func() {
 		a.store.AddReaction(channel, id, react)
 		if a.onChange != nil {
 			a.onChange()
 		}
+		a.emit("reaction.add", map[string]any{
+			"channel_id": uint64(channel),
+			"message_id": uint64(id),
+			"user_id":    userID,
+			"emoji":      emoji,
+		})
 	})
 }
 
@@ -779,11 +835,18 @@ func (a *App) handleReactionRemove(e *gateway.MessageReactionRemoveEvent) {
 	name := e.Emoji.Name
 	emojiID := uint64(e.Emoji.ID)
 	me := store.UserID(e.UserID) == a.selfID && a.selfID != 0
+	userID := uint64(e.UserID)
 	a.ui.Post(func() {
 		a.store.RemoveReaction(channel, id, name, emojiID, me)
 		if a.onChange != nil {
 			a.onChange()
 		}
+		a.emit("reaction.remove", map[string]any{
+			"channel_id": uint64(channel),
+			"message_id": uint64(id),
+			"user_id":    userID,
+			"emoji":      name,
+		})
 	})
 }
 
@@ -988,6 +1051,24 @@ func (a *App) SubmitComponent(sub ComponentSubmit) {
 	}()
 }
 
+// SendToChannel posts content to an explicit channel with an optimistic local
+// echo, mirroring Send but without requiring the channel to be active. It is
+// the seam plugins use for tuicord.send_to. Call on the UI goroutine.
+func (a *App) SendToChannel(channel store.ChannelID, content string) {
+	if a == nil || channel == 0 || strings.TrimSpace(content) == "" {
+		return
+	}
+	nonce := newNonce()
+	a.store.AppendMessage(store.Message{
+		ChannelID: channel,
+		Author:    "you",
+		Content:   content,
+		Nonce:     nonce,
+		Pending:   true,
+	})
+	go a.deliver(channel, api.SendMessageData{Content: content, Nonce: nonce}, nonce)
+}
+
 func (a *App) deliver(channel store.ChannelID, data api.SendMessageData, nonce string) {
 	_, err := a.send.SendMessageComplex(discord.ChannelID(channel), data)
 	if err != nil {
@@ -1067,6 +1148,7 @@ func (a *App) reportError(err error) {
 		if a.onError != nil {
 			a.onError(err)
 		}
+		a.emit("error", map[string]any{"message": err.Error()})
 	})
 }
 

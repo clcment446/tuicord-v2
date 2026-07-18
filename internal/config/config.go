@@ -101,6 +101,10 @@ type Keys struct {
 	FocusComposer string `toml:"focus_composer"`
 	// Picker opens the emoji/sticker picker over the composer.
 	Picker string `toml:"picker"`
+	// PasteImage attaches an image from the system clipboard. Defaults to
+	// ctrl+v; terminals' text paste is ctrl+shift+v, so this does not shadow it.
+	// Also available as the ;paste command.
+	PasteImage string `toml:"paste_image"`
 }
 
 // Nitro controls how the picker sends emoji and stickers the account cannot use
@@ -169,6 +173,20 @@ type Integrations struct {
 	SlashCommands SlashCommands `toml:"slash_commands"`
 }
 
+// Plugins controls the Lua plugin system. Plugins are loaded from the plugins/
+// directory beside config.toml. They run under a restricted sandbox; extra
+// capabilities (filesystem, network) are granted per-plugin via Grants.
+type Plugins struct {
+	// Enabled is the master switch. When false, no plugins are loaded.
+	Enabled bool `toml:"enabled"`
+	// Disabled lists plugin names (file base name without .lua) to skip.
+	Disabled []string `toml:"disabled"`
+	// Grants maps a plugin name to the capabilities the user has granted it,
+	// e.g. "fs" or "net". Absent from the map means the plugin runs fully
+	// sandboxed.
+	Grants map[string][]string `toml:"grants"`
+}
+
 // Config is the full user configuration.
 type Config struct {
 	Layout         Layout          `toml:"layout"`
@@ -179,7 +197,38 @@ type Config struct {
 	Auth           Auth            `toml:"auth"`
 	Accessibility  Accessibility   `toml:"accessibility"`
 	Integrations   Integrations    `toml:"integrations"`
+	// Plugins is held by pointer so Config stays comparable (its Disabled slice
+	// and Grants map are not). A nil pointer means "plugins enabled, none
+	// disabled, no grants" — see PluginsEnabled/PluginDisabled/PluginGrants.
+	Plugins        *Plugins        `toml:"plugins"`
 	ColorOverrides *ColorOverrides `toml:"-"`
+}
+
+// PluginsEnabled reports whether the plugin system should load plugins. A
+// missing [plugins] section defaults to enabled.
+func (c Config) PluginsEnabled() bool {
+	return c.Plugins == nil || c.Plugins.Enabled
+}
+
+// PluginDisabled reports whether the named plugin is in the disabled list.
+func (c Config) PluginDisabled(name string) bool {
+	if c.Plugins == nil {
+		return false
+	}
+	for _, d := range c.Plugins.Disabled {
+		if d == name {
+			return true
+		}
+	}
+	return false
+}
+
+// PluginGrants returns the capabilities the user granted the named plugin.
+func (c Config) PluginGrants(name string) []string {
+	if c.Plugins == nil {
+		return nil
+	}
+	return c.Plugins.Grants[name]
 }
 
 // ColorOverrides contains the selector-based overrides loaded from
@@ -210,6 +259,7 @@ func Default() Config {
 			NextPanel:     "tab",
 			FocusComposer: "esc",
 			Picker:        "ctrl+e",
+			PasteImage:    "ctrl+v",
 		},
 		Nitro:         Nitro{Fake: true},
 		Accessibility: Accessibility{MouseOn: true},
@@ -233,6 +283,27 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, AppName, "config.toml"), nil
+}
+
+// PluginsDir returns the directory Lua plugins are loaded from, beside
+// config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
+func PluginsDir() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "plugins"), nil
+}
+
+// ConfigLuaPath returns the path to the optional Lua configuration file beside
+// config.toml. It is loaded independently of the plugin system, so settings and
+// keybindings can be expressed in Lua without writing a plugin.
+func ConfigLuaPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "config.lua"), nil
 }
 
 // Load reads the config file, layering it over Default. When the file does not
@@ -289,6 +360,9 @@ func loadFrom(path string) (Config, error) {
 		if werr := writeColorsTemplate(filepath.Join(filepath.Dir(path), "colors.conf")); werr != nil {
 			return cfg, werr
 		}
+		// Create an empty plugins/ directory so the location is discoverable on
+		// first run. A failure here is not fatal to loading config.
+		_ = os.MkdirAll(filepath.Join(filepath.Dir(path), "plugins"), 0o755)
 		if werr := loadOptionalColorOverrides(&cfg, path); werr != nil {
 			return cfg, werr
 		}
@@ -432,6 +506,9 @@ quick_switcher = "ctrl+k"
 help = "ctrl+/"
 next_panel = "tab"
 focus_composer = "esc"
+# Attach an image from the clipboard (also available as ;paste). Set empty to
+# disable; text paste (ctrl+shift+v) is unaffected either way.
+paste_image = "ctrl+v"
 
 [colors]
 # Custom palette values are opt-in. Set enabled = true to use them.
@@ -464,6 +541,17 @@ fake = true
 
 [integrations.slash_commands]
 enabled = false
+
+# [plugins]
+# Lua plugins are loaded from the plugins/ directory beside this file.
+# Plugins are enabled by default; set enabled = false to load none.
+# enabled = true
+# disabled = ["some-plugin"]   # skip plugins by file base name
+#
+# Plugins run sandboxed (no filesystem or network). Grant extra capabilities
+# per-plugin here; recognized capabilities are "fs" and "net".
+# [plugins.grants]
+# some-plugin = ["fs"]
 
 # Fine-grained cell colors live beside this file in colors.conf.
 # Example:
