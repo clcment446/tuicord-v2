@@ -42,6 +42,16 @@ func (r *commandRegistry) lookup(name string) (handler, bool) {
 	return h, ok
 }
 
+func (r *commandRegistry) removeState(L *lua.LState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for name, h := range r.commands {
+		if h.L == L {
+			delete(r.commands, name)
+		}
+	}
+}
+
 // entry describes a registered command for listing in help.
 type entry struct {
 	Name string

@@ -32,11 +32,15 @@ type Options struct {
 	Log io.Writer
 	// QueueSize bounds the plugin job queue; <=0 uses a sane default.
 	QueueSize int
+	// StartupTimeout bounds execution of each plugin/config file. <=0 uses 5s.
+	StartupTimeout time.Duration
+	// CallbackTimeout bounds each event, command, or key callback. <=0 uses 5s.
+	CallbackTimeout time.Duration
 }
 
-// Manager owns the Lua runtime and the plugin registries. It is safe to call
-// Emit, RunCommand and RunKey from any goroutine; loading and Close should be
-// called from a single owner goroutine (typically the wiring layer).
+// Manager owns the Lua runtime and the plugin registries. Emit, RunCommand,
+// RunKey, and Close are safe from any goroutine (including concurrent Close
+// calls). Loading must finish before normal dispatch or shutdown begins.
 type Manager struct {
 	opts     Options
 	rt       *runtime
@@ -47,8 +51,15 @@ type Manager struct {
 	host     *Host
 
 	mu     sync.Mutex
-	states []*lua.LState
+	states []managedState
 	loaded []string
+
+	logMu sync.Mutex
+}
+
+type managedState struct {
+	L      *lua.LState
+	fsRoot *os.Root
 }
 
 // NewManager creates a started Manager. Call Load to discover and run plugins.
@@ -58,6 +69,12 @@ func NewManager(opts Options) *Manager {
 	}
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 256
+	}
+	if opts.StartupTimeout <= 0 {
+		opts.StartupTimeout = defaultStartupTimeout
+	}
+	if opts.CallbackTimeout <= 0 {
+		opts.CallbackTimeout = defaultCallbackTimeout
 	}
 	m := &Manager{
 		opts:     opts,
@@ -141,6 +158,16 @@ func (m *Manager) loadOne(f pluginFile) error {
 			loadErr = err
 			return
 		}
+		grants := grantSet(m.opts.Grants[f.name])
+		var fsRoot *os.Root
+		if grants[CapFS] && m.opts.DataDir != "" {
+			fsRoot, err = m.openPluginFSRoot(f.name)
+			if err != nil {
+				L.Close()
+				loadErr = fmt.Errorf("open filesystem grant: %w", err)
+				return
+			}
+		}
 		pctx := &pluginContext{
 			name:     f.name,
 			host:     m.host,
@@ -149,17 +176,25 @@ func (m *Manager) loadOne(f pluginFile) error {
 			keys:     m.keys,
 			themes:   m.themes,
 			log:      func(msg string) { m.logf("[%s] %s", f.name, msg) },
-			grants:   grantSet(m.opts.Grants[f.name]),
-			dataDir:  m.pluginDataDir(f.name),
+			grants:   grants,
+			fsRoot:   fsRoot,
 		}
 		installAPI(L, pctx)
-		if err := L.DoFile(f.path); err != nil {
+		if err := safeDoFile(m.rt.context(), L, f.path, m.opts.StartupTimeout); err != nil {
+			// Startup can register handlers before failing or timing out. Remove
+			// those pointers before closing the state they belong to.
+			m.events.removeState(L)
+			m.commands.removeState(L)
+			m.keys.removeState(L)
+			if fsRoot != nil {
+				_ = fsRoot.Close()
+			}
 			L.Close()
 			loadErr = err
 			return
 		}
 		m.mu.Lock()
-		m.states = append(m.states, L)
+		m.states = append(m.states, managedState{L: L, fsRoot: fsRoot})
 		m.mu.Unlock()
 	})
 	if !ok {
@@ -176,7 +211,7 @@ func (m *Manager) Emit(name string, payload map[string]any) {
 		return
 	}
 	if !m.rt.submit(func() {
-		m.events.dispatch(name, payload, m.onCallbackError)
+		m.events.dispatch(m.rt.context(), m.opts.CallbackTimeout, name, payload, m.onCallbackError)
 	}) {
 		m.logf("dropped event %q (plugin queue full)", name)
 	}
@@ -198,7 +233,7 @@ func (m *Manager) RunCommand(name string, args []string) bool {
 		for _, a := range args {
 			argsTbl.Append(lua.LString(a))
 		}
-		if err := safeCall(h.L, h.fn, argsTbl); err != nil {
+		if err := safeCall(m.rt.context(), h.L, h.fn, m.opts.CallbackTimeout, argsTbl); err != nil {
 			m.onCallbackError(h.plugin, err)
 		}
 	})
@@ -248,7 +283,7 @@ func (m *Manager) RunKey(spec string) bool {
 		return false
 	}
 	m.rt.submit(func() {
-		if err := safeCall(h.L, h.fn); err != nil {
+		if err := safeCall(m.rt.context(), h.L, h.fn, m.opts.CallbackTimeout); err != nil {
 			m.onCallbackError(h.plugin, err)
 		}
 	})
@@ -286,8 +321,11 @@ func (m *Manager) Close() {
 	m.rt.stop()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, L := range m.states {
-		L.Close()
+	for _, state := range m.states {
+		state.L.Close()
+		if state.fsRoot != nil {
+			_ = state.fsRoot.Close()
+		}
 	}
 	m.states = nil
 }
@@ -308,18 +346,35 @@ func (m *Manager) isDisabled(name string) bool {
 	return false
 }
 
-func (m *Manager) pluginDataDir(name string) string {
-	if m.opts.DataDir == "" {
-		return ""
+// openPluginFSRoot creates and opens a plugin's directory through a Root for
+// the configured DataDir. Opening the child through the base Root prevents a
+// pre-existing or concurrently swapped symlink from redirecting it elsewhere.
+func (m *Manager) openPluginFSRoot(name string) (*os.Root, error) {
+	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." {
+		return nil, fmt.Errorf("invalid plugin data directory name %q", name)
 	}
-	return filepath.Join(m.opts.DataDir, name)
+	if err := os.MkdirAll(m.opts.DataDir, 0o755); err != nil {
+		return nil, err
+	}
+	base, err := os.OpenRoot(m.opts.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	defer base.Close()
+	if err := base.MkdirAll(name, 0o755); err != nil {
+		return nil, err
+	}
+	return base.OpenRoot(name)
 }
 
 func (m *Manager) logf(format string, args ...any) {
 	if m.opts.Log == nil {
 		return
 	}
-	fmt.Fprintf(m.opts.Log, "%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	line := fmt.Sprintf("%s %s\n", time.Now().Format(time.RFC3339), fmt.Sprintf(format, args...))
+	m.logMu.Lock()
+	defer m.logMu.Unlock()
+	_, _ = io.WriteString(m.opts.Log, line)
 }
 
 // grantSet turns a capability list into a lookup set.

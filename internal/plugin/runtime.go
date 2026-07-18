@@ -1,6 +1,9 @@
 package plugin
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // runtime owns the single goroutine on which all Lua executes. Work is a plain
 // closure; callers use submit for fire-and-forget dispatch (events, key/command
@@ -10,6 +13,8 @@ type runtime struct {
 	quit   chan struct{}
 	wg     sync.WaitGroup
 	closed chan struct{}
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	closeOnce sync.Once
 }
@@ -20,10 +25,13 @@ func newRuntime(queue int) *runtime {
 	if queue < 1 {
 		queue = 1
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &runtime{
 		jobs:   make(chan func(), queue),
 		quit:   make(chan struct{}),
 		closed: make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 }
 
@@ -35,6 +43,13 @@ func (r *runtime) start() {
 		defer r.wg.Done()
 		defer close(r.closed)
 		for {
+			// Prefer shutdown over queued work. The second quit case closes the
+			// small race between this check and waiting for the next job.
+			select {
+			case <-r.quit:
+				return
+			default:
+			}
 			select {
 			case <-r.quit:
 				return
@@ -90,8 +105,17 @@ func (r *runtime) do(job func()) bool {
 	}
 }
 
-// stop signals the worker to exit and waits for the in-flight job to finish.
+// context is the parent context for every Lua execution. Cancelling it lets
+// stop interrupt an in-flight Lua loop without touching its LState from the
+// shutdown goroutine.
+func (r *runtime) context() context.Context { return r.ctx }
+
+// stop signals the worker to exit, cancels any in-flight Lua execution, and
+// waits for the worker. LStates can be closed safely after it returns.
 func (r *runtime) stop() {
-	r.closeOnce.Do(func() { close(r.quit) })
+	r.closeOnce.Do(func() {
+		close(r.quit)
+		r.cancel()
+	})
 	r.wg.Wait()
 }

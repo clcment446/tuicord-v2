@@ -1,6 +1,11 @@
 package plugin
 
-import lua "github.com/yuin/gopher-lua"
+import (
+	"context"
+	"time"
+
+	lua "github.com/yuin/gopher-lua"
+)
 
 // Event names dispatched to plugins via tuicord.on. Payload shapes are
 // documented on each constant; all snowflake fields arrive as decimal strings.
@@ -51,13 +56,34 @@ func (b *eventBus) on(event string, L *lua.LState, fn *lua.LFunction, plugin str
 	b.subs[event] = append(b.subs[event], subscription{L: L, fn: fn, plugin: plugin})
 }
 
+// removeState discards registrations made before a plugin failed startup. It
+// runs on the same worker as registration and dispatch.
+func (b *eventBus) removeState(L *lua.LState) {
+	for event, subs := range b.subs {
+		kept := subs[:0]
+		for _, sub := range subs {
+			if sub.L != L {
+				kept = append(kept, sub)
+			}
+		}
+		for i := len(kept); i < len(subs); i++ {
+			subs[i] = subscription{}
+		}
+		if len(kept) == 0 {
+			delete(b.subs, event)
+		} else {
+			b.subs[event] = kept
+		}
+	}
+}
+
 // dispatch invokes every listener for event, building the payload table freshly
 // for each subscriber's state (Lua values are state-specific). A callback error
 // is reported via onErr and does not stop the remaining listeners.
-func (b *eventBus) dispatch(event string, payload map[string]any, onErr func(plugin string, err error)) {
+func (b *eventBus) dispatch(ctx context.Context, timeout time.Duration, event string, payload map[string]any, onErr func(plugin string, err error)) {
 	for _, sub := range b.subs[event] {
 		arg := toLua(sub.L, mapAsAny(payload))
-		if err := safeCall(sub.L, sub.fn, arg); err != nil && onErr != nil {
+		if err := safeCall(ctx, sub.L, sub.fn, timeout, arg); err != nil && onErr != nil {
 			onErr(sub.plugin, err)
 		}
 	}

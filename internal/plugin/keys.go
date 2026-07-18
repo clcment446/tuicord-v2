@@ -1,6 +1,10 @@
 package plugin
 
-import "sync"
+import (
+	"sync"
+
+	lua "github.com/yuin/gopher-lua"
+)
 
 // keyRegistry maps key specs (e.g. "ctrl+g") to plugin handlers. Like the
 // command registry it is read from the UI goroutine during key dispatch and
@@ -29,6 +33,16 @@ func (r *keyRegistry) lookup(spec string) (handler, bool) {
 	defer r.mu.RUnlock()
 	h, ok := r.keys[spec]
 	return h, ok
+}
+
+func (r *keyRegistry) removeState(L *lua.LState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for spec, h := range r.keys {
+		if h.L == L {
+			delete(r.keys, spec)
+		}
+	}
 }
 
 func (r *keyRegistry) specs() []string {

@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"os"
 	"strconv"
 	"strings"
 
@@ -17,7 +18,7 @@ type pluginContext struct {
 	themes   *themeRegistry
 	log      func(msg string)
 	grants   map[string]bool
-	dataDir  string
+	fsRoot   *os.Root
 }
 
 // installAPI builds the global `tuicord` table in L, wiring every binding to
