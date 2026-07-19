@@ -48,10 +48,10 @@ type App struct {
 	mouseOn      bool
 	focusSplits  bool
 	ttyColors    bool
-	// pendingFocus retains an exact focus request for a widget that became
-	// focusable during event handling but is not in the focus ring until the
-	// next render (for example Vim i enabling the composer).
-	pendingFocus Widget
+	// pendingFocus retains a generation-scoped exact request for a widget that
+	// became focusable during event handling but is not in the focus ring until
+	// the next render (for example Vim i enabling the composer).
+	pendingFocus *pendingFocusRequest
 
 	// Focus owns keyboard focus traversal for the retained tree.
 	Focus FocusManager
@@ -70,7 +70,15 @@ func New(opts ...Option) *App {
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.Focus.SetOnChange(a.focusChanged)
 	return a
+}
+
+// pendingFocusRequest keeps both the requesting root and its opaque
+// generation so a later render cannot apply work made stale in the meantime.
+type pendingFocusRequest struct {
+	owner   Widget
+	request FocusRequest
 }
 
 // WithMouse controls whether the app dispatches mouse events and asks the
@@ -235,6 +243,9 @@ func (a *App) animating() bool {
 
 // Render draws root at size and refreshes the hit-test and focus indexes.
 func (a *App) Render(root Widget, size Size) *screen.Buffer {
+	// Keep root notification intact even for a zero-value App initialized by an
+	// embedder instead of New.
+	a.Focus.SetOnChange(a.focusChanged)
 	if size.W < 0 {
 		size.W = 0
 	}
@@ -245,10 +256,15 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	if bg := a.theme.Background; bg.Set() {
 		buf.Fill(screen.Rect{W: size.W, H: size.H}, screen.Cell{Content: " ", Style: screen.Style{Bg: bg}})
 	}
+	// Publish the new root before rebuilding focus so every replacement change
+	// is reported to the tree that owns the rendered interaction state.
+	a.mu.Lock()
+	a.root = root
+	a.size = size
+	a.mu.Unlock()
 	if root == nil || size.W == 0 || size.H == 0 {
+		a.discardPendingFocus(false)
 		a.mu.Lock()
-		a.root = root
-		a.size = size
 		a.hits = HitIndex{}
 		a.dirty = false
 		a.mu.Unlock()
@@ -262,23 +278,15 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 	hits = BuildHitIndex(root, size)
 	widgets := collectWidgets(root)
 	applyFocusPolicy(widgets, a.focusSplits)
-	a.Focus.Replace(widgets)
-	a.mu.Lock()
-	pendingFocus := a.pendingFocus
-	a.mu.Unlock()
-	if pendingFocus != nil && a.Focus.Set(pendingFocus) {
-		a.mu.Lock()
-		if sameWidget(a.pendingFocus, pendingFocus) {
-			a.pendingFocus = nil
-		}
-		a.mu.Unlock()
-	}
+	// Focus only widgets with non-empty final visible layout. This excludes
+	// hidden responsive panes and zero-area controls without changing the
+	// retained tree used for indicators, overlays, or later larger renders.
+	a.Focus.Replace(visibleWidgets(root, hits))
+	a.applyPendingFocus(root)
 	applyFocusIndicators(widgets, a.Focus.Focused())
 	drawTree(buf, root, hits)
 
 	a.mu.Lock()
-	a.root = root
-	a.size = size
 	a.hits = hits
 	a.dirty = false
 	a.mu.Unlock()
@@ -296,16 +304,18 @@ func (a *App) Handle(ev Event) bool {
 			return false
 		}
 		handled := a.handleMouse(ev)
-		a.consumeFocusRequest()
+		a.consumeFocusRequests()
 		return handled
 	case input.KeyEvent:
 		handled := a.handleKey(ev)
-		a.consumeFocusRequest()
+		a.consumeFocusRequests()
 		return handled
 	case input.TickEvent:
 		return a.handleTick(ev)
 	default:
-		return a.handleFocused(ev)
+		handled := a.handleFocused(ev)
+		a.consumeFocusRequests()
+		return handled
 	}
 }
 
@@ -441,6 +451,11 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 		}
 	}
 	if ev.Key == input.KeyTab && !ev.Release {
+		// A retained modal may own an internal field cycle. Give the focused
+		// widget and its ancestors first refusal before global ring traversal.
+		if a.handleFocused(ev) {
+			return true
+		}
 		if ev.Mods&input.Shift != 0 {
 			a.Focus.Prev()
 		} else {
@@ -452,56 +467,170 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 	return a.handleFocused(ev)
 }
 
-// consumeFocusRequest applies a root-owned exact focus transfer. If the target
-// became focusable while handling this event, it is not present in the current
-// focus ring yet; retain it through the next render instead of dropping it.
-func (a *App) consumeFocusRequest() {
+// consumeFocusRequests applies root-owned exact and configurable traversal
+// requests after the event finishes bubbling.
+func (a *App) consumeFocusRequests() {
 	if a == nil {
 		return
 	}
 	a.mu.Lock()
 	root := a.root
 	a.mu.Unlock()
-	requester, ok := root.(FocusRequester)
-	if !ok {
+	if requester, ok := root.(FocusRequester); ok {
+		if requested, ready := requester.TakeFocusRequest(); ready && requested.Target != nil {
+			a.installFocusRequest(root, requested)
+		}
+	}
+	if requester, ok := root.(FocusTraversalRequester); ok {
+		step := requester.TakeFocusTraversalRequest()
+		requested := step
+		for step > 0 {
+			a.Focus.Next()
+			step--
+		}
+		for step < 0 {
+			a.Focus.Prev()
+			step++
+		}
+		if requested != 0 {
+			a.Invalidate()
+		}
+	}
+}
+
+func (a *App) installFocusRequest(owner Widget, request FocusRequest) {
+	if !focusRequestValid(owner, request) {
+		focusRequestDone(owner, request, false)
 		return
 	}
-	requested := requester.TakeFocusRequest()
-	if requested == nil {
-		return
-	}
-	if a.Focus.Set(requested) {
-		a.mu.Lock()
-		a.pendingFocus = nil
-		a.mu.Unlock()
+	if a.Focus.set(request.Target, FocusChangeDirect) {
+		a.discardPendingFocus(false)
+		focusRequestDone(owner, request, true)
 	} else {
 		a.mu.Lock()
-		a.pendingFocus = requested
+		previous := a.pendingFocus
+		a.pendingFocus = &pendingFocusRequest{owner: owner, request: request}
 		a.mu.Unlock()
+		if previous != nil {
+			focusRequestDone(previous.owner, previous.request, false)
+		}
 	}
 	a.Invalidate()
 }
 
-func (a *App) handleFocused(ev Event) bool {
-	if focused := a.Focus.Focused(); focused != nil && focused.Handle(ev) {
-		return true
+func (a *App) applyPendingFocus(root Widget) {
+	a.mu.Lock()
+	pending := a.pendingFocus
+	a.mu.Unlock()
+	if pending == nil {
+		return
 	}
+	if !sameWidget(pending.owner, root) || !focusRequestValid(pending.owner, pending.request) {
+		a.discardPendingFocus(false)
+		return
+	}
+	if a.Focus.set(pending.request.Target, FocusChangeDirect) {
+		a.discardPendingFocus(true)
+	}
+}
+
+func (a *App) discardPendingFocus(applied bool) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	pending := a.pendingFocus
+	a.pendingFocus = nil
+	a.mu.Unlock()
+	if pending != nil {
+		focusRequestDone(pending.owner, pending.request, applied)
+	}
+}
+
+func focusRequestValid(owner Widget, request FocusRequest) bool {
+	if owner == nil || request.Target == nil {
+		return false
+	}
+	validator, ok := owner.(FocusRequestValidator)
+	return !ok || validator.FocusRequestValid(request)
+}
+
+func focusRequestDone(owner Widget, request FocusRequest, applied bool) {
+	if completer, ok := owner.(FocusRequestCompleter); ok {
+		completer.FocusRequestDone(request, applied)
+	}
+}
+
+func (a *App) handleFocused(ev Event) bool {
 	a.mu.Lock()
 	root := a.root
 	a.mu.Unlock()
-	if root != nil && !sameWidget(root, a.Focus.Focused()) {
-		return root.Handle(ev)
+	focused := a.Focus.Focused()
+	if focused == nil {
+		return root != nil && root.Handle(ev)
+	}
+	if focused.Handle(ev) {
+		return true
+	}
+	path := widgetPath(root, focused)
+	if len(path) == 0 {
+		if root != nil && !sameWidget(root, focused) {
+			return root.Handle(ev)
+		}
+		return false
+	}
+	for i := len(path) - 2; i >= 0; i-- {
+		ancestor := path[i]
+		if bubbler, ok := ancestor.(EventBubbler); ok {
+			if bubbler.HandleBubble(ev) {
+				return true
+			}
+			continue
+		}
+		if ancestor.Handle(ev) {
+			return true
+		}
 	}
 	return false
 }
 
+func widgetPath(root, target Widget) []Widget {
+	if root == nil || target == nil {
+		return nil
+	}
+	var path []Widget
+	var walk func(Widget) bool
+	walk = func(w Widget) bool {
+		if w == nil {
+			return false
+		}
+		path = append(path, w)
+		if sameWidget(w, target) {
+			return true
+		}
+		if container, ok := w.(Container); ok {
+			for _, child := range container.Children() {
+				if walk(child) {
+					return true
+				}
+			}
+		}
+		path = path[:len(path)-1]
+		return false
+	}
+	if !walk(root) {
+		return nil
+	}
+	return path
+}
+
 func (a *App) focusDeepest(path []Hit, fallback Widget) {
 	for i := len(path) - 1; i >= 0; i-- {
-		if a.Focus.Set(path[i].Widget) {
+		if a.Focus.set(path[i].Widget, FocusChangePointer) {
 			return
 		}
 	}
-	_ = a.Focus.Set(fallback)
+	_ = a.Focus.set(fallback, FocusChangePointer)
 }
 
 func (a *App) run(
@@ -780,6 +909,22 @@ func collectWidgets(root Widget) []Widget {
 	return widgets
 }
 
+func visibleWidgets(root Widget, hits HitIndex) []Widget {
+	entries := hits.Entries()
+	// A few lightweight embedders expose retained children without linking
+	// their layout nodes. They cannot provide final visibility information, so
+	// preserve the historical retained-tree fallback rather than dropping the
+	// entire focus ring.
+	if len(entries) == 0 {
+		return collectWidgets(root)
+	}
+	widgets := make([]Widget, 0, len(entries))
+	for _, entry := range entries {
+		widgets = append(widgets, entry.Widget)
+	}
+	return widgets
+}
+
 func applyFocusIndicators(widgets []Widget, focused Widget) {
 	for _, w := range widgets {
 		if owner, ok := w.(FocusOwnerIndicator); ok {
@@ -799,6 +944,18 @@ func applyFocusPolicy(widgets []Widget, focusSplits bool) {
 		if configurable, ok := w.(FocusConfigurable); ok {
 			configurable.SetFocusEnabled(focusSplits)
 		}
+	}
+}
+
+func (a *App) focusChanged(change FocusChange) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	root := a.root
+	a.mu.Unlock()
+	if observer, ok := root.(FocusObserver); ok {
+		observer.FocusChanged(change)
 	}
 }
 

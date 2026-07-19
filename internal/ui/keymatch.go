@@ -15,19 +15,35 @@ func keyMatches(ev input.KeyEvent, spec string) bool {
 	}
 	spec = strings.ToLower(strings.TrimSpace(spec))
 
-	wantCtrl := false
+	var want input.Mod
 	for {
 		switch {
 		case strings.HasPrefix(spec, "ctrl+"):
-			wantCtrl = true
+			want |= input.Ctrl
 			spec = spec[len("ctrl+"):]
+		case strings.HasPrefix(spec, "shift+"):
+			want |= input.Shift
+			spec = spec[len("shift+"):]
+		case strings.HasPrefix(spec, "alt+"):
+			want |= input.Alt
+			spec = spec[len("alt+"):]
+		case strings.HasPrefix(spec, "super+"):
+			want |= input.Super
+			spec = spec[len("super+"):]
+		case strings.HasPrefix(spec, "hyper+"):
+			want |= input.Hyper
+			spec = spec[len("hyper+"):]
+		case strings.HasPrefix(spec, "meta+"):
+			want |= input.Meta
+			spec = spec[len("meta+"):]
 		default:
 			goto match
 		}
 	}
 
 match:
-	if wantCtrl != (ev.Mods&input.Ctrl != 0) {
+	const known = input.Shift | input.Alt | input.Ctrl | input.Super | input.Hyper | input.Meta
+	if ev.Mods&known != want {
 		return false
 	}
 	switch spec {

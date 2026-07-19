@@ -354,6 +354,115 @@ func TestOverlayDrawsAfterChildren(t *testing.T) {
 	}
 }
 
+func TestFocusObserverSeesDirectTraversalPointerAndReplacementChanges(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	first.node.Grow = 1
+	second.node.Grow = 1
+	root := &focusObservingRoot{
+		testWidget: *newTestWidget("root", false),
+		children:   []Widget{first, second},
+	}
+	root.node.Dir = layout.Row
+	root.node.Grow = 1
+	root.node.Children = []*layout.Node{first.node, second.node}
+
+	app := New()
+	app.Render(root, Size{W: 10, H: 2})
+	if len(root.changes) == 0 || root.changes[len(root.changes)-1].Current != first {
+		t.Fatalf("initial focus changes = %+v, want first", root.changes)
+	}
+	app.Focus.Set(second)
+	if got := root.changes[len(root.changes)-1]; got.Current != second || got.Reason != FocusChangeDirect {
+		t.Fatalf("direct change = %+v", got)
+	}
+	app.Handle(input.KeyEvent{Key: input.KeyTab})
+	if got := root.changes[len(root.changes)-1]; got.Current != first || got.Reason != FocusChangeTraversal {
+		t.Fatalf("Tab change = %+v", got)
+	}
+	app.Handle(input.MouseEvent{X: 7, Y: 0, Btn: input.ButtonLeft, Kind: input.MousePress})
+	if got := root.changes[len(root.changes)-1]; got.Current != second || got.Reason != FocusChangePointer {
+		t.Fatalf("pointer change = %+v", got)
+	}
+	second.focus = false
+	app.Render(root, Size{W: 10, H: 2})
+	if got := root.changes[len(root.changes)-1]; got.Current != first || got.Reason != FocusChangeReplace {
+		t.Fatalf("replacement change = %+v", got)
+	}
+}
+
+func TestDeferredFocusRequestIsCanceledByGenerationValidator(t *testing.T) {
+	first := newTestWidget("first", true)
+	target := newTestWidget("target", false)
+	first.node.Grow = 1
+	target.node.Grow = 1
+	root := &validatingFocusRoot{
+		testWidget: *newTestWidget("root", false),
+		children:   []Widget{first, target},
+		target:     target,
+		valid:      true,
+	}
+	root.node.Dir = layout.Row
+	root.node.Grow = 1
+	root.node.Children = []*layout.Node{first.node, target.node}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'I'}) || app.pendingFocus == nil {
+		t.Fatal("newly enabled exact request was not retained")
+	}
+	root.valid = false
+	app.Render(root, Size{W: 10, H: 1})
+	if app.Focus.Focused() != first {
+		t.Fatalf("stale request focused %v, want first", app.Focus.Focused())
+	}
+	if app.pendingFocus != nil || len(root.done) != 1 || root.done[0] {
+		t.Fatalf("pending/done = %v/%v, want discarded request", app.pendingFocus, root.done)
+	}
+}
+
+func TestFocusRingExcludesHiddenFinalLayoutWidgets(t *testing.T) {
+	visible := newTestWidget("visible", true)
+	hidden := newTestWidget("hidden", true)
+	visible.node.Grow = 1
+	hidden.node.Grow = 1
+	hidden.node.Hidden = true
+	root := newTestWidget("root", false)
+	root.node.Dir = layout.Row
+	root.node.Grow = 1
+	root.node.Children = []*layout.Node{visible.node, hidden.node}
+	root.children = []Widget{visible, hidden}
+
+	app := New()
+	app.Render(root, Size{W: 10, H: 2})
+	if app.Focus.Len() != 1 || app.Focus.Focused() != visible {
+		t.Fatalf("focus ring len/owner = %d/%v, hidden widget entered the ring", app.Focus.Len(), app.Focus.Focused())
+	}
+	if app.Focus.Set(hidden) {
+		t.Fatal("direct focus reached a hidden final-layout widget")
+	}
+}
+
+func TestTabLetsFocusedAncestorClaimBeforeTraversal(t *testing.T) {
+	first := newTestWidget("first", true)
+	second := newTestWidget("second", true)
+	first.node.Grow = 1
+	second.node.Grow = 1
+	root := &tabClaimRoot{testWidget: *newTestWidget("root", false), children: []Widget{first, second}}
+	root.node.Dir = layout.Row
+	root.node.Grow = 1
+	root.node.Children = []*layout.Node{first.node, second.node}
+	app := New()
+	app.Render(root, Size{W: 10, H: 1})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyTab}) {
+		t.Fatal("ancestor did not claim Tab")
+	}
+	if app.Focus.Focused() != first || root.tabs != 1 {
+		t.Fatalf("focus/tabs = %v/%d, want first/1", app.Focus.Focused(), root.tabs)
+	}
+}
+
 func TestEventOverlayPreemptsFocusedChild(t *testing.T) {
 	child := &handlingWidget{testWidget: *newTestWidget("child", true)}
 	root := &eventOverlayWidget{
@@ -421,6 +530,66 @@ func (w *vimFocusWidget) HandleVimFocus(bool) bool {
 	return w.consume
 }
 
+type focusObservingRoot struct {
+	testWidget
+	children []Widget
+	changes  []FocusChange
+}
+
+func (w *focusObservingRoot) Children() []Widget { return w.children }
+func (w *focusObservingRoot) FocusChanged(change FocusChange) {
+	w.changes = append(w.changes, change)
+}
+
+type validatingFocusRoot struct {
+	testWidget
+	children []Widget
+	target   *testWidget
+	ready    bool
+	valid    bool
+	done     []bool
+}
+
+func (w *validatingFocusRoot) Children() []Widget { return w.children }
+func (w *validatingFocusRoot) Handle(ev Event) bool {
+	key, ok := ev.(input.KeyEvent)
+	if !ok || key.Key != input.KeyRune || key.Rune != 'I' {
+		return false
+	}
+	w.target.focus = true
+	w.ready = true
+	return true
+}
+func (w *validatingFocusRoot) TakeFocusRequest() (FocusRequest, bool) {
+	if !w.ready {
+		return FocusRequest{}, false
+	}
+	w.ready = false
+	return FocusRequest{Target: w.target, Generation: 7}, true
+}
+func (w *validatingFocusRoot) FocusRequestValid(request FocusRequest) bool {
+	return w.valid && request.Generation == 7 && request.Target == w.target
+}
+func (w *validatingFocusRoot) FocusRequestDone(_ FocusRequest, applied bool) {
+	w.done = append(w.done, applied)
+}
+
+type tabClaimRoot struct {
+	testWidget
+	children []Widget
+	tabs     int
+}
+
+func (w *tabClaimRoot) Children() []Widget { return w.children }
+func (w *tabClaimRoot) Handle(ev Event) bool {
+	key, ok := ev.(input.KeyEvent)
+	if ok && key.Key == input.KeyTab {
+		w.tabs++
+		return true
+	}
+	return false
+}
+
 type focusRequestRoot struct {
 	splitLikeWidget
 	target       Widget
@@ -442,12 +611,12 @@ func (w *focusRequestRoot) Handle(ev Event) bool {
 	return false
 }
 
-func (w *focusRequestRoot) TakeFocusRequest() Widget {
+func (w *focusRequestRoot) TakeFocusRequest() (FocusRequest, bool) {
 	if !w.ready {
-		return nil
+		return FocusRequest{}, false
 	}
 	w.ready = false
-	return w.target
+	return FocusRequest{Target: w.target, Generation: 1}, true
 }
 
 func (w *handlingWidget) Handle(Event) bool {

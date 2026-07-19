@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strings"
+
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
@@ -9,13 +11,23 @@ import (
 
 // NewHelpOverlay builds a read-only panel listing the client's key bindings.
 func NewHelpOverlay(cfg config.Config) tui.Widget {
+	focusKey := cfg.Keys.FocusComposer
+	focusDescription := "Focus the composer"
+	if cfg.Accessibility.VimNavigation {
+		focusDescription = "Enter composer input mode"
+		if strings.EqualFold(strings.TrimSpace(focusKey), "esc") || strings.EqualFold(strings.TrimSpace(focusKey), "escape") || focusKey == "" {
+			focusKey = "i"
+		} else {
+			focusKey = "i / " + focusKey
+		}
+	}
 	lines := [][2]string{
 		{cfg.Keys.QuickSwitcher, "Quick switch channels"},
 		{cfg.Keys.Picker, "Open emoji / sticker picker"},
 		{cfg.Keys.PasteImage, "Attach image from clipboard (or ;paste)"},
 		{cfg.Keys.Help, "Toggle this help"},
 		{cfg.Keys.NextPanel, "Cycle focus between panels"},
-		{cfg.Keys.FocusComposer, "Return focus to the composer / close overlays"},
+		{focusKey, focusDescription},
 		{cfg.Keys.VideoPause, "Video: pause / resume"},
 		{cfg.Keys.VideoSeekBackward + " / " + cfg.Keys.VideoSeekForward, "Video: seek -/+ 5 seconds"},
 		{cfg.Keys.VideoReplay, "Video: replay"},
@@ -36,7 +48,7 @@ func NewHelpOverlay(cfg config.Config) tui.Widget {
 			[2]string{"-", "Toggle the focused message section"},
 			[2]string{"U", "Open the focused author's profile"},
 			[2]string{"V / Y", "Select message anchors / copy formatted selection"},
-			[2]string{"i / ;q", "Enter / leave composer input mode"},
+			[2]string{"Esc / ;q", "Leave input (draft kept); Esc again cancels reply/edit"},
 		)
 	}
 	rows := make([]tui.Widget, 0, len(lines)+1)

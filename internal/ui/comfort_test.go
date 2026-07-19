@@ -20,6 +20,10 @@ func TestKeyMatches(t *testing.T) {
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}, "ctrl+k", true},
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k'}, "ctrl+k", false},              // missing ctrl
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}, "k", false}, // unwanted ctrl
+		{input.KeyEvent{Key: input.KeyRune, Rune: 'n', Mods: input.Ctrl | input.Shift}, "ctrl+n", false},
+		{input.KeyEvent{Key: input.KeyRune, Rune: 'n', Mods: input.Ctrl | input.Shift}, "ctrl+shift+n", true},
+		{input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}, "tab", false},
+		{input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}, "shift+tab", true},
 		{input.KeyEvent{Key: input.KeyEsc}, "esc", true},
 		{input.KeyEvent{Key: input.KeyTab}, "tab", true},
 		{input.KeyEvent{Key: input.KeyRune, Rune: ' '}, "space", true},
@@ -112,6 +116,46 @@ func TestShellPopupRendersOverMainView(t *testing.T) {
 	}
 	if !sh.Handle(input.KeyEvent{Key: input.KeyEsc}) || sh.popup != nil {
 		t.Fatal("Esc did not dismiss popup menu")
+	}
+}
+
+func TestToastAndPopupPointerRoutingMatchesOverlayDrawOrder(t *testing.T) {
+	underlyingHits := 0
+	popupHits := 0
+	button := widget.NewButton("covered", func() { underlyingHits++ })
+	sh := &Shell{cfg: config.Default(), mv: &MainView{Root: button}}
+	menu := widget.NewMenu([]widget.MenuItem{{Label: "Open", OnSelect: func() { popupHits++ }}})
+	menu.SetAnchor(20, 6)
+	menu.OnDismiss(sh.closePopup)
+	sh.popup = menu
+	sh.toasts = []*Toast{NewToast("Notice", "opaque", Styles{})}
+	runtime := tui.New()
+	runtime.Render(sh, tui.Size{W: 60, H: 10})
+
+	// This cell is inside both the menu row and the later-drawn toast.
+	if !runtime.Handle(input.MouseEvent{X: 22, Y: 7, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("toast-covered pointer was not consumed")
+	}
+	if popupHits != 0 || underlyingHits != 0 || sh.popup == nil {
+		t.Fatalf("toast click-through popup/underlying/popup = %d/%d/%v", popupHits, underlyingHits, sh.popup)
+	}
+
+	sh.toasts = nil
+	runtime.Render(sh, tui.Size{W: 60, H: 10})
+	if !runtime.Handle(input.MouseEvent{X: 22, Y: 7, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("popup pointer was not consumed")
+	}
+	if popupHits != 1 || underlyingHits != 0 {
+		t.Fatalf("popup routing hits = popup %d underlying %d", popupHits, underlyingHits)
+	}
+
+	menu = widget.NewMenu([]widget.MenuItem{{Label: "Open"}})
+	menu.SetAnchor(20, 6)
+	menu.OnDismiss(sh.closePopup)
+	sh.popup = menu
+	runtime.Render(sh, tui.Size{W: 60, H: 10})
+	if !runtime.Handle(input.MouseEvent{X: 1, Y: 1, Btn: input.ButtonLeft, Kind: input.MousePress}) || underlyingHits != 0 {
+		t.Fatal("outside-popup dismissal clicked through to retained button")
 	}
 }
 

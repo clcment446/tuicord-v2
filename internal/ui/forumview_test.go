@@ -7,7 +7,27 @@ import (
 
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
+	"awesomeProject/internal/tui/tui"
 )
+
+func TestForumPostPromptClaimsRuntimeTabBeforeGlobalTraversal(t *testing.T) {
+	p := NewForumPostPrompt([]store.Tag{{ID: 1, Name: "bug"}}, Styles{}, nil, func() {})
+	runtime := tui.New()
+	runtime.Render(p, tui.Size{W: 40, H: 10})
+	initial := runtime.Focus.Focused()
+	if initial != p.title {
+		t.Fatalf("initial focus = %T, want title input", initial)
+	}
+	if !runtime.Handle(input.KeyEvent{Key: input.KeyTab}) {
+		t.Fatal("runtime Tab was not handled")
+	}
+	if p.focus != 1 {
+		t.Fatalf("prompt internal focus = %d, want body", p.focus)
+	}
+	if runtime.Focus.Focused() != initial {
+		t.Fatal("global focus traversal ran after modal claimed Tab")
+	}
+}
 
 func TestForumPostPromptSubmitsBodyAndMultipleTags(t *testing.T) {
 	var title, body string
