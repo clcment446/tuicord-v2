@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -23,13 +24,14 @@ type Toast struct {
 	detail     string
 	styles     Styles
 	expanded   bool
+	repeats    int
 	expiresAt  time.Time
 	onActivate func()
 	bounds     screen.Rect
 }
 
 func NewToast(title, detail string, styles Styles) *Toast {
-	return &Toast{title: title, detail: detail, styles: styles}
+	return &Toast{title: title, detail: detail, styles: styles, repeats: 1}
 }
 
 // SetTTL makes the toast auto-dismiss after d. It stays until dismissed if d is
@@ -159,7 +161,11 @@ func (t *Toast) drawAt(r screen.Region, x0, y0, width, height int) {
 		}
 	}
 
-	drawText(r, x0+1, y0, tuitext.Truncate(t.title, max(width-2, 0), tuitext.Ellipsis), titleStyle)
+	title := t.title
+	if t.repeats > 1 {
+		title = fmt.Sprintf("%s ×%d", title, t.repeats)
+	}
+	drawText(r, x0+1, y0, tuitext.Truncate(title, max(width-2, 0), tuitext.Ellipsis), titleStyle)
 	lines := t.lines(max(width-2, 1), max(height-2, 0))
 	for i, line := range lines {
 		drawText(r, x0+1, y0+1+i, line, style)

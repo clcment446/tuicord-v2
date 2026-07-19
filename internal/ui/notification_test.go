@@ -145,6 +145,25 @@ func TestErrorToastDoesNotExpire(t *testing.T) {
 	}
 }
 
+func TestShellCoalescesDuplicateErrorToasts(t *testing.T) {
+	sh := &Shell{cfg: config.Default(), mv: &MainView{Root: widget.NewText("main")}}
+	sh.ShowToast("Discord error", errors.New("JSON decoding failed: expected container"))
+	sh.ShowToast("Other error", errors.New("network unavailable"))
+	sh.ShowToast("Discord error", errors.New("JSON decoding failed: expected container"))
+
+	if got := len(sh.Toasts()); got != 2 {
+		t.Fatalf("toast count = %d, want two distinct errors", got)
+	}
+	toast := sh.Toasts()[0]
+	if toast.title != "Discord error" || toast.repeats != 2 {
+		t.Fatalf("coalesced toast = %#v, want newest Discord error repeated twice", toast)
+	}
+	buf := tui.New().Render(sh, tui.Size{W: 60, H: 12})
+	if !bufferContains(buf, "Discord error ×2") {
+		t.Fatal("coalesced toast did not render its repeat count")
+	}
+}
+
 func TestShellStacksAndExpiresNotifications(t *testing.T) {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	sh := &Shell{
