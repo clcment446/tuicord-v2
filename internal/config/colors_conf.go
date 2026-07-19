@@ -269,8 +269,11 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"forum.body.placeholder": muted, "forum.body.cursor": {Attrs: screen.Reverse},
 		"auth.qr": colors.Text, "auth.title": accent, "auth.hint": muted,
 		"auth.status": muted, "auth.choice": colors.Text,
-		"auth.qr.dark":       {Fg: screen.RGB(0, 0, 0), Bg: screen.RGB(255, 255, 255)},
-		"auth.qr.light":      {Fg: screen.RGB(255, 255, 255), Bg: screen.RGB(0, 0, 0)},
+		// QR module colors are carried in Fg. The QR renderer maps the dark
+		// module color to a half-block foreground and the light module color to
+		// its background as needed.
+		"auth.qr.dark":       {Fg: screen.RGB(0, 0, 0)},
+		"auth.qr.light":      {Fg: screen.RGB(255, 255, 255)},
 		"preview.background": {Bg: colors.Background}, "preview.border": colors.Border,
 		"preview.title": bold(accent), "preview.body": colors.Text,
 	}

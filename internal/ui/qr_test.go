@@ -26,6 +26,36 @@ func TestHalfBlockGlyphs(t *testing.T) {
 	}
 }
 
+func TestHalfBlockStyledUsesModuleForegroundColors(t *testing.T) {
+	darkColor := screen.RGB(1, 2, 3)
+	lightColor := screen.RGB(240, 241, 242)
+	// Deliberately use misleading background colors to catch the regression
+	// where the light module was read from light.Bg and every cell became dark.
+	dark := screen.Style{Fg: darkColor, Bg: lightColor}
+	light := screen.Style{Fg: lightColor, Bg: darkColor}
+
+	tests := []struct {
+		name         string
+		upper, lower bool
+		wantContent  string
+		wantFg       screen.Color
+		wantBg       screen.Color
+	}{
+		{name: "both dark", upper: true, lower: true, wantContent: " ", wantBg: darkColor},
+		{name: "both light", wantContent: " ", wantBg: lightColor},
+		{name: "dark top", upper: true, wantContent: "▀", wantFg: darkColor, wantBg: lightColor},
+		{name: "dark bottom", lower: true, wantContent: "▄", wantFg: darkColor, wantBg: lightColor},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := halfBlockStyled(tt.upper, tt.lower, dark, light)
+			if got.Content != tt.wantContent || got.Style.Fg != tt.wantFg || got.Style.Bg != tt.wantBg {
+				t.Fatalf("halfBlockStyled(%v, %v) = %#v, want content %q, fg %#v, bg %#v", tt.upper, tt.lower, got, tt.wantContent, tt.wantFg, tt.wantBg)
+			}
+		})
+	}
+}
+
 func TestDrawQRRowsPacked(t *testing.T) {
 	// 4 module rows should pack into 2 character rows (two modules per cell).
 	matrix := [][]bool{
