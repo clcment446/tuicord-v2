@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"testing"
 
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/tui"
 )
 
@@ -19,6 +20,27 @@ func TestViewportCanHostButtonColumn(t *testing.T) {
 	buf := tui.New().Render(viewport, tui.Size{W: 3, H: 1})
 	if got, want := bufferRow(buf, 0), "two"; got != want {
 		t.Fatalf("row = %q, want %q", got, want)
+	}
+}
+
+func TestFocusedPathFallbackDoesNotBroadcastIntoUnfocusedInput(t *testing.T) {
+	button := NewButton("nav", nil)
+	composer := NewTextInput("message")
+	root := Column(button, composer)
+	app := tui.New()
+	app.Render(root, tui.Size{W: 20, H: 2})
+	if !app.Focus.Set(button) {
+		t.Fatal("could not focus navigation button")
+	}
+
+	if app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'x'}) {
+		t.Fatal("ordinary key was unexpectedly consumed")
+	}
+	if app.Handle(input.PasteEvent{Text: "hidden paste"}) {
+		t.Fatal("ordinary paste was unexpectedly consumed")
+	}
+	if composer.Value() != "" {
+		t.Fatalf("unfocused composer received fallback input: %q", composer.Value())
 	}
 }
 

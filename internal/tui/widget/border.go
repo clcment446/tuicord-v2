@@ -161,6 +161,10 @@ func (w *Border) Handle(ev tui.Event) bool {
 	return w.child.Handle(ev)
 }
 
+// HandleBubble keeps a border transparent while the runtime walks the exact
+// focused ancestry. Calling Handle here would redispatch into its child.
+func (w *Border) HandleBubble(tui.Event) bool { return false }
+
 func (w *Border) rebuild() {
 	w.node = layout.Node{
 		Dir:     layout.Column,

@@ -85,6 +85,10 @@ func (n *Node) Handle(ev tui.Event) bool {
 	return false
 }
 
+// HandleBubble is intentionally inert: child dispatch is owned by the runtime
+// focus path, not by a broadcast across every retained child.
+func (n *Node) HandleBubble(tui.Event) bool { return false }
+
 // Children returns the retained child widgets.
 func (n *Node) Children() []tui.Widget {
 	if n == nil {

@@ -173,6 +173,9 @@ func (w *Modal) Handle(ev tui.Event) bool {
 	return w.child.Handle(ev)
 }
 
+// HandleBubble avoids forwarding a bubbled event back into the modal child.
+func (w *Modal) HandleBubble(tui.Event) bool { return false }
+
 // DragStart starts a modal drag when x,y hit the title bar.
 func (w *Modal) DragStart(x, y int) (DragOp, bool) {
 	if w == nil {

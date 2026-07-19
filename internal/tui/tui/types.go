@@ -57,6 +57,14 @@ type EventOverlay interface {
 	HandleOverlay(Event) bool
 }
 
+// EventBubbler handles an event while it bubbles from a focused descendant
+// toward the root. Retained containers that normally forward Handle to their
+// children implement this separately so bubbling never broadcasts an event
+// into unrelated descendants.
+type EventBubbler interface {
+	HandleBubble(Event) bool
+}
+
 // Focusable is implemented by widgets that can receive keyboard focus.
 type Focusable interface {
 	// CanFocus reports whether the widget should be present in the focus ring.
@@ -95,9 +103,65 @@ type VimFocusTraverser interface {
 	HandleVimFocus(forward bool) bool
 }
 
+// FocusChangeReason identifies what moved keyboard focus. Roots can use the
+// reason to distinguish a render-time replacement from explicit user
+// navigation while still observing every actual owner change.
+type FocusChangeReason uint8
+
+const (
+	FocusChangeDirect FocusChangeReason = iota
+	FocusChangeTraversal
+	FocusChangeHistory
+	FocusChangePointer
+	FocusChangeReplace
+	FocusChangeRemove
+	FocusChangeClear
+)
+
+// FocusChange describes one keyboard focus assignment. Explicit pointer,
+// traversal, history, and direct assignments may report Previous == Current so
+// roots can cancel stale modal requests even when an old ring wraps in place.
+type FocusChange struct {
+	Previous Widget
+	Current  Widget
+	Reason   FocusChangeReason
+}
+
+// FocusObserver is notified synchronously for exact focus assignments,
+// including direct FocusManager.Set calls and render-time owner replacement.
+type FocusObserver interface {
+	FocusChanged(FocusChange)
+}
+
+// FocusRequest is a generation-scoped request for an exact focus owner. The
+// generation is opaque to the runtime and lets the root invalidate work made
+// stale by channel, overlay, read-only, or interaction-state changes.
+type FocusRequest struct {
+	Target     Widget
+	Generation uint64
+}
+
 // FocusRequester lets a root widget request an exact focus transfer after the
-// current event has finished routing. Modal input modes use it to move between
-// a navigation surface and an editor without exposing the FocusManager.
+// current event has finished routing. A request that targets a widget enabled
+// by the event may remain pending until the next rendered focus ring.
 type FocusRequester interface {
-	TakeFocusRequest() Widget
+	TakeFocusRequest() (FocusRequest, bool)
+}
+
+// FocusRequestValidator lets a requester cancel a previously emitted request.
+// The runtime checks it immediately and again before every deferred attempt.
+type FocusRequestValidator interface {
+	FocusRequestValid(FocusRequest) bool
+}
+
+// FocusRequestCompleter is notified when a request was applied or discarded.
+type FocusRequestCompleter interface {
+	FocusRequestDone(FocusRequest, bool)
+}
+
+// FocusTraversalRequester lets a root claim a configurable shortcut and ask
+// the runtime to traverse the focus ring. Positive values move forward and
+// negative values move backward.
+type FocusTraversalRequester interface {
+	TakeFocusTraversalRequest() int
 }

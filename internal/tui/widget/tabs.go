@@ -132,11 +132,26 @@ func (t *Tabs) Draw(r screen.Region) {
 }
 
 // Handle switches tabs on Left/Right arrows and strip clicks, and forwards all
-// other events to the active content.
+// other events to the active content when called directly.
 func (t *Tabs) Handle(ev tui.Event) bool {
 	if t == nil || len(t.tabs) == 0 {
 		return false
 	}
+	if t.handleOwn(ev) {
+		return true
+	}
+	if content := t.tabs[t.active].Content; content != nil {
+		return content.Handle(ev)
+	}
+	return false
+}
+
+// HandleBubble switches the tab strip without redispatching to active content.
+func (t *Tabs) HandleBubble(ev tui.Event) bool {
+	return t != nil && len(t.tabs) > 0 && t.handleOwn(ev)
+}
+
+func (t *Tabs) handleOwn(ev tui.Event) bool {
 	switch ev := ev.(type) {
 	case input.KeyEvent:
 		if !ev.Release {
@@ -156,9 +171,6 @@ func (t *Tabs) Handle(ev tui.Event) bool {
 				return true
 			}
 		}
-	}
-	if content := t.tabs[t.active].Content; content != nil {
-		return content.Handle(ev)
 	}
 	return false
 }

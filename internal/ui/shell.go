@@ -48,47 +48,71 @@ type PluginHost interface {
 	ThemeNames() []string
 }
 
+// editorInteractionPhase is the single authority for Vim composer ownership.
+// MainView reads it through a callback only for status rendering; it does not
+// maintain a second mode flag.
+type editorInteractionPhase uint8
+
+const (
+	editorNormal editorInteractionPhase = iota
+	editorFocusPending
+	editorInput
+	editorOverlaySuspended
+)
+
+type editorInteraction struct {
+	phase            editorInteractionPhase
+	channel          store.ChannelID
+	allowReplacement bool
+}
+
 // Shell is the root widget. It shows the main view and can swap in a
 // full-screen overlay (quick switcher or help). Overlays are implemented as a
 // tree swap rather than a z-ordered layer, which the toolkit supports directly:
 // Children returns whichever subtree is active, so focus, hit-testing, and
 // drawing all follow.
 type Shell struct {
-	mv              *MainView
-	app             *app.App
-	cfg             config.Config
-	styles          Styles
-	plugins         PluginHost
-	overlay         tui.Widget // nil = show the main view
-	popup           tui.Widget // small interactive layer drawn over current()
-	toasts          []*Toast
-	notifier        desktopNotifier
-	dispatch        func(func())
-	post            func(func())
-	tryPost         func(func()) bool
-	unfocused       bool
-	now             func() time.Time
-	forumPreview    *forumPreview
-	completionSync  bool
-	commandLoading  bool
-	inputMode       bool
-	focusRequest    tui.Widget
-	prefetch        *idleMediaPrefetcher
-	prefetchIdle    bool
-	lastActivity    time.Time
-	cancel          context.CancelFunc
-	lifecycleCtx    context.Context
-	lifecycleCancel context.CancelFunc
-	viewerCancel    context.CancelFunc
-	clipboardMu     sync.Mutex
-	clipboardCancel context.CancelFunc
-	clipboardBusy   bool
-	lifecycleWG     sync.WaitGroup
-	closeOnce       sync.Once
-	mediaCfg        media.Config
-	node            layout.Node
-	video           *media.VideoPlayer
-	videoRegion     media.Rect
+	mv             *MainView
+	app            *app.App
+	cfg            config.Config
+	styles         Styles
+	plugins        PluginHost
+	overlay        tui.Widget // nil = show the main view
+	popup          tui.Widget // small interactive layer drawn over current()
+	toasts         []*Toast
+	notifier       desktopNotifier
+	dispatch       func(func())
+	post           func(func())
+	tryPost        func(func()) bool
+	unfocused      bool
+	now            func() time.Time
+	forumPreview   *forumPreview
+	completionSync bool
+	commandLoading bool
+
+	editor             editorInteraction
+	composerOverlay    tui.Widget
+	focusGeneration    uint64
+	focusRequest       tui.FocusRequest
+	focusRequestReady  bool
+	focusRequestActive bool
+	focusTraversal     int
+	prefetch           *idleMediaPrefetcher
+	prefetchIdle       bool
+	lastActivity       time.Time
+	cancel             context.CancelFunc
+	lifecycleCtx       context.Context
+	lifecycleCancel    context.CancelFunc
+	viewerCancel       context.CancelFunc
+	clipboardMu        sync.Mutex
+	clipboardCancel    context.CancelFunc
+	clipboardBusy      bool
+	lifecycleWG        sync.WaitGroup
+	closeOnce          sync.Once
+	mediaCfg           media.Config
+	node               layout.Node
+	video              *media.VideoPlayer
+	videoRegion        media.Rect
 }
 
 // SetPluginHost registers the Lua plugin manager for command and key dispatch.
@@ -113,7 +137,7 @@ func (s *Shell) OpenPluginOverlay(title string, lines []string) {
 	border := titled(title, widget.Column(rows...))
 	border.SetStyle(s.styles.Cell("panels.border"))
 	border.SetFocusStyle(s.styles.Cell("panels.focus"))
-	s.overlay = border
+	s.setIndependentOverlay(border)
 }
 
 type desktopNotifier interface {
@@ -155,9 +179,11 @@ func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel
 	mv.onNewForumPost = s.openForumPostPrompt
 	mv.onForumFilter = s.openForumFilterMenu
 	mv.onForumHover = s.setForumHover
+	s.bindEditorState()
 	mv.SetComposerChange(s.composerChanged)
 	mv.composer.OnBackspaceEmpty(s.leaveInputMode)
 	mv.SetLocalCommandHandler(s.runLocalCommand)
+	mv.SetChannelChangeHandler(s.channelChanged)
 	mv.chat.OnMessageAction(s.handleMessageAction)
 	// ForumView is created lazily; MainView invokes this hook when it exists.
 	return s
@@ -190,24 +216,122 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 	}
 }
 
-func (s *Shell) focusComposer() {
-	if s == nil || s.mv == nil || s.mv.composer == nil {
+func (s *Shell) bindEditorState() {
+	if s == nil || s.mv == nil {
 		return
 	}
-	if s.cfg.Accessibility.VimNavigation {
-		s.inputMode = true
-		s.mv.SetInputMode(true)
-	}
-	s.focusRequest = s.mv.composer
+	s.mv.composerInputActive = s.editorStatusActive
 }
 
-func (s *Shell) leaveInputMode() {
-	if s == nil || s.mv == nil || !s.inputMode {
+func (s *Shell) editorStatusActive() bool {
+	return s != nil && s.cfg.Accessibility.VimNavigation && s.editor.phase != editorNormal
+}
+
+func (s *Shell) activeChannel() store.ChannelID {
+	if s == nil || s.app == nil {
+		return 0
+	}
+	return s.app.ActiveChannel()
+}
+
+func (s *Shell) composerWritable() bool {
+	return s != nil && s.mv != nil && s.mv.composer != nil && !s.mv.composer.ReadOnly()
+}
+
+func (s *Shell) focusComposer() {
+	if s == nil || !s.composerWritable() {
+		if s != nil && s.cfg.Accessibility.VimNavigation {
+			s.exitEditor(nil)
+		}
 		return
 	}
-	s.inputMode = false
-	s.mv.SetInputMode(false)
-	s.focusRequest = s.mv.chat
+	s.bindEditorState()
+	if s.cfg.Accessibility.VimNavigation {
+		s.beginComposerInput(false)
+		return
+	}
+	s.queueFocus(s.mv.composer)
+}
+
+func (s *Shell) beginComposerInput(allowReplacement bool) bool {
+	if s == nil || !s.cfg.Accessibility.VimNavigation || !s.composerWritable() || s.overlay != nil {
+		return false
+	}
+	s.bindEditorState()
+	s.cancelFocusRequest()
+	s.editor = editorInteraction{
+		phase:            editorFocusPending,
+		channel:          s.activeChannel(),
+		allowReplacement: allowReplacement,
+	}
+	s.mv.composer.SetInputFocusEnabled(true)
+	s.queueFocus(s.mv.composer)
+	s.mv.updateComposerStatus()
+	return true
+}
+
+// leaveInputMode is an explicit Vim exit used by ;q and empty Backspace. It
+// preserves the draft, attachments, and reply/edit operation while returning
+// focus to message navigation.
+func (s *Shell) leaveInputMode() {
+	if s == nil || s.editor.phase == editorNormal {
+		return
+	}
+	s.exitEditor(s.mv.chat)
+}
+
+func (s *Shell) exitEditor(destination tui.Widget) {
+	if s == nil {
+		return
+	}
+	s.cancelFocusRequest()
+	s.editor = editorInteraction{phase: editorNormal, channel: s.activeChannel()}
+	s.composerOverlay = nil
+	if s.mv != nil {
+		s.bindEditorState()
+		if s.mv.composer != nil && s.cfg.Accessibility.VimNavigation {
+			s.mv.composer.SetInputFocusEnabled(false)
+		}
+		s.mv.updateComposerStatus()
+	}
+	if destination != nil {
+		s.queueFocus(destination)
+	}
+}
+
+func (s *Shell) queueFocus(target tui.Widget) {
+	if s == nil || target == nil {
+		return
+	}
+	s.focusGeneration++
+	s.focusRequest = tui.FocusRequest{Target: target, Generation: s.focusGeneration}
+	s.focusRequestReady = true
+	s.focusRequestActive = true
+}
+
+func (s *Shell) cancelFocusRequest() {
+	if s == nil {
+		return
+	}
+	s.focusGeneration++
+	s.focusRequest = tui.FocusRequest{}
+	s.focusRequestReady = false
+	s.focusRequestActive = false
+}
+
+func (s *Shell) channelChanged(previous, current store.ChannelID) {
+	if s == nil || previous == current {
+		return
+	}
+	// A channel transition invalidates every exact composer request and every
+	// suspended restore. The overlay may finish its own callback afterward, but
+	// it can no longer resurrect input for the old channel.
+	s.exitEditor(nil)
+	s.composerOverlay = nil
+}
+
+func (s *Shell) sameFocusRequest(request tui.FocusRequest) bool {
+	return s != nil && s.focusRequestActive && request.Generation == s.focusRequest.Generation && request.Target == s.focusRequest.Target
 }
 
 func (s *Shell) runLocalCommand(input string) bool {
@@ -319,11 +443,12 @@ func (s *Shell) playVideo(url string, _ media.Rect) {
 			s.videoRegion = region
 		})
 	})
-	s.overlay = v
+	s.setIndependentOverlay(v)
 	s.videoRegion = full
 	onExit := func() { s.app.Post(s.closeOverlay) }
 	if err := s.video.Play(url, full, s.app.WriteRaw, onExit); err != nil {
 		s.overlay = nil
+		s.composerOverlay = nil
 		s.videoRegion = media.Rect{}
 		s.ShowToast("Video error", err)
 		return
@@ -344,7 +469,7 @@ func videoRectForSize(width, height int) media.Rect {
 // full-screen viewer.
 func (s *Shell) openMediaViewer(url string, img image.Image, frames []media.Frame) {
 	v := newMediaViewer(s.styles, "Esc to close", url, img, frames, s.closeOverlay)
-	s.overlay = v
+	s.setIndependentOverlay(v)
 	s.app.Invalidate()
 
 	// Inline media is deliberately downscaled before caching. The full-screen
@@ -581,7 +706,7 @@ func (s *Shell) openForumPostPrompt(title string) {
 		s.app.CreateForumPost(forum.ID, title, body, tags)
 	}, s.closeOverlay)
 	p.SetTitle(title)
-	s.overlay = p
+	s.setIndependentOverlay(p)
 }
 
 func (s *Shell) openForumFilterMenu() {
@@ -598,6 +723,38 @@ func (s *Shell) openForumFilterMenu() {
 		items = append(items, widget.MenuItem{Label: tag.Name, OnSelect: func() { s.closePopup(); s.mv.forumView.SetFilter(tag.ID) }})
 	}
 	s.showPopupMenu(items, 0, 0)
+}
+
+func (s *Shell) setIndependentOverlay(overlay tui.Widget) {
+	if s == nil {
+		return
+	}
+	if s.cfg.Accessibility.VimNavigation && s.editor.phase != editorNormal {
+		s.exitEditor(nil)
+	} else {
+		s.cancelFocusRequest()
+	}
+	s.composerOverlay = nil
+	s.overlay = overlay
+}
+
+func (s *Shell) setComposerOverlay(overlay tui.Widget) {
+	if s == nil {
+		return
+	}
+	s.composerOverlay = overlay
+	if s.cfg.Accessibility.VimNavigation && (s.editor.phase == editorInput || s.editor.phase == editorFocusPending) {
+		s.cancelFocusRequest()
+		s.editor.phase = editorOverlaySuspended
+		s.editor.allowReplacement = false
+		if s.mv != nil && s.mv.composer != nil {
+			s.mv.composer.SetInputFocusEnabled(false)
+			s.mv.updateComposerStatus()
+		}
+	} else {
+		s.cancelFocusRequest()
+	}
+	s.overlay = overlay
 }
 
 func (s *Shell) current() tui.Widget {
@@ -619,15 +776,107 @@ func (s *Shell) Layout() *layout.Node {
 	return &s.node
 }
 
-// TakeFocusRequest transfers an exact focus target after the current key has
-// finished routing. The TUI runtime polls this through tui.FocusRequester.
-func (s *Shell) TakeFocusRequest() tui.Widget {
-	if s == nil {
-		return nil
+// TakeFocusRequest transfers a generation-scoped exact target after the
+// current event finishes routing. Taking does not make it valid forever: the
+// runtime rechecks FocusRequestValid before a deferred render-time attempt.
+func (s *Shell) TakeFocusRequest() (tui.FocusRequest, bool) {
+	if s == nil || !s.focusRequestReady {
+		return tui.FocusRequest{}, false
 	}
-	requested := s.focusRequest
-	s.focusRequest = nil
-	return requested
+	request := s.focusRequest
+	s.focusRequestReady = false
+	return request, true
+}
+
+func (s *Shell) FocusRequestValid(request tui.FocusRequest) bool {
+	if !s.sameFocusRequest(request) {
+		return false
+	}
+	if s.mv == nil || request.Target != s.mv.composer {
+		return true
+	}
+	if !s.composerWritable() || s.overlay != nil {
+		return false
+	}
+	if !s.cfg.Accessibility.VimNavigation {
+		return true
+	}
+	return s.editor.phase == editorFocusPending && s.editor.channel == s.activeChannel()
+}
+
+func (s *Shell) FocusRequestDone(request tui.FocusRequest, applied bool) {
+	if !s.sameFocusRequest(request) {
+		return
+	}
+	s.focusRequestActive = false
+	s.focusRequestReady = false
+	s.focusRequest = tui.FocusRequest{}
+	if applied && s.mv != nil && request.Target == s.mv.composer && s.editor.phase == editorFocusPending {
+		// Setting an already focused owner is successful but emits no focus-change
+		// transition. Complete the pending->input state here as the equivalent
+		// acknowledgement.
+		s.editor.phase = editorInput
+		s.editor.allowReplacement = false
+		s.mv.updateComposerStatus()
+		return
+	}
+	if !applied && s.editor.phase == editorFocusPending {
+		s.exitEditor(nil)
+	}
+}
+
+func (s *Shell) TakeFocusTraversalRequest() int {
+	if s == nil {
+		return 0
+	}
+	step := s.focusTraversal
+	s.focusTraversal = 0
+	return step
+}
+
+// FocusChanged enforces the editor invariant for every runtime focus path:
+// outside a composer-owned overlay, Vim input means exact composer focus.
+func (s *Shell) FocusChanged(change tui.FocusChange) {
+	if s == nil || s.mv == nil || s.mv.composer == nil {
+		return
+	}
+	if !s.cfg.Accessibility.VimNavigation {
+		// Exact non-Vim requests can also be deferred while the composer is
+		// hidden. Any explicit focus move supersedes that stale intent.
+		if s.focusRequestActive && change.Current != s.focusRequest.Target {
+			s.cancelFocusRequest()
+		}
+		return
+	}
+	composerFocused := change.Current == s.mv.composer
+	switch s.editor.phase {
+	case editorFocusPending:
+		if composerFocused {
+			if !s.composerWritable() || s.overlay != nil || s.editor.channel != s.activeChannel() {
+				s.exitEditor(nil)
+				return
+			}
+			s.editor.phase = editorInput
+			s.editor.allowReplacement = false
+			s.mv.updateComposerStatus()
+			return
+		}
+		if change.Reason == tui.FocusChangeReplace && s.editor.allowReplacement {
+			s.editor.allowReplacement = false
+			return
+		}
+		s.exitEditor(nil)
+	case editorInput:
+		if !composerFocused {
+			s.exitEditor(nil)
+		}
+	case editorOverlaySuspended:
+		// The overlay owns focus until closeOverlay explicitly restores input.
+	case editorNormal:
+		if s.focusRequestActive && change.Current != s.focusRequest.Target {
+			s.cancelFocusRequest()
+		}
+	}
 }
 
 // Draw is a no-op; children draw themselves.
@@ -639,6 +888,11 @@ func (s *Shell) DrawOverlay(r screen.Region) {
 		s.popup.Draw(r)
 	}
 	if s != nil {
+		for _, toast := range s.toasts {
+			if toast != nil {
+				toast.bounds = screen.Rect{}
+			}
+		}
 		bottom := r.Height() - 1
 		for _, toast := range s.toasts {
 			if bottom < 0 {
@@ -671,11 +925,82 @@ func (s *Shell) Animating() bool {
 	return s.mv != nil && s.mv.chat.Animating()
 }
 
-// HandleOverlay gives transient context menus first refusal before the focused
-// retained widget. Menus are drawn above the tree and are modal, so routing
-// them only through Handle would let the chat consume keys and clicks first.
+// HandleOverlay routes pointer input in reverse draw order: toasts are painted
+// above popup menus, and popup menus are painted above the retained tree.
 func (s *Shell) HandleOverlay(ev tui.Event) bool {
-	return s != nil && s.popup != nil && s.popup.Handle(ev)
+	if s == nil {
+		return false
+	}
+	if mouse, ok := ev.(input.MouseEvent); ok {
+		if s.handleToastPointer(mouse) {
+			return true
+		}
+		return s.popup != nil && s.popup.Handle(mouse)
+	}
+	if s.popup != nil {
+		return s.popup.Handle(ev)
+	}
+	key, isKey := ev.(input.KeyEvent)
+	if !isKey || key.Release {
+		return false
+	}
+	// Esc is a root-level modal transition. Claim it before a focused chat or
+	// list can consume it, while still letting a topmost popup handle it first.
+	if key.Key == input.KeyEsc {
+		if s.overlay != nil {
+			s.closeOverlay()
+			return true
+		}
+		switch s.editor.phase {
+		case editorInput:
+			s.leaveInputMode()
+			return true
+		case editorFocusPending:
+			s.exitEditor(nil)
+			return true
+		}
+		if s.mv != nil && s.mv.CancelComposerMode() {
+			return true
+		}
+	}
+	if s.overlay != nil {
+		return false
+	}
+	// Configured focus claims are global on the main surface. Handling them here
+	// prevents a plain-rune binding from being inserted into the composer or
+	// consumed as a chat Vim motion. Overlay-local widgets still get first claim
+	// because this path is disabled while an overlay is active.
+	if keyMatches(key, s.cfg.Keys.NextPanel) {
+		s.focusTraversal++
+		return true
+	}
+	if keyMatches(key, s.cfg.Keys.FocusComposer) && (!s.cfg.Accessibility.VimNavigation || key.Key != input.KeyEsc) && s.composerWritable() {
+		if !s.cfg.Accessibility.VimNavigation || s.editor.phase == editorNormal {
+			s.focusComposer()
+		}
+		return true
+	}
+	return false
+}
+
+func (s *Shell) handleToastPointer(mouse input.MouseEvent) bool {
+	if s == nil {
+		return false
+	}
+	for i := len(s.toasts) - 1; i >= 0; i-- {
+		toast := s.toasts[i]
+		if toast == nil || !toast.contains(mouse.X, mouse.Y) {
+			continue
+		}
+		handled := toast.Handle(mouse)
+		if handled && toast.wantsDismiss(mouse) {
+			s.toasts = append(s.toasts[:i], s.toasts[i+1:]...)
+		}
+		// Even a non-actionable toast is an opaque drawn surface. Never let its
+		// pointer input click or focus a covered popup/tree widget.
+		return true
+	}
+	return false
 }
 
 func (s *Shell) Handle(ev tui.Event) bool {
@@ -701,13 +1026,7 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	key, isKey := ev.(input.KeyEvent)
 
 	if mouse, ok := ev.(input.MouseEvent); ok {
-		for i, toast := range s.toasts {
-			if !toast.Handle(mouse) {
-				continue
-			}
-			if toast.wantsDismiss(mouse) {
-				s.toasts = append(s.toasts[:i], s.toasts[i+1:]...)
-			}
+		if s.handleToastPointer(mouse) {
 			return true
 		}
 	} else if len(s.toasts) > 0 && s.toasts[0].Handle(ev) {
@@ -725,13 +1044,14 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	}
 
 	if s.overlay != nil {
-		// The help overlay has no focusable widgets, so its keys arrive here;
-		// the quick switcher's dismissal (Esc) arrives here via root fallback.
+		// Focused overlay descendants already handled and bubbled this event.
+		// Shell owns only global dismissal here; redispatching through the whole
+		// overlay tree would reach unrelated hidden inputs.
 		if isKey && (keyMatches(key, s.cfg.Keys.Help) || key.Key == input.KeyEsc) {
 			s.closeOverlay()
 			return true
 		}
-		return s.overlay.Handle(ev)
+		return false
 	}
 
 	// A bracketed paste carrying no text is what terminals emit when the
@@ -762,15 +1082,24 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
-		case s.cfg.Accessibility.VimNavigation && !s.inputMode && key.Key == input.KeyRune && (key.Rune == 'i' || key.Rune == 'I'):
-			s.inputMode = true
-			s.mv.SetInputMode(true)
-			s.focusRequest = s.mv.composer
+		case s.cfg.Accessibility.VimNavigation && key.Key == input.KeyEsc && s.editor.phase == editorInput:
+			s.leaveInputMode()
 			return true
+		case s.cfg.Accessibility.VimNavigation && key.Key == input.KeyEsc && s.editor.phase == editorFocusPending:
+			s.exitEditor(nil)
+			return true
+		case s.cfg.Accessibility.VimNavigation && s.editor.phase == editorNormal && key.Mods&(input.Ctrl|input.Alt|input.Super) == 0 && key.Key == input.KeyRune && (key.Rune == 'i' || key.Rune == 'I') && s.composerWritable():
+			return s.beginComposerInput(false)
 		case key.Key == input.KeyRune && key.Rune == '+' && key.Mods == 0:
 			s.openHotSwitch()
 			return true
 		case key.Key == input.KeyEsc && s.mv.CancelComposerMode():
+			return true
+		case keyMatches(key, s.cfg.Keys.NextPanel):
+			s.focusTraversal++
+			return true
+		case keyMatches(key, s.cfg.Keys.FocusComposer) && (!s.cfg.Accessibility.VimNavigation || key.Key != input.KeyEsc) && s.composerWritable():
+			s.focusComposer()
 			return true
 		case keyMatches(key, s.cfg.Keys.QuickSwitcher):
 			s.openQuickSwitcher()
@@ -782,11 +1111,14 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			s.pasteImage()
 			return true
 		case keyMatches(key, s.cfg.Keys.Help):
-			s.overlay = NewHelpOverlay(s.cfg)
+			s.setIndependentOverlay(NewHelpOverlay(s.cfg))
 			return true
 		}
 	}
-	handled := s.mv.Root.Handle(ev)
+	handled := false
+	if _, tick := ev.(input.TickEvent); tick && s.mv != nil && s.mv.Root != nil {
+		handled = s.mv.Root.Handle(ev)
+	}
 	if action, ok := s.mv.chat.TakeEntityAction(); ok {
 		s.dispatchEntityAction(action)
 		return true
@@ -918,7 +1250,7 @@ func (s *Shell) openProfile(id store.UserID) {
 	}
 	text := widget.NewText(detail)
 	text.SetStyle(s.styles.Text)
-	s.overlay = titled("Profile", text)
+	s.setIndependentOverlay(titled("Profile", text))
 }
 
 func (s *Shell) openRoleOptions(id store.RoleID) {
@@ -931,21 +1263,21 @@ func (s *Shell) openRoleOptions(id store.RoleID) {
 		{Label: fmt.Sprintf("%s · #%06X", role.Name, role.Color), Disabled: true},
 		{Label: "Create role…", Disabled: !canManage, OnSelect: func() {
 			s.closePopup()
-			s.overlay = NewPrompt("Create role", "Role name…", s.styles, func(name string) { s.app.CreateRole(s.app.ActiveGuild(), name) }, s.closeOverlay)
+			s.setIndependentOverlay(NewPrompt("Create role", "Role name…", s.styles, func(name string) { s.app.CreateRole(s.app.ActiveGuild(), name) }, s.closeOverlay))
 		}},
 		{Label: "Rename…", Disabled: !canManage, OnSelect: func() {
 			s.closePopup()
-			s.overlay = NewPrompt("Rename role", "Role name…", s.styles, func(name string) { s.app.RenameRole(s.app.ActiveGuild(), id, name) }, s.closeOverlay)
+			s.setIndependentOverlay(NewPrompt("Rename role", "Role name…", s.styles, func(name string) { s.app.RenameRole(s.app.ActiveGuild(), id, name) }, s.closeOverlay))
 		}},
 		{Label: "Change color…", Disabled: !canManage, OnSelect: func() {
 			s.closePopup()
-			s.overlay = NewPrompt("Role color", "RRGGBB", s.styles, func(value string) {
+			s.setIndependentOverlay(NewPrompt("Role color", "RRGGBB", s.styles, func(value string) {
 				if color, err := strconv.ParseUint(strings.TrimPrefix(value, "#"), 16, 32); err == nil && color <= 0xffffff {
 					s.app.SetRoleColor(s.app.ActiveGuild(), id, uint32(color))
 				} else {
 					s.ShowNotice("Invalid color", "Use six hexadecimal digits")
 				}
-			}, s.closeOverlay)
+			}, s.closeOverlay))
 		}},
 		{Label: "Toggle hoist", Disabled: !canManage, OnSelect: func() { s.closePopup(); s.app.SetRoleHoist(s.app.ActiveGuild(), id, !role.Hoist) }},
 		{Label: "Toggle mentionable", Disabled: !canManage, OnSelect: func() { s.closePopup(); s.app.SetRoleMentionable(s.app.ActiveGuild(), id, !role.Mentionable) }},
@@ -980,13 +1312,13 @@ func (s *Shell) dispatchComponentAction(action ComponentAction) {
 }
 
 func (s *Shell) openQuickSwitcher() {
-	s.overlay = NewQuickSwitcher(s.app.Store(), s.styles,
+	s.setIndependentOverlay(NewQuickSwitcher(s.app.Store(), s.styles,
 		func(guild store.GuildID, channel store.ChannelID) {
-			s.app.SetActive(guild, channel)
+			s.mv.setActive(guild, channel)
 			s.mv.RefreshChannels()
 		},
 		s.closeOverlay,
-	)
+	))
 }
 
 // openHotSwitch opens the lightweight + picker from any focused panel.
@@ -994,13 +1326,13 @@ func (s *Shell) openHotSwitch() {
 	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.ActiveChannel(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
 		'+', "", func(string) {}, nil, s.closeOverlay)
 	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
-		s.app.SetActive(guild, channel)
+		s.mv.setActive(guild, channel)
 		s.mv.Refresh()
 		if c, ok := s.app.Store().Channel(channel); ok && c.Kind != store.ChannelForum {
 			s.app.LoadHistory(channel, 50)
 		}
 	})
-	s.overlay = p
+	s.setIndependentOverlay(p)
 }
 
 // openPicker opens the emoji/sticker picker overlay over the composer. Chosen
@@ -1019,7 +1351,7 @@ func (s *Shell) openPicker() {
 		s.app.SendSticker(id)
 	})
 	p.SetStickerRecent(s.mv.recordRecentSticker)
-	s.overlay = p
+	s.setComposerOverlay(p)
 }
 
 // composerChanged opens or refreshes the relevant autocomplete menu when the
@@ -1028,7 +1360,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	if s.completionSync {
 		return
 	}
-	if s.cfg.Accessibility.VimNavigation && s.inputMode && strings.HasSuffix(value, ";q") {
+	if s.cfg.Accessibility.VimNavigation && s.editor.phase != editorNormal && strings.HasSuffix(value, ";q") {
 		s.completionSync = true
 		s.mv.composer.SetValue(strings.TrimSuffix(value, ";q"))
 		s.completionSync = false
@@ -1085,14 +1417,14 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	})
 	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
 		s.replaceCompletion(start, "")
-		s.app.SetActive(guild, channel)
+		s.mv.setActive(guild, channel)
 		s.mv.Refresh()
 		if c, ok := s.app.Store().Channel(channel); ok && c.Kind != store.ChannelForum {
 			s.app.LoadHistory(channel, 50)
 		}
 	})
 	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
-	s.overlay = p
+	s.setComposerOverlay(p)
 }
 
 func (s *Shell) openCommandPicker(query string) {
@@ -1109,10 +1441,13 @@ func (s *Shell) openCommandPicker(query string) {
 				s.ShowNotice("Slash commands unavailable", "Could not load Discord application commands")
 				return
 			}
-			if s.overlay != nil || !strings.HasPrefix(s.mv.composer.Value(), "/") {
+			if s.overlay != nil || s.app.ActiveGuild() != ctx.GuildID || s.app.ActiveChannel() != ctx.ChannelID || !strings.HasPrefix(s.mv.composer.Value(), "/") {
 				return
 			}
-			s.overlay = NewCommandPicker(commands, s.styles, query, func(command app.ApplicationCommand) {
+			if s.cfg.Accessibility.VimNavigation && s.editor.phase != editorInput {
+				return
+			}
+			s.setComposerOverlay(NewCommandPicker(commands, s.styles, query, func(command app.ApplicationCommand) {
 				if len(command.Options) != 0 {
 					s.ShowNotice("Command options", "Guided command forms are not available yet")
 					return
@@ -1120,7 +1455,7 @@ func (s *Shell) openCommandPicker(query string) {
 				s.mv.composer.SetValue("")
 				s.closeOverlay()
 				s.app.SubmitCommand(command, nil)
-			}, s.closeOverlay)
+			}, s.closeOverlay))
 		})
 	}()
 }
@@ -1229,7 +1564,7 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 	s.styleMenu(menu)
 	menu.SetAnchor(x, y)
 	menu.OnDismiss(s.closePopup)
-	s.popup = menu
+	s.setPopup(menu)
 }
 
 func (s *Shell) openDeleteMessageConfirm(msg store.Message, x, y int, label string) {
@@ -1244,7 +1579,7 @@ func (s *Shell) openDeleteMessageConfirm(msg store.Message, x, y int, label stri
 	s.styleMenu(menu)
 	menu.SetAnchor(x, y)
 	menu.OnDismiss(s.closePopup)
-	s.popup = menu
+	s.setPopup(menu)
 }
 
 // openChannelMenu shows the sidebar context menu for a channel or category:
@@ -1285,18 +1620,18 @@ func (s *Shell) openChannelMenu(row store.ChannelRow, x, y int) {
 }
 
 func (s *Shell) openServerSettings(guild store.GuildID) {
-	s.overlay = NewServerSettings(s.app.Store(), guild, s.styles, func(c store.Channel) { s.openChannelSettings(guild, c) }, func(r store.Role) { s.openRoleOptions(r.ID) })
+	s.setIndependentOverlay(NewServerSettings(s.app.Store(), guild, s.styles, func(c store.Channel) { s.openChannelSettings(guild, c) }, func(r store.Role) { s.openRoleOptions(r.ID) }))
 }
 func (s *Shell) openChannelSettings(guild store.GuildID, c store.Channel) {
 	can := s.app.Store().MemberCan(guild, s.app.SelfID(), store.PermManageChannels)
 	items := []widget.MenuItem{
 		{Label: "Create channel…", Disabled: !can, OnSelect: func() {
 			s.closePopup()
-			s.overlay = NewPrompt("Create channel", "Channel name…", s.styles, func(name string) { s.app.CreateTextChannel(guild, name) }, s.closeOverlay)
+			s.setIndependentOverlay(NewPrompt("Create channel", "Channel name…", s.styles, func(name string) { s.app.CreateTextChannel(guild, name) }, s.closeOverlay))
 		}},
 		{Label: "Rename…", Disabled: !can, OnSelect: func() {
 			s.closePopup()
-			s.overlay = NewPrompt("Rename channel", "Channel name…", s.styles, func(name string) { s.app.RenameChannel(c.ID, name) }, s.closeOverlay)
+			s.setIndependentOverlay(NewPrompt("Rename channel", "Channel name…", s.styles, func(name string) { s.app.RenameChannel(c.ID, name) }, s.closeOverlay))
 		}},
 		{Label: "Move up", Disabled: !can || c.Position <= 0, OnSelect: func() { s.closePopup(); s.app.MoveChannel(guild, c.ID, c.Position-1) }},
 		{Label: "Move down", Disabled: !can, OnSelect: func() { s.closePopup(); s.app.MoveChannel(guild, c.ID, c.Position+1) }},
@@ -1391,12 +1726,12 @@ func (s *Shell) openThreadMenu(row store.ChannelRow, x, y int) {
 
 // openThreadPrompt asks for a name, then creates a message-anchored thread.
 func (s *Shell) openThreadPrompt(msg store.Message) {
-	s.overlay = NewPrompt("New thread", "Thread name…", s.styles,
+	s.setIndependentOverlay(NewPrompt("New thread", "Thread name…", s.styles,
 		func(name string) {
 			s.app.CreateThreadFromMessage(msg.ChannelID, msg.ID, name)
 		},
 		s.closeOverlay,
-	)
+	))
 }
 
 // canManageThread reports whether the account may archive/unarchive a thread:
@@ -1426,7 +1761,19 @@ func (s *Shell) showPopupMenu(items []widget.MenuItem, x, y int) {
 	s.styleMenu(menu)
 	menu.SetAnchor(x, y)
 	menu.OnDismiss(s.closePopup)
-	s.popup = menu
+	s.setPopup(menu)
+}
+
+func (s *Shell) setPopup(popup tui.Widget) {
+	if s == nil {
+		return
+	}
+	if s.cfg.Accessibility.VimNavigation && s.editor.phase != editorNormal {
+		s.exitEditor(nil)
+	} else {
+		s.cancelFocusRequest()
+	}
+	s.popup = popup
 }
 
 func (s *Shell) styleMenu(menu *widget.Menu) {
@@ -1462,6 +1809,8 @@ func (s *Shell) closeOverlay() {
 	if s == nil {
 		return
 	}
+	owned := s.overlay != nil && s.composerOverlay != nil && s.overlay == s.composerOverlay
+	resumeComposer := owned && s.editor.phase == editorOverlaySuspended && s.editor.channel == s.activeChannel() && s.composerWritable()
 	if closer, ok := s.overlay.(overlayCloser); ok {
 		closer.Close()
 	}
@@ -1474,7 +1823,13 @@ func (s *Shell) closeOverlay() {
 		s.teardownVideo()
 	}
 	s.overlay = nil
-	if playingVideo {
+	s.composerOverlay = nil
+	if resumeComposer {
+		s.beginComposerInput(true)
+	} else if s.editor.phase == editorOverlaySuspended {
+		s.exitEditor(nil)
+	}
+	if playingVideo && s.app != nil {
 		// mpv painted over the screen outside our frame diff; re-emit everything.
 		s.app.ForceRepaint()
 	}
@@ -1522,8 +1877,10 @@ func (s *Shell) Close() {
 		if closer, ok := s.overlay.(overlayCloser); ok {
 			closer.Close()
 		}
+		s.exitEditor(nil)
 		s.popup = nil
 		s.overlay = nil
+		s.composerOverlay = nil
 		s.teardownVideo()
 	})
 }

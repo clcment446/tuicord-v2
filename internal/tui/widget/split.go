@@ -289,11 +289,31 @@ func (w *Split) Draw(r screen.Region) {
 }
 
 // Handle adjusts the divider for Alt+arrow keyboard events, then offers
-// unhandled events to panes from front to back.
+// unhandled events to panes from front to back when called directly.
 func (w *Split) Handle(ev tui.Event) bool {
 	if w == nil {
 		return false
 	}
+	if w.handleOwn(ev) {
+		return true
+	}
+	if _, mouse := ev.(input.MouseEvent); mouse {
+		return false
+	}
+	if w.second != nil && w.second.Handle(ev) {
+		return true
+	}
+	if w.first != nil && w.first.Handle(ev) {
+		return true
+	}
+	return false
+}
+
+// HandleBubble handles only the split's own controls. Descendant delivery has
+// already happened along the runtime's focused path.
+func (w *Split) HandleBubble(ev tui.Event) bool { return w != nil && w.handleOwn(ev) }
+
+func (w *Split) handleOwn(ev tui.Event) bool {
 	if mouse, ok := ev.(input.MouseEvent); ok {
 		if mouse.Kind == input.MousePress && mouse.Btn == input.ButtonLeft && w.hitCollapsedToggle(mouse.X, mouse.Y) {
 			w.expand()
@@ -345,12 +365,6 @@ func (w *Split) Handle(ev tui.Event) bool {
 				return true
 			}
 		}
-	}
-	if w.second != nil && w.second.Handle(ev) {
-		return true
-	}
-	if w.first != nil && w.first.Handle(ev) {
-		return true
 	}
 	return false
 }

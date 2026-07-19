@@ -45,27 +45,29 @@ type MainView struct {
 	styles   Styles
 	mediaCfg media.Config
 
-	guildList        *widget.ItemList
-	channelList      *widget.ItemList
-	memberList       *widget.ItemList
-	chat             *ChatView
-	chatBorder       *widget.Border
-	composerBorder   *widget.Border
-	composerStatus   *widget.Text
-	composerFiles    *widget.Text
-	composerPreview  *widget.Node
-	composerNode     *layout.Node
-	previewCellW     int
-	previewCellH     int
-	composer         *widget.TextInput
-	attachments      []queuedAttachment
-	composerMode     composerMode
-	composerTarget   store.Message
-	replyMention     bool
-	composerReadOnly bool
-	inputMode        bool
-	onComposerChange func(string, int)
-	onLocalCommand   func(string) bool
+	guildList           *widget.ItemList
+	channelList         *widget.ItemList
+	memberList          *widget.ItemList
+	chat                *ChatView
+	chatBorder          *widget.Border
+	composerBorder      *widget.Border
+	composerStatus      *widget.Text
+	composerFiles       *widget.Text
+	composerPreview     *widget.Node
+	composerNode        *layout.Node
+	previewCellW        int
+	previewCellH        int
+	composer            *widget.TextInput
+	attachments         []queuedAttachment
+	composerMode        composerMode
+	composerTarget      store.Message
+	replyMention        bool
+	composerReadOnly    bool
+	composerInputActive func() bool
+	onComposerChange    func(string, int)
+	onLocalCommand      func(string) bool
+	onChannelChange     func(store.ChannelID, store.ChannelID)
+	lastActiveChannel   store.ChannelID
 
 	forumView       *ForumView
 	forumPreviewID  store.ChannelID
@@ -105,7 +107,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	}
 	mediaCfg := chatMediaConfig(cfg)
 	mv := &MainView{app: a, cfg: cfg, styles: styles, mediaCfg: mediaCfg, state: state,
-		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != ""}
+		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != "", lastActiveChannel: a.ActiveChannel()}
 
 	mv.guildList = widget.NewItemList(nil)
 	mv.guildList.SetStyle(styles.Cell("guilds"))
@@ -382,9 +384,57 @@ func chatMediaPixelBudget(cfg media.Config) image.Point {
 	return image.Point{X: maxCols * cellW, Y: rows * cellH}
 }
 
+// SetChannelChangeHandler registers the Shell cleanup hook. MainView owns all
+// UI channel activation so editor requests and composer targets are invalidated
+// through one path.
+func (mv *MainView) SetChannelChangeHandler(fn func(store.ChannelID, store.ChannelID)) {
+	if mv == nil {
+		return
+	}
+	mv.onChannelChange = fn
+	if mv.app != nil {
+		mv.lastActiveChannel = mv.app.ActiveChannel()
+	}
+}
+
+func (mv *MainView) setActive(guild store.GuildID, channel store.ChannelID) {
+	if mv == nil || mv.app == nil {
+		return
+	}
+	previous := mv.app.ActiveChannel()
+	mv.app.SetActive(guild, channel)
+	mv.handleActiveChannelChange(previous, channel)
+}
+
+func (mv *MainView) syncActiveChannel() {
+	if mv == nil || mv.app == nil {
+		return
+	}
+	current := mv.app.ActiveChannel()
+	mv.handleActiveChannelChange(mv.lastActiveChannel, current)
+}
+
+func (mv *MainView) handleActiveChannelChange(previous, current store.ChannelID) {
+	if mv == nil {
+		return
+	}
+	if previous == current {
+		mv.lastActiveChannel = current
+		return
+	}
+	mv.lastActiveChannel = current
+	if mv.onChannelChange != nil {
+		mv.onChannelChange(previous, current)
+	}
+	if mv.composerMode != composerNormal && mv.composerTarget.ChannelID != current {
+		mv.CancelComposerMode()
+	}
+}
+
 // Refresh repopulates the guild and channel lists from the store. Call on the
 // UI goroutine (e.g. from App.OnReady) after state changes.
 func (mv *MainView) Refresh() {
+	mv.syncActiveChannel()
 	mv.rebuildGuilds()
 	switch {
 	case mv.guildRowIndex(mv.app.ActiveGuild()) >= 0:
@@ -476,7 +526,7 @@ func (mv *MainView) onGuildSelected(index int) {
 	}
 	guild := row.GuildID
 	mv.showChat() // leave any forum view from the previous guild
-	mv.app.SetActive(guild, 0)
+	mv.setActive(guild, 0)
 	mv.app.LoadRoles(guild)
 	mv.app.LoadChannels(guild)
 	mv.refreshChannels()
@@ -509,6 +559,7 @@ func (mv *MainView) unfoldSelectedGuildFolder(_ bool) bool {
 // RefreshChannels rebuilds the channel list (and its unread badges) from the
 // store. Safe to call on the UI goroutine, e.g. from App.OnChange.
 func (mv *MainView) RefreshChannels() {
+	mv.syncActiveChannel()
 	mv.refreshChannels()
 	mv.refreshForum()
 }
@@ -622,7 +673,7 @@ func (mv *MainView) onChannelSelected(index int) {
 	if !row.Navigable() {
 		return
 	}
-	mv.app.SetActive(mv.app.ActiveGuild(), row.ChannelID)
+	mv.setActive(mv.app.ActiveGuild(), row.ChannelID)
 	if row.Kind == store.ChannelForum {
 		mv.openForum(row.ChannelID)
 		return
@@ -643,7 +694,7 @@ func (mv *MainView) NavigateToChannel(id store.ChannelID) bool {
 		return false
 	}
 	if mv.app.ActiveGuild() != channel.GuildID {
-		mv.app.SetActive(channel.GuildID, id)
+		mv.setActive(channel.GuildID, id)
 		if guildIndex := mv.guildRowIndex(channel.GuildID); guildIndex >= 0 {
 			mv.guildList.SetSelectedSilent(guildIndex)
 		}
@@ -655,7 +706,7 @@ func (mv *MainView) NavigateToChannel(id store.ChannelID) bool {
 		mv.onChannelSelected(index)
 		return true
 	}
-	mv.app.SetActive(channel.GuildID, id)
+	mv.setActive(channel.GuildID, id)
 	mv.showChat()
 	mv.app.LoadHistory(id, 50)
 	mv.updateChannelChrome()
@@ -865,7 +916,7 @@ func (mv *MainView) refreshForum() {
 // onOpenPost opens a forum post as the active chat channel, leaving the forum
 // list behind.
 func (mv *MainView) onOpenPost(id store.ChannelID) {
-	mv.app.SetActive(mv.app.ActiveGuild(), id)
+	mv.setActive(mv.app.ActiveGuild(), id)
 	mv.showChat()
 	mv.app.LoadHistory(id, 50)
 	mv.updateChannelChrome()
@@ -1048,6 +1099,12 @@ func memberForContext(st *store.Store, guild store.GuildID, channel store.Channe
 }
 
 func (mv *MainView) onSend(content string) {
+	// Defense in depth: even if a caller bypasses the centralized activation
+	// path, a reply/edit target may never be submitted from another channel.
+	if mv.composerMode != composerNormal && mv.app != nil && (mv.composerTarget.ChannelID == 0 || mv.composerTarget.ChannelID != mv.app.ActiveChannel()) {
+		mv.CancelComposerMode()
+		return
+	}
 	if updated, attachments, err := importDollarPaths(mv.workspaceRoot(), content); err != nil {
 		mv.reportUploadError(err)
 		return
@@ -1261,7 +1318,10 @@ func (mv *MainView) SetLocalCommandHandler(fn func(string) bool) { mv.onLocalCom
 
 // BeginReply puts the composer into inline-reply mode.
 func (mv *MainView) BeginReply(msg store.Message, mention bool) {
-	if mv == nil {
+	if mv == nil || msg.ChannelID == 0 {
+		return
+	}
+	if mv.app != nil && mv.app.ActiveChannel() != 0 && msg.ChannelID != mv.app.ActiveChannel() {
 		return
 	}
 	mv.composerMode = composerReply
@@ -1272,7 +1332,10 @@ func (mv *MainView) BeginReply(msg store.Message, mention bool) {
 
 // BeginEdit puts the composer into edit mode and preloads the message content.
 func (mv *MainView) BeginEdit(msg store.Message) {
-	if mv == nil {
+	if mv == nil || msg.ChannelID == 0 {
+		return
+	}
+	if mv.app != nil && mv.app.ActiveChannel() != 0 && msg.ChannelID != mv.app.ActiveChannel() {
 		return
 	}
 	mv.composerMode = composerEdit
@@ -1307,7 +1370,7 @@ func (mv *MainView) updateComposerStatus() {
 		return
 	}
 	modePrefix := ""
-	if mv.inputMode {
+	if mv.composerInputActive != nil && mv.composerInputActive() {
 		modePrefix = "INPUT"
 	}
 	withMode := func(detail string) string {
@@ -1328,18 +1391,6 @@ func (mv *MainView) updateComposerStatus() {
 	default:
 		mv.composerStatus.SetContent(modePrefix)
 	}
-}
-
-// SetInputMode updates the composer mode indicator used by Vim navigation.
-func (mv *MainView) SetInputMode(enabled bool) {
-	if mv == nil {
-		return
-	}
-	mv.inputMode = enabled
-	if mv.composer != nil && mv.cfg.Accessibility.VimNavigation {
-		mv.composer.SetInputFocusEnabled(enabled)
-	}
-	mv.updateComposerStatus()
 }
 
 func titled(title string, child tui.Widget) *widget.Border {

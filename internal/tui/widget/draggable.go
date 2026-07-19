@@ -76,6 +76,9 @@ func (d *Draggable) Handle(ev tui.Event) bool {
 	return d != nil && d.child != nil && d.child.Handle(ev)
 }
 
+// HandleBubble avoids forwarding a bubbled event back into the wrapped child.
+func (d *Draggable) HandleBubble(tui.Event) bool { return false }
+
 // DragStart starts dragging from anywhere inside the wrapper.
 func (d *Draggable) DragStart(x, y int) (DragOp, bool) {
 	if d == nil || x < 0 || y < 0 {
