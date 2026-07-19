@@ -1770,9 +1770,9 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 		roleGradient: gradient,
 	}
 	if !gradient {
-		line.segments = []chatSegment{{text: "  " + header, style: authorStyle}}
+		line.segments = []chatSegment{{text: "  | " + header, style: authorStyle}}
 	} else if avatarURL != "" && w.mediaCfg.Enabled {
-		line.segments = append([]chatSegment{{text: "  ", style: authorStyle}}, line.segments...)
+		line.segments = append([]chatSegment{{text: "  | ", style: authorStyle}}, line.segments...)
 	}
 	if avatarURL == "" || !w.mediaCfg.Enabled {
 		return line

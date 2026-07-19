@@ -66,11 +66,31 @@ func TestChatViewRendersAuthorAvatarNextToGroupedName(t *testing.T) {
 
 	view.Draw(buf.Clip(buf.Bounds()))
 
-	if got := rowText(buf, 0); got != "  alice" {
-		t.Fatalf("author row = %q, want avatar slot followed by name", got)
+	if got := rowText(buf, 0); got != "  | alice" {
+		t.Fatalf("author row = %q, want avatar slot, separator, and name", got)
 	}
 	if graphics := buf.Graphics(); len(graphics) != 1 || !bytes.Contains(graphics[0].Data, []byte("c=2")) || !bytes.Contains(graphics[0].Data, []byte("r=1")) {
 		t.Fatalf("avatar graphics = %+v, want one 2x1 placement", graphics)
+	}
+}
+
+func TestChatViewSeparatesAvatarFromGradientAuthorName(t *testing.T) {
+	const avatarURL = "https://cdn.discordapp.com/avatars/7/avatar.png"
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 5})
+	st.UpsertRole(5, store.Role{ID: 10, Position: 2, Colors: [3]uint32{0xff0000, 0x0000ff}})
+	st.UpsertMember(5, store.Member{ID: 7, Name: "alice", RoleIDs: []store.RoleID{10}})
+	st.AppendMessage(store.Message{ChannelID: 1, AuthorID: 7, Author: "alice", AuthorAvatarURL: avatarURL, Content: "first"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetRoleGradients(true, false)
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{avatarURL: {img: solidTestImage(48, 48)}}
+	buf := screen.NewBuffer(24, 2)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 0); got != "  | alice" {
+		t.Fatalf("gradient author row = %q, want avatar slot, separator, and name", got)
 	}
 }
 
