@@ -37,6 +37,13 @@ const (
 	glyphPinned    = "★"
 )
 
+// Account selector (left of the composer) width bounds, in columns.
+const (
+	accountSelectorWidth    = 16
+	accountSelectorMinWidth = 8
+	accountSelectorMaxWidth = 28
+)
+
 // MainView owns the widget tree and the index→ID maps needed to translate list
 // selections back into store identifiers.
 type MainView struct {
@@ -48,6 +55,9 @@ type MainView struct {
 	guildList           *widget.ItemList
 	channelList         *widget.ItemList
 	memberList          *widget.ItemList
+	accountList         *widget.ItemList
+	accountBorder       *widget.Border
+	onAccountSelect     func(int)
 	chat                *ChatView
 	chatBorder          *widget.Border
 	composerBorder      *widget.Border
@@ -130,12 +140,22 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	mv.memberList.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.memberList.SetStyle(styles.Cell("guilds.members"))
 
+	// The account selector sits to the left of the composer; switching a row
+	// activates that account (wired to the accounts.Manager via main).
+	mv.accountList = widget.NewItemList(nil)
+	mv.accountList.SetStyle(styles.Cell("guilds"))
+	mv.accountList.SetSelectedStyle(styles.Cell("guilds.selected"))
+	mv.accountList.SetBadgeStyle(styles.Cell("guilds.badge"))
+	mv.accountList.OnSelect(mv.onAccountSelected)
+	mv.accountList.SetVimNavigation(cfg.Accessibility.VimNavigation)
+
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
 	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)
-	mv.chat.OnReachTop(func() { a.LoadOlderHistory(a.ActiveChannel()) })
+	// Reference mv.app (not the captured a) so account switches rebind cleanly.
+	mv.chat.OnReachTop(func() { mv.app.LoadOlderHistory(mv.app.ActiveChannel()) })
 	if fetcher := newChatMediaFetcher(mediaCfg); fetcher != nil {
 		mv.chat.SetMedia(fetcher, mediaCfg, a.Post)
 		mv.chat.SetInvalidate(a.Invalidate)
@@ -191,11 +211,23 @@ func (mv *MainView) compose() tui.Widget {
 
 	mv.chatBorder = mv.titled("Messages", mv.chat)
 	mv.composerBorder = mv.titled("Composer", composerArea)
+	mv.accountBorder = mv.titled("Accounts", mv.accountList)
+
+	// The bottom row is [Accounts | Composer]: the multi-account selector sits to
+	// the left of the composer. Both share the composerBaseBasis row height, so
+	// staging an image (which grows composerNode below) grows the whole row.
+	composerRow := widget.NewSplit(mv.accountBorder, mv.composerBorder).
+		Basis(accountSelectorWidth).
+		MinFirst(accountSelectorMinWidth).
+		MaxFirst(accountSelectorMaxWidth).
+		CollapsibleFirst()
+	composerRow.SetStyle(mv.styles.Cell("panels.border"))
+
 	chatColumn := widget.Column(
 		mv.chatBorder,
-		mv.composerBorder,
+		composerRow,
 	)
-	// Chat grows; the composer reserves room for four wrapped input rows and
+	// Chat grows; the composer row reserves room for four wrapped input rows and
 	// a compact attachment-chip line.
 	chatColumn.Children()[0].Layout().Grow = 1
 	composerNode := chatColumn.Children()[1].Layout()
@@ -447,6 +479,81 @@ func (mv *MainView) Refresh() {
 	default:
 		mv.refreshChannels()
 	}
+}
+
+// AccountBadge is one row in the account selector. The main package's Surface
+// adapter converts an accounts.Badge into this so ui need not import accounts.
+type AccountBadge struct {
+	Label    string
+	Unread   bool
+	Mentions int
+	Active   bool
+	Failed   bool
+}
+
+// SetAccountSelectHandler registers the callback fired when the user picks an
+// account row (wired to accounts.Manager.Switch by main).
+func (mv *MainView) SetAccountSelectHandler(fn func(int)) {
+	if mv != nil {
+		mv.onAccountSelect = fn
+	}
+}
+
+// onAccountSelected forwards an account row activation to the registered
+// handler. Switching to the already-active account is a harmless no-op there.
+func (mv *MainView) onAccountSelected(index int) {
+	if mv.onAccountSelect != nil {
+		mv.onAccountSelect(index)
+	}
+}
+
+// SetAccounts populates the account selector rows and highlights the active
+// account without firing the selection handler. Call on the UI goroutine.
+func (mv *MainView) SetAccounts(rows []AccountBadge) {
+	if mv == nil || mv.accountList == nil {
+		return
+	}
+	items := make([]widget.Item, len(rows))
+	active := 0
+	for i, r := range rows {
+		label := r.Label
+		if label == "" {
+			label = "Account"
+		}
+		items[i] = widget.Item{Label: label, Badge: accountRowBadge(r)}
+		if r.Failed {
+			items[i].Style = mv.styles.Cell("error")
+		}
+		if r.Active {
+			active = i
+		}
+	}
+	mv.accountList.SetItems(items)
+	mv.accountList.SetSelectedSilent(active)
+}
+
+// accountRowBadge renders the mention count, else an unread dot, else nothing.
+func accountRowBadge(r AccountBadge) string {
+	if r.Mentions > 0 {
+		return strconv.Itoa(r.Mentions)
+	}
+	if r.Unread {
+		return "•"
+	}
+	return ""
+}
+
+// SetActiveAccount rebinds the visible panels to a different account's
+// orchestrator and store, resetting the transcript and restoring that account's
+// own active guild/channel selection. Call on the UI goroutine.
+func (mv *MainView) SetActiveAccount(a *app.App) {
+	if mv == nil || a == nil {
+		return
+	}
+	mv.app = a
+	mv.chat.SetSource(a.Store(), a.ActiveChannel)
+	mv.lastActiveChannel = a.ActiveChannel()
+	mv.Refresh()
 }
 
 // rebuildGuilds rebuilds the guild rail rows (folders + guilds + pins) and keeps

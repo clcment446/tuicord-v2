@@ -10,9 +10,12 @@ import (
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/session"
+	"github.com/diamondburned/arikawa/v3/state"
+	"github.com/diamondburned/arikawa/v3/state/store/defaultstore"
 	"github.com/diamondburned/arikawa/v3/utils/handler"
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/httputil/httpdriver"
+	"github.com/diamondburned/ningen/v3"
 	"github.com/google/uuid"
 )
 
@@ -60,6 +63,30 @@ func NewSession(token string) (*session.Session, error) {
 	// client used for the rest of tuicord's authenticated requests.
 	sess.Client = apiCl
 	return sess, nil
+}
+
+// NewNingen builds a ningen state around the same user-token session as
+// NewSession. Ningen wraps arikawa's state with official-client-like caching
+// and adds ReadState/MemberState/MutedState/EmojiState. It is constructed via
+// state.NewFromSession so the custom browser identify, capabilities, and
+// browser-shaped REST client from NewSession are all preserved — that identity
+// is load-bearing for the user-token (self-bot) model.
+func NewNingen(token string) (*ningen.State, error) {
+	sess, err := NewSession(token)
+	if err != nil {
+		return nil, err
+	}
+	return WrapSession(sess), nil
+}
+
+// WrapSession wraps an already-built arikawa session in a ningen state without
+// altering it (same gateway, identify, and REST client). Use it when you
+// already hold a session — notably tests that build a fake session — instead of
+// NewNingen, which constructs a fresh user-token session. The session must have
+// a non-nil handler (e.g. from session.New); a zero &session.Session{} will
+// panic in state hooking.
+func WrapSession(sess *session.Session) *ningen.State {
+	return ningen.FromState(state.NewFromSession(sess, defaultstore.New()))
 }
 
 // NewUnauthenticatedClient creates an arikawa API client with the same

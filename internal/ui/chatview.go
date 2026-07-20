@@ -237,6 +237,30 @@ func (w *ChatView) OnReachTop(fn func()) {
 	}
 }
 
+// SetSource rebinds the transcript to a different account's store and
+// active-channel accessor (used on multi-account switch) and resets the
+// interactive view state — scroll, focus, and selection — so nothing from the
+// previous account's messages leaks into the newly shown one. URL-keyed media
+// state is left intact since attachment URLs are global.
+func (w *ChatView) SetSource(st *store.Store, active func() store.ChannelID) {
+	if w == nil {
+		return
+	}
+	w.store = st
+	w.active = active
+	w.bottomScroll.SetOffset(0)
+	w.focusedMessageSet = false
+	w.focusedExplicit = false
+	w.focusKey = ""
+	w.focusStopKey = ""
+	w.focusStopIndex = -1
+	w.selectionActive = false
+	w.selectionStart = 0
+	w.contextMessageSet = false
+	w.headerMessageKey = ""
+	w.vimPendingG = false
+}
+
 // SetMedia enables asynchronous inline media loading for attachments, stickers,
 // emoji CDN links, and image embeds. post must schedule callbacks on the UI
 // goroutine; passing nil leaves text-chip fallbacks in place.

@@ -8,6 +8,7 @@ import (
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
+	"awesomeProject/internal/discord"
 	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
@@ -21,7 +22,7 @@ import (
 // RunContext has returned.
 func TestPluginHostAccessorsDoNotWaitForUIEventLoop(t *testing.T) {
 	uiApp := tui.New()
-	orch := app.New(session.New(""), store.New(0), uiApp)
+	orch := app.New(discord.WrapSession(session.New("")), store.New(0), uiApp)
 	orch.SetActive(12, 34)
 	host := newPluginHost(
 		orch,
@@ -55,7 +56,7 @@ func TestPluginHostAccessorsDoNotWaitForUIEventLoop(t *testing.T) {
 
 func TestManagerCloseDoesNotWaitForStoppedUIAccessor(t *testing.T) {
 	uiApp := tui.New()
-	orch := app.New(session.New(""), store.New(0), uiApp)
+	orch := app.New(discord.WrapSession(session.New("")), store.New(0), uiApp)
 	host := newPluginHost(
 		orch,
 		uiApp,

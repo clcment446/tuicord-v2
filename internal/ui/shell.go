@@ -216,6 +216,17 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 	}
 }
 
+// SetActiveAccount rebinds the shell to a different account's orchestrator on a
+// multi-account switch. Every s.app read is dynamic, and post/tryPost forward to
+// the shared tui runtime (identical across accounts), so swapping the pointer is
+// sufficient. Call on the UI goroutine.
+func (s *Shell) SetActiveAccount(a *app.App) {
+	if s == nil || a == nil {
+		return
+	}
+	s.app = a
+}
+
 func (s *Shell) bindEditorState() {
 	if s == nil || s.mv == nil {
 		return
@@ -1961,6 +1972,19 @@ func (s *Shell) NotifyIncomingMessage(message store.Message) {
 		return
 	}
 	s.showIncomingMessageToast(message, title, body)
+}
+
+// NotifyAccountMessage notifies about a message that arrived on a background
+// (non-active) account, prefixing the sender with the account label so the user
+// can tell which account received it.
+func (s *Shell) NotifyAccountMessage(account string, message store.Message) {
+	if s == nil {
+		return
+	}
+	if account != "" {
+		message.Author = account + " · " + strings.TrimSpace(message.Author)
+	}
+	s.NotifyIncomingMessage(message)
 }
 
 func (s *Shell) dispatchNotification(fn func()) {

@@ -424,6 +424,26 @@ func (s *Store) GuildPings(guild GuildID) int {
 	return total
 }
 
+// TotalUnread returns the account-wide unread message count across all
+// channels. Used for the multi-account selector's unread dot.
+func (s *Store) TotalUnread() int {
+	total := 0
+	for _, count := range s.unread {
+		total += count
+	}
+	return total
+}
+
+// TotalPings returns the account-wide attention (mention/DM) count across all
+// channels.
+func (s *Store) TotalPings() int {
+	total := 0
+	for _, count := range s.pings {
+		total += count
+	}
+	return total
+}
+
 // PingedChannels returns the channels with at least one attention message.
 // The returned map is a snapshot suitable for sidebar ordering.
 func (s *Store) PingedChannels() map[ChannelID]bool {
