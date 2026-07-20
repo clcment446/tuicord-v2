@@ -5,6 +5,7 @@ import (
 
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/config"
+	"awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
@@ -48,7 +49,7 @@ func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
 	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
-	a := app.New(&session.Session{}, st, tui.New())
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
 	a.SetActive(1, 10)
 	st.IncrementPing(10)
 	st.IncrementPing(10)
@@ -68,7 +69,7 @@ func TestRefreshChannelsPreservesBrowsedSelection(t *testing.T) {
 	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
 	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "active", Position: 1})
 	st.UpsertChannel(store.Channel{ID: 20, GuildID: 1, Name: "browsing", Position: 2})
-	a := app.New(&session.Session{}, st, tui.New())
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
 	a.SetActive(1, 10)
 	mv := &MainView{app: a, state: &uistate.State{}, channelList: widget.NewItemList(nil)}
 	mv.refreshChannels()
@@ -113,7 +114,7 @@ func TestOpenThreadMenuLabels(t *testing.T) {
 	st := &uistate.State{}
 	data := store.New(0)
 	data.UpsertChannel(store.Channel{ID: 8, Kind: store.ChannelThread, Thread: &store.ThreadMeta{}})
-	a := app.New(&session.Session{}, data, tui.New())
+	a := app.New(discord.WrapSession(session.New("")), data, tui.New())
 	mv := &MainView{app: a, state: st, Root: widget.NewText("main")}
 	sh := &Shell{app: a, cfg: config.Default(), mv: mv}
 

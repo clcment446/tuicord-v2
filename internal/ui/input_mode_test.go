@@ -5,6 +5,7 @@ import (
 
 	appcore "awesomeProject/internal/app"
 	"awesomeProject/internal/config"
+	"awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/tui"
@@ -413,7 +414,7 @@ func TestChannelChangeClearsEditorRequestAndComposerTarget(t *testing.T) {
 	st.UpsertChannel(store.Channel{ID: 1, GuildID: 9, Kind: store.ChannelText})
 	st.UpsertChannel(store.Channel{ID: 2, GuildID: 9, Kind: store.ChannelText})
 	runtime := tui.New()
-	logic := appcore.New(&session.Session{}, st, runtime)
+	logic := appcore.New(discord.WrapSession(session.New("")), st, runtime)
 	logic.SetActive(9, 1)
 	cfg := vimTestConfig()
 	composer := widget.NewTextInput("Message")

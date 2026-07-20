@@ -12,6 +12,6 @@ func ExampleDefault() {
 	fmt.Println("channels width:", cfg.Layout.ChannelsWidth)
 	fmt.Println("quick switcher:", cfg.Keys.QuickSwitcher)
 	// Output:
-	// channels width: 24
+	// channels width: 20
 	// quick switcher: ctrl+k
 }
