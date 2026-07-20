@@ -386,6 +386,16 @@ func Path() (string, error) {
 	return filepath.Join(dir, AppName, "config.toml"), nil
 }
 
+// LockPath returns the path to the single-instance lock file beside
+// config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
+func LockPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "tuicord.lock"), nil
+}
+
 // PluginsDir returns the directory Lua plugins are loaded from, beside
 // config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
 func PluginsDir() (string, error) {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,7 +16,13 @@ import (
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
+
+	"github.com/diamondburned/arikawa/v3/utils/ws"
 )
+
+// gatewayAuthFailedCode is Discord's gateway close code for a rejected
+// IDENTIFY: the token is invalid or the account has been flagged.
+const gatewayAuthFailedCode = 4004
 
 func main() {
 	if err := run(); err != nil {
@@ -29,6 +36,15 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+
+	// One instance per account. Two clients on one token double the gateway
+	// sessions and startup REST volume, which is what trips Discord's abuse
+	// detection.
+	releaseLock, err := acquireInstanceLock()
+	if err != nil {
+		return err
+	}
+	defer releaseLock()
 	// Ensure a non-nil override set so plugins can add color rules at runtime.
 	// The Styles built below and the plugin Host share this same pointer, so a
 	// tuicord.style call is visible to widgets on the next render.
@@ -95,14 +111,25 @@ func run() error {
 	}
 
 	orch.RegisterHandlers()
+	// The user-session gateway READY does not reliably deliver the guild/DM
+	// directory, so this REST pull is load-bearing, not redundant. Its DM
+	// hydration is bounded (see hydratePrivateChannels) to avoid a launch burst.
 	orch.LoadGuilds(100)
 
 	go func() {
-		if err := orch.Connect(ctx); err != nil && ctx.Err() == nil {
-			uiApp.Post(func() {
-				shell.ShowToast("Gateway error", err)
-			})
+		err := orch.Connect(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
 		}
+		title, toast := "Gateway error", err
+		var closeErr *ws.CloseEvent
+		if errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode {
+			title = "Authentication failed"
+			toast = errors.New("Discord rejected the session (close 4004). The token is invalid or the account was flagged — re-authenticate to continue.")
+		}
+		uiApp.Post(func() {
+			shell.ShowToast(title, toast)
+		})
 	}()
 
 	return uiApp.RunContext(ctx, shell)

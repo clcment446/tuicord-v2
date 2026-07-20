@@ -1827,13 +1827,20 @@ func (a *App) directorySnapshotCurrent(snapshot directoryRequestSnapshot, _ []di
 	return true
 }
 
+// dmHydrationConcurrency bounds how many DM channel-detail requests run at once
+// when filling recipients omitted from a sparse startup payload. A small cap
+// keeps the launch fetch well under Discord's rate limits instead of bursting
+// one request per DM at the same instant.
+const dmHydrationConcurrency = 4
+
 // hydratePrivateChannels fills recipient data omitted by some user-session
-// startup responses. Each missing DM is fetched concurrently and the enriched
-// result is cached in the store with the rest of the directory.
+// startup responses. Missing DMs are fetched with bounded concurrency and the
+// enriched result is cached in the store with the rest of the directory.
 func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Channel {
 	if a == nil || a.channelDetail == nil {
 		return channels
 	}
+	sem := make(chan struct{}, dmHydrationConcurrency)
 	var wg sync.WaitGroup
 	for i := range channels {
 		if channels[i].Name != "" || len(channels[i].DMRecipients) > 0 {
@@ -1843,6 +1850,8 @@ func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Chann
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			full, err := a.channelDetail.Channel(id)
 			if err == nil && full != nil {
 				channels[i] = *full
