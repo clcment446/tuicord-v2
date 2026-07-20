@@ -1,0 +1,393 @@
+// Package accounts manages multiple Discord accounts within a single tuicord
+// process. Each account owns its own ningen state, normalized store, and
+// orchestrator (app.App); all of them post onto the one shared tui runtime, so
+// the single-UI-goroutine concurrency model is unchanged. The Manager tracks
+// which account is active, connects accounts lazily (only on first activation,
+// then keeps them connected), routes each account's callbacks — panel refreshes
+// only for the active account, badges and notifications for every connected
+// account — and drives the UI through the Surface interface so this package
+// never imports internal/ui.
+package accounts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"awesomeProject/internal/app"
+	"awesomeProject/internal/config"
+	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/tui"
+
+	"github.com/diamondburned/ningen/v3"
+)
+
+// ErrNoAccounts is returned by Start when the registry is empty.
+var ErrNoAccounts = errors.New("accounts: no accounts configured")
+
+// Surface is the view the Manager drives. It is implemented by a small adapter
+// over the MainView/Shell/selector so this package stays free of a UI import
+// (and remains unit-testable with a fake). Every method runs on the UI
+// goroutine.
+type Surface interface {
+	// Activate rebinds the visible panels to the given account's orchestrator
+	// and store and performs a full refresh. Called on switch.
+	Activate(a *Account)
+	// Refresh redraws the guild/channel panels for the active account (used on
+	// its ready/guild changes, after Activate has bound it).
+	Refresh()
+	// RefreshChannels redraws the channel panel for the active account.
+	RefreshChannels()
+	// Notify surfaces an incoming message from any connected account.
+	Notify(a *Account, msg store.Message)
+	// ShowError surfaces an error from any account.
+	ShowError(a *Account, err error)
+	// Badges pushes the current per-account badge snapshot to the selector.
+	Badges(badges []Badge)
+}
+
+// Badge is one row in the account selector.
+type Badge struct {
+	// Label is the display name (never empty; a fallback is filled in).
+	Label string
+	// Unread is true when the account has any unread or attention messages.
+	Unread bool
+	// Mentions is the account's total mention count (authoritative from ningen
+	// ReadState).
+	Mentions int
+	// Active marks the currently selected account.
+	Active bool
+	// Failed marks an account whose last connect attempt errored.
+	Failed bool
+}
+
+// BuildFunc constructs a ningen state for the given account keyring key,
+// resolving that key's token. It must not prompt interactively — lazy builds
+// happen while the UI event loop owns the terminal. The initial active account
+// is built before the loop starts and passed in prebuilt (see Seed.Ning).
+type BuildFunc func(key string) (*ningen.State, error)
+
+// Seed describes one saved account at construction time. For the launch account
+// — whose interactive login, ningen, store, and orchestrator are all built
+// before the Manager exists (so MainView/Shell can be constructed from it) — set
+// App, Store, and Ning to that prebuilt runtime. Lazy accounts leave them nil
+// and are built via BuildFunc on first activation.
+type Seed struct {
+	Key   string
+	Label string
+	ID    uint64
+	Ning  *ningen.State
+	App   *app.App
+	Store *store.Store
+}
+
+// Account is one managed account: its saved identity plus, once built, its
+// live orchestrator/store/state.
+type Account struct {
+	key      string
+	label    string
+	id       store.UserID
+	seedNing *ningen.State
+
+	app   *app.App
+	store *store.Store
+	ning  *ningen.State
+
+	built      bool
+	connecting bool
+	err        error
+}
+
+// App returns the account's orchestrator, or nil before it is built.
+func (a *Account) App() *app.App { return a.app }
+
+// Store returns the account's normalized store, or nil before it is built.
+func (a *Account) Store() *store.Store { return a.store }
+
+// Key returns the account's stable keyring key.
+func (a *Account) Key() string { return a.key }
+
+// ID returns the account's Discord user ID, 0 until first connect.
+func (a *Account) ID() store.UserID { return a.id }
+
+// Err returns the account's last error, if any.
+func (a *Account) Err() error { return a.err }
+
+// Label returns the account's display name, falling back to its key.
+func (a *Account) Label() string {
+	if a.label != "" {
+		return a.label
+	}
+	if a.key != "" {
+		return a.key
+	}
+	return "Account"
+}
+
+// Options configures a Manager.
+type Options struct {
+	UI      *tui.App
+	Ctx     context.Context
+	Surface Surface
+	// Build constructs a ningen state for a lazy account's key.
+	Build BuildFunc
+	// Persist saves the registry after a mutation (active index, discovered
+	// label/id, or a new account). May be nil in tests.
+	Persist func(config.Accounts)
+	// Seeds is the ordered set of saved accounts.
+	Seeds []Seed
+	// Active is the initial active index.
+	Active int
+	// AutoConnect enables the lazy connect goroutine; tests disable it.
+	AutoConnect bool
+}
+
+// Manager owns the account set and the active selection.
+type Manager struct {
+	ui      *tui.App
+	ctx     context.Context
+	surface Surface
+	build   BuildFunc
+	persist func(config.Accounts)
+
+	autoConnect bool
+	accounts    []*Account
+	active      int
+}
+
+// New builds a Manager from options. It does not connect anything; call Start.
+func New(opts Options) *Manager {
+	m := &Manager{
+		ui:          opts.UI,
+		ctx:         opts.Ctx,
+		surface:     opts.Surface,
+		build:       opts.Build,
+		persist:     opts.Persist,
+		autoConnect: opts.AutoConnect,
+		active:      opts.Active,
+	}
+	for _, s := range opts.Seeds {
+		m.accounts = append(m.accounts, &Account{
+			key:      s.Key,
+			label:    s.Label,
+			id:       store.UserID(s.ID),
+			seedNing: s.Ning,
+			app:      s.App,
+			store:    s.Store,
+			ning:     s.Ning,
+		})
+	}
+	if m.active < 0 || m.active >= len(m.accounts) {
+		m.active = 0
+	}
+	return m
+}
+
+// Accounts returns the managed accounts in registry order.
+func (m *Manager) Accounts() []*Account { return m.accounts }
+
+// Active returns the currently active account, or nil when there are none.
+func (m *Manager) Active() *Account {
+	if m.active < 0 || m.active >= len(m.accounts) {
+		return nil
+	}
+	return m.accounts[m.active]
+}
+
+// ActiveIndex returns the active account index.
+func (m *Manager) ActiveIndex() int { return m.active }
+
+// Start builds, activates, and connects the initial active account.
+func (m *Manager) Start() error {
+	if len(m.accounts) == 0 {
+		return ErrNoAccounts
+	}
+	return m.Switch(m.active)
+}
+
+// Switch activates the account at idx, building and connecting it lazily on the
+// first switch. Selection (which account is visible) is client state; the
+// account's own active guild/channel is restored by the UI on Activate.
+func (m *Manager) Switch(idx int) error {
+	if idx < 0 || idx >= len(m.accounts) {
+		return fmt.Errorf("accounts: switch index %d out of range", idx)
+	}
+	acc := m.accounts[idx]
+	if err := m.ensureBuilt(acc); err != nil {
+		m.surface.ShowError(acc, err)
+		m.pushBadges()
+		return err
+	}
+	m.active = idx
+	m.persistRegistry()
+	m.surface.Activate(acc)
+	m.connect(acc)
+	m.pushBadges()
+	return nil
+}
+
+// Add appends a new account to the registry (built lazily on first switch) and
+// returns it. The token must already be stored under key before switching.
+func (m *Manager) Add(key, label string) *Account {
+	acc := &Account{key: key, label: label}
+	m.accounts = append(m.accounts, acc)
+	m.persistRegistry()
+	m.pushBadges()
+	return acc
+}
+
+// ensureBuilt constructs the account's orchestrator/store/state once. On build
+// failure it records the error and leaves the account unbuilt so a later switch
+// retries.
+func (m *Manager) ensureBuilt(acc *Account) error {
+	if acc.built {
+		return nil
+	}
+	// Prebuilt launch account: its orchestrator/store were constructed before
+	// the Manager (so MainView/Shell could bind to them). Just wire callbacks.
+	if acc.app != nil {
+		m.wire(acc)
+		acc.built = true
+		return nil
+	}
+	ning := acc.seedNing
+	if ning == nil {
+		if m.build == nil {
+			return errors.New("accounts: no builder configured")
+		}
+		built, err := m.build(acc.key)
+		if err != nil {
+			acc.err = err
+			return err
+		}
+		ning = built
+	}
+	st := store.New(0)
+	acc.ning = ning
+	acc.store = st
+	acc.app = app.New(ning, st, m.ui)
+	acc.err = nil
+	m.wire(acc)
+	acc.built = true
+	return nil
+}
+
+// wire installs the account's callbacks. Panel refreshes fire only for the
+// active account; badges and notifications fire for every account.
+func (m *Manager) wire(acc *Account) {
+	acc.app.OnReady(func() {
+		m.hydrate(acc)
+		if m.isActive(acc) {
+			m.surface.Refresh()
+		}
+		m.pushBadges()
+	})
+	acc.app.OnGuildChange(func() {
+		if m.isActive(acc) {
+			m.surface.Refresh()
+		}
+	})
+	acc.app.OnChange(func() {
+		if m.isActive(acc) {
+			m.surface.RefreshChannels()
+		}
+		m.pushBadges()
+	})
+	acc.app.OnIncomingMessage(func(msg store.Message) {
+		m.surface.Notify(acc, msg)
+		m.pushBadges()
+	})
+	acc.app.OnError(func(err error) {
+		acc.err = err
+		m.surface.ShowError(acc, err)
+	})
+}
+
+// connect starts the account's gateway connection once. RegisterHandlers and
+// the connect goroutine must run exactly once per account, so the connecting
+// flag guards re-entry from repeated switches.
+func (m *Manager) connect(acc *Account) {
+	if !m.autoConnect || acc.connecting || acc.app == nil {
+		return
+	}
+	acc.connecting = true
+	acc.app.RegisterHandlers()
+	// The user-session gateway READY does not reliably deliver the guild/DM
+	// directory, so this pre-connect REST pull is load-bearing (its DM
+	// hydration is bounded). Lazy connect means only the accounts the user
+	// actually visits pull at all, avoiding a synchronized startup burst.
+	acc.app.LoadGuilds(100)
+	go func() {
+		err := acc.app.Connect(m.ctx)
+		if err == nil || m.ctx.Err() != nil {
+			return
+		}
+		m.ui.Post(func() {
+			acc.err = err
+			m.surface.ShowError(acc, err)
+			m.pushBadges()
+		})
+	}()
+}
+
+// hydrate learns the account's display name and ID from ningen once READY has
+// populated the self user, persisting them for display before the next connect.
+func (m *Manager) hydrate(acc *Account) {
+	if acc.ning == nil {
+		return
+	}
+	me, err := acc.ning.Me()
+	if err != nil || me == nil {
+		return
+	}
+	changed := false
+	if label := me.DisplayOrUsername(); label != "" && label != acc.label {
+		acc.label = label
+		changed = true
+	}
+	if id := store.UserID(me.ID); id != 0 && id != acc.id {
+		acc.id = id
+		changed = true
+	}
+	if changed {
+		m.persistRegistry()
+	}
+}
+
+func (m *Manager) isActive(acc *Account) bool {
+	return m.Active() == acc
+}
+
+// pushBadges rebuilds the selector badge snapshot from every account.
+func (m *Manager) pushBadges() {
+	badges := make([]Badge, len(m.accounts))
+	for i, acc := range m.accounts {
+		b := Badge{
+			Label:  acc.Label(),
+			Active: i == m.active,
+			Failed: acc.err != nil,
+		}
+		if acc.app != nil {
+			b.Unread, b.Mentions = acc.app.Unread()
+		}
+		badges[i] = b
+	}
+	m.surface.Badges(badges)
+}
+
+// persistRegistry writes the current account list and active index back to the
+// saved config (tokens are never included).
+func (m *Manager) persistRegistry() {
+	if m.persist == nil {
+		return
+	}
+	reg := config.Accounts{Active: m.active}
+	for _, acc := range m.accounts {
+		reg.List = append(reg.List, config.Account{
+			Key:   acc.key,
+			Label: acc.label,
+			ID:    uint64(acc.id),
+		})
+	}
+	m.persist(reg)
+}

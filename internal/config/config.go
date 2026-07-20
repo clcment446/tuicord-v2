@@ -211,6 +211,33 @@ type Auth struct {
 	PreferredMode string `toml:"preferred_mode"`
 }
 
+// Account is one saved account in the multi-account registry. Tokens are NEVER
+// stored here — only a stable keyring key (the go-keyring "user" under which
+// this account's token is saved) and a display label. ID and Label are learned
+// after the account first connects (from READY) and saved back for display
+// before the next connect.
+type Account struct {
+	// Key is the stable keyring user key for this account's token. The legacy
+	// single-account token uses the key "token"; new accounts get a fresh key.
+	Key string `toml:"key"`
+	// Label is the display name shown in the account selector. Empty until the
+	// account first connects and its username is discovered.
+	Label string `toml:"label"`
+	// ID is the Discord user ID, 0 until first connect.
+	ID uint64 `toml:"id"`
+}
+
+// Accounts is the saved multi-account registry. It is held by pointer on Config
+// so Config stays comparable (its List slice is not) — the same reason Plugins
+// is a pointer. A nil pointer means "no registry yet"; the single stored token
+// is migrated into a one-entry registry on first multi-account launch.
+type Accounts struct {
+	// Active is the index into List of the last active account.
+	Active int `toml:"active"`
+	// List is the ordered set of saved accounts shown in the selector.
+	List []Account `toml:"list"`
+}
+
 // Accessibility controls alternate input paths for users who prefer or need
 // keyboard-first navigation.
 type Accessibility struct {
@@ -264,6 +291,29 @@ type Config struct {
 	// disabled, no grants" — see PluginsEnabled/PluginDisabled/PluginGrants.
 	Plugins        *Plugins        `toml:"plugins"`
 	ColorOverrides *ColorOverrides `toml:"-"`
+	// Accounts is the multi-account registry, held by pointer so Config stays
+	// comparable. Nil until the first account is saved or migrated.
+	Accounts *Accounts `toml:"accounts"`
+}
+
+// AccountList returns the saved accounts, or nil when no registry exists yet.
+func (c Config) AccountList() []Account {
+	if c.Accounts == nil {
+		return nil
+	}
+	return c.Accounts.List
+}
+
+// ActiveAccount returns the saved active-account index, clamped to a valid
+// entry (0 when the registry is empty or the stored index is out of range).
+func (c Config) ActiveAccount() int {
+	if c.Accounts == nil || len(c.Accounts.List) == 0 {
+		return 0
+	}
+	if c.Accounts.Active < 0 || c.Accounts.Active >= len(c.Accounts.List) {
+		return 0
+	}
+	return c.Accounts.Active
 }
 
 // PluginsEnabled reports whether the plugin system should load plugins. A
@@ -309,8 +359,8 @@ const (
 func Default() Config {
 	return Config{
 		Layout: Layout{
-			GuildsWidth:      4,
-			ChannelsWidth:    24,
+			GuildsWidth:      3,
+			ChannelsWidth:    20,
 			MembersWidth:     20,
 			MembersAutoHide:  true,
 			MembersHideBelow: 120,
@@ -384,6 +434,16 @@ func Path() (string, error) {
 		return "", err
 	}
 	return filepath.Join(dir, AppName, "config.toml"), nil
+}
+
+// LockPath returns the path to the single-instance lock file beside
+// config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
+func LockPath() (string, error) {
+	path, err := Path()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(filepath.Dir(path), "tuicord.lock"), nil
 }
 
 // PluginsDir returns the directory Lua plugins are loaded from, beside
@@ -549,8 +609,8 @@ const defaultConfigTemplate = `# tuicord-v2 configuration
 # defaults; uncomment or edit them to customize the client.
 
 [layout]
-guilds_width = 4
-channels_width = 24
+guilds_width = 3
+channels_width = 20
 members_width = 20
 members_auto_hide = true
 members_hide_below = 120

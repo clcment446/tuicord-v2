@@ -29,6 +29,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/json/option"
 	"github.com/diamondburned/arikawa/v3/utils/sendpart"
+	"github.com/diamondburned/ningen/v3"
 )
 
 // poster is the slice of tui.App the orchestrator depends on. It exists so the
@@ -292,10 +293,14 @@ type App struct {
 	commandAutocomplete commandAutocompletePoster
 	commandCatalog      commandCatalogLoader
 	gifs                gifSearcher
-	handle              *session.Session
-	commandMu           sync.Mutex
-	commandCache        map[CommandContext]commandCacheEntry
-	now                 func() time.Time
+	// handle is the ningen state: it registers gateway handlers on ningen's
+	// forwarded Handler (so ReadState/MemberState are already updated when they
+	// fire), opens the gateway, and backs the REST calls that go through the
+	// embedded session (e.g. ModifyChannel). ReadState feeds the account badge.
+	handle       *ningen.State
+	commandMu    sync.Mutex
+	commandCache map[CommandContext]commandCacheEntry
+	now          func() time.Time
 
 	resourceMu       sync.Mutex
 	historyGate      loadGate[store.ChannelID]
@@ -326,8 +331,12 @@ type App struct {
 	sessionID string
 }
 
-// New returns an orchestrator over the given session, store, and UI runtime.
-func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
+// New returns an orchestrator over the given ningen state, store, and UI
+// runtime. The REST interface slices are backed by the embedded arikawa
+// session (ningen does not change the REST surface), while gateway handler
+// registration and Connect go through ningen so its caches stay authoritative.
+func New(n *ningen.State, st *store.Store, ui *tui.App) *App {
+	sess := n.Session
 	a := &App{
 		store:               st,
 		ui:                  ui,
@@ -346,7 +355,7 @@ func New(sess *session.Session, st *store.Store, ui *tui.App) *App {
 		commandAutocomplete: restCommandAutocompletePoster{sess: sess},
 		commandCatalog:      restCommandCatalogLoader{sess: sess},
 		gifs:                restGIFSearcher{client: sess.Client},
-		handle:              sess,
+		handle:              n,
 		commandCache:        make(map[CommandContext]commandCacheEntry),
 		now:                 time.Now,
 	}
@@ -1827,13 +1836,20 @@ func (a *App) directorySnapshotCurrent(snapshot directoryRequestSnapshot, _ []di
 	return true
 }
 
+// dmHydrationConcurrency bounds how many DM channel-detail requests run at once
+// when filling recipients omitted from a sparse startup payload. A small cap
+// keeps the launch fetch well under Discord's rate limits instead of bursting
+// one request per DM at the same instant.
+const dmHydrationConcurrency = 4
+
 // hydratePrivateChannels fills recipient data omitted by some user-session
-// startup responses. Each missing DM is fetched concurrently and the enriched
-// result is cached in the store with the rest of the directory.
+// startup responses. Missing DMs are fetched with bounded concurrency and the
+// enriched result is cached in the store with the rest of the directory.
 func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Channel {
 	if a == nil || a.channelDetail == nil {
 		return channels
 	}
+	sem := make(chan struct{}, dmHydrationConcurrency)
 	var wg sync.WaitGroup
 	for i := range channels {
 		if channels[i].Name != "" || len(channels[i].DMRecipients) > 0 {
@@ -1843,6 +1859,8 @@ func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Chann
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			full, err := a.channelDetail.Channel(id)
 			if err == nil && full != nil {
 				channels[i] = *full
@@ -2103,7 +2121,40 @@ func (a *App) finishChannelLoad(guild store.GuildID, ok bool) {
 	a.channelsGate.finish(guild, ok)
 }
 
-// Connect opens the gateway and blocks until ctx is canceled.
+// Connect opens the gateway and blocks until ctx is canceled. Connect is
+// promoted from the embedded arikawa session, so it keeps the reconnect loop
+// and fatal-close (4004) reporting. Ningen's ReadState/MemberState/etc. are
+// populated by ningen's own synchronous handler, which fires on every gateway
+// event whether the connection was opened via Connect or ningen.Open.
 func (a *App) Connect(ctx context.Context) error {
 	return a.handle.Connect(ctx)
+}
+
+// Ningen returns the underlying ningen state, exposing ReadState (for the
+// account unread badge), MemberState, MutedState, and EmojiState. It is nil
+// only in tests that construct App without a handle.
+func (a *App) Ningen() *ningen.State {
+	if a == nil {
+		return nil
+	}
+	return a.handle
+}
+
+// Unread reports this account's aggregate unread state for the multi-account
+// selector badge. The mention count is authoritative from ningen's ReadState;
+// the unread flag is set when there are mentions or any locally tracked unread
+// or attention messages in this account's store. Safe before connect (returns
+// zero/false). All reads happen on the UI goroutine, like every store access.
+func (a *App) Unread() (unread bool, mentions int) {
+	if a == nil {
+		return false, 0
+	}
+	if a.handle != nil && a.handle.ReadState != nil {
+		mentions = a.handle.ReadState.TotalMentionCount()
+	}
+	unread = mentions > 0
+	if a.store != nil && (a.store.TotalUnread() > 0 || a.store.TotalPings() > 0) {
+		unread = true
+	}
+	return unread, mentions
 }

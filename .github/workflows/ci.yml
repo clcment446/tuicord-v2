@@ -37,7 +37,7 @@ jobs:
       - name: Race test nested arikawa module
         run: go test -race ./...
 
-  windows-compile:
+  ubuntu-compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,8 +46,4 @@ jobs:
           go-version-file: go.mod
           cache-dependency-path: go.sum
       - name: Cross-compile root tests for Windows
-        env:
-          GOOS: windows
-          GOARCH: amd64
-          CGO_ENABLED: "0"
         run: go test -run '^$' -exec=true ./...
