@@ -37,7 +37,7 @@ jobs:
       - name: Race test nested arikawa module
         run: go test -race ./...
 
-  windows-compile:
+  ubuntu-compile:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
