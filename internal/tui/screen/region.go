@@ -66,6 +66,20 @@ func (r Region) Clip(rect Rect) Region {
 	}
 }
 
+// WithClip returns a copy of r whose visible area is further restricted to rect,
+// expressed in region-local coordinates. The origin is unchanged, so drawing
+// coordinates and any image proportions computed from Bounds stay the same; only
+// the clip that hides out-of-range cells and graphics is tightened.
+func (r Region) WithClip(rect Rect) Region {
+	if r.buf == nil {
+		return Region{}
+	}
+	rect.X += r.origin.X
+	rect.Y += r.origin.Y
+	r.clip = intersect(r.clip, rect)
+	return r
+}
+
 // AddGraphic attaches terminal protocol output to this region. Graphic.Rect is
 // interpreted in region-local coordinates; an empty Rect uses the whole region.
 func (r Region) AddGraphic(g Graphic) {
