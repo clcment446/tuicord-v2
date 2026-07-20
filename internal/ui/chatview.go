@@ -1059,12 +1059,14 @@ func (w *ChatView) Draw(r screen.Region) {
 	start := max(len(lines)-r.Height()-w.bottomScroll.Offset(), 0)
 	end := min(start+r.Height(), len(lines))
 	displayLines := lines[start:end]
+	stickyPinned := false
 	if len(displayLines) > 1 && !displayLines[0].author && displayLines[0].message.Author != "" {
 		// Keep the sender visible when the viewport begins inside a long message.
 		// Replace the oldest visible content row so pinning the author does not
 		// discard the newest row at the bottom of the viewport.
 		pinned := w.authorLine(displayLines[0].message, w.guildOf(w.active()))
 		displayLines = append([]chatLine{pinned}, displayLines[1:]...)
+		stickyPinned = true
 	}
 	w.visibleLines = append(w.visibleLines[:0], displayLines...)
 	w.visibleStart = start
@@ -1105,7 +1107,15 @@ func (w *ChatView) Draw(r screen.Region) {
 			}
 			if _, ok := drawnMedia[line.media]; !ok {
 				drawnMedia[line.media] = struct{}{}
-				w.drawInlineMedia(r, line.mediaX, y-line.mediaRow, line.media, r.Width(), focused)
+				mr := r
+				if stickyPinned {
+					// A media block whose top has scrolled above the viewport anchors
+					// at y-mediaRow, which can fall on row 0 — the row now occupied by
+					// the pinned author header. Clip it away from row 0 so its clear()
+					// and image placement never erase the sticky author's name.
+					mr = r.WithClip(screen.Rect{X: 0, Y: 1, W: r.Width(), H: max(r.Height()-1, 0)})
+				}
+				w.drawInlineMedia(mr, line.mediaX, y-line.mediaRow, line.media, r.Width(), focused)
 			}
 			y++
 			continue
