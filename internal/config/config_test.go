@@ -44,6 +44,24 @@ func TestLoadFromLayersOverDefault(t *testing.T) {
 	}
 }
 
+func TestLoadVimKeyOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	contents := "[keys.vim]\nscroll_down = \"ctrl+n\"\ninsert = \"ctrl+i\"\n"
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Keys.Vim.ScrollDown != "ctrl+n" || cfg.Keys.Vim.Insert != "ctrl+i" {
+		t.Fatalf("vim keys = %+v, want configured overrides", cfg.Keys.Vim)
+	}
+	if cfg.Keys.Vim.ScrollUp != Default().Keys.Vim.ScrollUp {
+		t.Fatalf("unspecified Vim key changed: %q", cfg.Keys.Vim.ScrollUp)
+	}
+}
+
 func TestLoadElementLayoutPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	contents := "[layout.elements.guilds]\nvisible = false\nwidth = 8\nmin_width = 3\n"

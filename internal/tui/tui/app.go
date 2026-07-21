@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -48,6 +49,10 @@ type App struct {
 	mouseOn      bool
 	focusSplits  bool
 	ttyColors    bool
+	vimFocusPrev string
+	vimFocusNext string
+	vimPanelPrev string
+	vimPanelNext string
 	// pendingFocus retains a generation-scoped exact request for a widget that
 	// became focusable during event handling but is not in the focus ring until
 	// the next render (for example Vim i enabling the composer).
@@ -62,10 +67,11 @@ type App struct {
 // New returns an App with default runtime state.
 func New(opts ...Option) *App {
 	a := &App{
-		dirty:    true,
-		wake:     make(chan struct{}, 1),
-		escExits: 5,
-		mouseOn:  true,
+		dirty:        true,
+		wake:         make(chan struct{}, 1),
+		escExits:     5,
+		mouseOn:      true,
+		vimFocusPrev: "h", vimFocusNext: "l", vimPanelPrev: "H", vimPanelNext: "L",
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -96,6 +102,50 @@ func WithFocusableSplits(enabled bool) Option {
 // 16-color palette.
 func WithTTYColors(enabled bool) Option {
 	return func(a *App) { a.ttyColors = enabled }
+}
+
+// WithVimKeys configures the modal focus traversal keys. Empty values disable
+// the corresponding traversal action.
+func WithVimKeys(focusPrev, focusNext, panelPrev, panelNext string) Option {
+	return func(a *App) {
+		a.vimFocusPrev, a.vimFocusNext = focusPrev, focusNext
+		a.vimPanelPrev, a.vimPanelNext = panelPrev, panelNext
+	}
+}
+
+func vimKeyMatches(ev input.KeyEvent, spec string) bool {
+	if ev.Release || spec == "" {
+		return false
+	}
+	original := strings.TrimSpace(spec)
+	spec = strings.ToLower(strings.TrimSpace(spec))
+	want := input.Mod(0)
+	for {
+		var mod input.Mod
+		switch {
+		case strings.HasPrefix(spec, "ctrl+"):
+			mod, spec = input.Ctrl, spec[5:]
+		case strings.HasPrefix(spec, "shift+"):
+			mod, spec = input.Shift, spec[6:]
+		case strings.HasPrefix(spec, "alt+"):
+			mod, spec = input.Alt, spec[4:]
+		default:
+			goto done
+		}
+		want |= mod
+	}
+done:
+	if ev.Mods&(input.Ctrl|input.Shift|input.Alt|input.Super|input.Meta|input.Hyper) != want {
+		return false
+	}
+	if ev.Key != input.KeyRune {
+		return false
+	}
+	key := string(ev.Rune)
+	if len(original) > 0 && original[len(original)-1] >= 'A' && original[len(original)-1] <= 'Z' {
+		return key == string(original[len(original)-1])
+	}
+	return key == spec
 }
 
 // Post schedules fn to run on the App event loop.
@@ -420,10 +470,10 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 			return true
 		}
 	}
-	if !ev.Release && ev.Key == input.KeyRune && ev.Mods == 0 && (ev.Rune == 'h' || ev.Rune == 'l') {
+	if vimKeyMatches(ev, a.vimFocusPrev) || vimKeyMatches(ev, a.vimFocusNext) {
 		focused := a.Focus.Focused()
 		if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
-			forward := ev.Rune == 'l'
+			forward := vimKeyMatches(ev, a.vimFocusNext)
 			if traverser.HandleVimFocus(forward) {
 				a.Invalidate()
 				return true
@@ -437,10 +487,10 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 			return true
 		}
 	}
-	if !ev.Release && ev.Key == input.KeyRune && ev.Mods == 0 && (ev.Rune == 'H' || ev.Rune == 'L') {
+	if vimKeyMatches(ev, a.vimPanelPrev) || vimKeyMatches(ev, a.vimPanelNext) {
 		if focused := a.Focus.Focused(); focused != nil {
 			if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
-				if ev.Rune == 'L' {
+				if vimKeyMatches(ev, a.vimPanelNext) {
 					a.Focus.Next()
 				} else {
 					a.Focus.Prev()
