@@ -165,6 +165,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.chat.SetVimKeys(cfg.Keys.Vim)
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
 	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)
 	// Reference mv.app (not the captured a) so account switches rebind cleanly.
@@ -1077,10 +1078,12 @@ func (mv *MainView) openForum(id store.ChannelID) {
 	if mv.forumView == nil {
 		mv.forumView = NewForumView(mv.styles, mv.ascii, mv.onOpenPost, mv.app.LoadArchivedThreads)
 		mv.forumView.SetVimNavigation(mv.cfg.Accessibility.VimNavigation)
+		mv.forumView.SetVimKeys(mv.cfg.Keys.Vim)
 		mv.forumView.onFilterCycle = mv.refreshForum
 		mv.forumView.onFilterMenu = mv.onForumFilter
 		mv.forumView.onNavigate = mv.navigateForum
 		mv.forumPreview = NewChatView(mv.app.Store(), func() store.ChannelID { return mv.forumPreviewID }, mv.resolver, mv.styles)
+		mv.forumPreview.SetVimKeys(mv.cfg.Keys.Vim)
 		if fetcher := newChatMediaFetcher(mv.mediaCfg); fetcher != nil {
 			mv.forumPreview.SetMedia(fetcher, mv.mediaCfg, mv.app.Post)
 			mv.forumPreview.SetInvalidate(mv.app.Invalidate)
