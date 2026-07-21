@@ -1273,6 +1273,16 @@ func (s *Shell) openProfile(id store.UserID) {
 	}, s.closePopup)
 	s.setPopup(popup)
 	s.fetchProfileAvatar(popup, details.AvatarURL)
+	// Roles are absent from message/history payloads, so fetch the full guild
+	// member on demand and refresh the still-open card once it resolves.
+	guild := s.app.ActiveGuild()
+	s.app.EnsureMemberDetail(guild, id, func() {
+		if s.popup != popup {
+			return
+		}
+		popup.SetDetails(buildProfileDetails(s.app.Store(), guild, 0, id))
+		s.app.Invalidate()
+	})
 }
 
 // fetchProfileAvatar resolves a profile card's picture off the UI goroutine and

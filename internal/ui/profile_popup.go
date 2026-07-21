@@ -72,6 +72,15 @@ func (p *ProfilePopup) SetAvatar(img image.Image) {
 	}
 }
 
+// SetDetails replaces the card's identity and role data after an asynchronous
+// member fetch, preserving the already-resolved avatar. Must be called on the
+// UI goroutine.
+func (p *ProfilePopup) SetDetails(details profileDetails) {
+	if p != nil {
+		p.details = details
+	}
+}
+
 func NewProfilePopup(details profileDetails, styles Styles, onOpenDM func(store.ChannelID), onClose func()) *ProfilePopup {
 	return &ProfilePopup{details: details, styles: styles, onOpenDM: onOpenDM, onClose: onClose, node: layout.Node{Grow: 1}, x: -1, y: -1}
 }
