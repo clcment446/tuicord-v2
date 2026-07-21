@@ -183,8 +183,70 @@ func convertMessage(m discord.Message) store.Message {
 			m.Components,
 			uint64(m.Flags)&uint64(discord.IsComponentsV2) != 0,
 		),
-		Pinned: m.Pinned,
+		Pinned:   m.Pinned,
+		Reply:    convertReply(m),
+		Forwards: convertForwards(m.MessageSnapshots),
 	}
+}
+
+// convertReply summarizes the replied-to message. A reply whose original was
+// deleted arrives with a Reference but a null ReferencedMessage; crossposts
+// also carry a Reference, so those are told apart by the message type.
+func convertReply(m discord.Message) *store.MessageReply {
+	if m.Reference == nil || m.Reference.Type != discord.MessageReferenceTypeDefault {
+		return nil
+	}
+	if ref := m.ReferencedMessage; ref != nil {
+		return &store.MessageReply{
+			MessageID: store.MessageID(ref.ID),
+			ChannelID: store.ChannelID(ref.ChannelID),
+			AuthorID:  store.UserID(ref.Author.ID),
+			Author:    ref.Author.DisplayOrUsername(),
+			Content:   replyPreview(*ref),
+		}
+	}
+	if m.Type != discord.InlinedReplyMessage {
+		return nil
+	}
+	return &store.MessageReply{
+		MessageID: store.MessageID(m.Reference.MessageID),
+		ChannelID: store.ChannelID(m.Reference.ChannelID),
+		Deleted:   true,
+	}
+}
+
+// replyPreview falls back to a rich-content hint when the referenced message
+// has no text of its own.
+func replyPreview(m discord.Message) string {
+	if m.Content != "" {
+		return m.Content
+	}
+	switch {
+	case len(m.Attachments) > 0:
+		return "[attachment]"
+	case len(m.Stickers) > 0:
+		return "[sticker]"
+	case len(m.Embeds) > 0:
+		return "[embed]"
+	}
+	return ""
+}
+
+func convertForwards(in []discord.MessageSnapshot) []store.ForwardedMessage {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]store.ForwardedMessage, 0, len(in))
+	for _, s := range in {
+		out = append(out, store.ForwardedMessage{
+			Content:     s.Message.Content,
+			Timestamp:   s.Message.Timestamp.Time(),
+			Attachments: convertAttachments(s.Message.Attachments),
+			Embeds:      convertEmbeds(s.Message.Embeds),
+			Stickers:    convertStickers(s.Message.Stickers),
+		})
+	}
+	return out
 }
 
 func convertAttachments(in []discord.Attachment) []store.Attachment {

@@ -14,18 +14,31 @@ func TestProfilePopupRendersIdentityRolesAndSharedDM(t *testing.T) {
 	opened := store.ChannelID(0)
 	p := NewProfilePopup(profileDetails{
 		ID: 42, Name: "Alice", Username: "alice", Nick: "ali",
-		Roles: []string{"Admin", "Member"},
-		DMs:   []profileDM{{ID: 9, Name: "alice"}},
+		Roles:  []profileRole{{Name: "Admin", Color: 0xff0000}, {Name: "Member"}},
+		Guilds: []string{"Server One", "Server Two"},
+		DMs:    []profileDM{{ID: 9, Name: "alice"}},
 	}, Styles{}, func(id store.ChannelID) { opened = id }, nil)
-	buf := screen.NewBuffer(60, 20)
+	buf := screen.NewBuffer(60, 24)
 	p.Draw(buf.Clip(buf.Bounds()))
 	contents := rowsText(buf)
-	for _, want := range []string{"Alice", "alice", "ali", "42", "Admin", "Open DM"} {
+	for _, want := range []string{"Alice", "alice", "ali", "42", "Admin", "Servers in common", "Server One", "Server Two", "Open DM"} {
 		if !strings.Contains(contents, want) {
 			t.Fatalf("profile missing %q:\n%s", want, contents)
 		}
 	}
-	box := p.box(60, 20)
+	// The Admin role chip must render in the role's color.
+	adminStyle := screen.Style{}
+	for y := 0; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			if buf.Cell(x, y).Content == "@" && buf.Cell(x+1, y).Content == "A" {
+				adminStyle = buf.Cell(x+1, y).Style
+			}
+		}
+	}
+	if adminStyle.Fg != screen.RGB(0xff, 0, 0) {
+		t.Errorf("Admin role fg = %+v, want red role color", adminStyle.Fg)
+	}
+	box := p.box(60, 24)
 	if !p.Handle(input.MouseEvent{Kind: input.MousePress, Btn: input.ButtonLeft, X: box.X + 2, Y: box.Y + p.dmRow}) {
 		t.Fatal("DM row click was not handled")
 	}
@@ -54,7 +67,7 @@ func TestBuildProfileDetailsFindsRolesAndDMByStableIDs(t *testing.T) {
 	st.UpsertRole(1, store.Role{ID: 7, Name: "Admin"})
 	st.UpsertChannel(store.Channel{ID: 9, GuildID: 99, Kind: store.ChannelDM, Name: "Alice", RecipientIDs: []store.UserID{42}})
 	details := buildProfileDetails(st, 1, 99, 42)
-	if details.Username != "alice" || details.Nick != "ali" || len(details.Roles) != 1 || details.Roles[0] != "Admin" || len(details.DMs) != 1 || details.DMs[0].ID != 9 {
+	if details.Username != "alice" || details.Nick != "ali" || len(details.Roles) != 1 || details.Roles[0].Name != "Admin" || len(details.DMs) != 1 || details.DMs[0].ID != 9 {
 		t.Fatalf("profile details = %+v", details)
 	}
 }

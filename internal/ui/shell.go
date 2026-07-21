@@ -98,6 +98,7 @@ type Shell struct {
 	focusRequestActive bool
 	focusTraversal     int
 	prefetch           *idleMediaPrefetcher
+	profileFetcher     *media.Fetcher
 	prefetchIdle       bool
 	lastActivity       time.Time
 	cancel             context.CancelFunc
@@ -1247,21 +1248,66 @@ func (s *Shell) dispatchEntityAction(action markup.Action) {
 }
 
 // openProfile uses the gateway member cache as the reliable offline fallback.
+// The card shows role-colored role chips, the profile picture (fetched
+// asynchronously), and the servers the local caches know are shared.
 func (s *Shell) openProfile(id store.UserID) {
-	m, ok := memberForContext(s.app.Store(), s.app.ActiveGuild(), s.app.ActiveChannel(), id)
-	if !ok {
+	st := s.app.Store()
+	details := buildProfileDetails(st, s.app.ActiveGuild(), 0, id)
+	if details.Name == "" && details.Username == "" {
+		if m, ok := memberForContext(st, s.app.ActiveGuild(), s.app.ActiveChannel(), id); ok {
+			details.Name = m.Name
+			details.Username = m.Username
+			details.Nick = m.Nick
+			if details.AvatarURL == "" {
+				details.AvatarURL = m.AvatarURL
+			}
+		}
+	}
+	if details.Name == "" && details.Username == "" {
 		s.ShowNotice("Profile", "User "+strconv.FormatUint(uint64(id), 10))
 		return
 	}
-	detail := m.Name + "\nUser ID: " + strconv.FormatUint(uint64(id), 10)
-	for _, rid := range m.RoleIDs {
-		if r, ok := s.app.Store().Role(s.app.ActiveGuild(), rid); ok {
-			detail += "\n@" + r.Name
-		}
+	popup := NewProfilePopup(details, s.styles, func(dm store.ChannelID) {
+		s.closePopup()
+		s.mv.NavigateToChannel(dm)
+	}, s.closePopup)
+	s.setPopup(popup)
+	s.fetchProfileAvatar(popup, details.AvatarURL)
+}
+
+// fetchProfileAvatar resolves a profile card's picture off the UI goroutine and
+// attaches it if the card is still open when the image arrives.
+func (s *Shell) fetchProfileAvatar(popup *ProfilePopup, url string) {
+	if url == "" || !s.mediaCfg.Enabled {
+		return
 	}
-	text := widget.NewText(detail)
-	text.SetStyle(s.styles.Text)
-	s.setIndependentOverlay(titled("Profile", text))
+	fetcher := s.profileFetcher
+	if fetcher == nil {
+		if s.prefetch != nil {
+			fetcher = s.prefetch.fetcher
+		} else {
+			fetcher = newChatMediaFetcher(s.mediaCfg)
+		}
+		s.profileFetcher = fetcher
+	}
+	if fetcher == nil {
+		return
+	}
+	ctx := s.lifecycleCtx
+	s.lifecycleWG.Add(1)
+	go func() {
+		defer s.lifecycleWG.Done()
+		img, err := fetcher.Fetch(ctx, url)
+		if err != nil || img == nil {
+			return
+		}
+		s.app.Post(func() {
+			if s.popup == popup {
+				popup.SetAvatar(img)
+				s.app.Invalidate()
+			}
+		})
+	}()
 }
 
 func (s *Shell) openRoleOptions(id store.RoleID) {

@@ -1118,6 +1118,15 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 			if allFields || fields.Pinned {
 				m.Pinned = patch.Pinned
 			}
+			// Reference data is immutable, but full-message updates (embed
+			// unfurls, edits) re-deliver it; keep whichever side has it so a
+			// partial payload never wipes an existing reply or forward.
+			if patch.Reply != nil {
+				m.Reply = patch.Reply
+			}
+			if len(patch.Forwards) > 0 {
+				m.Forwards = patch.Forwards
+			}
 		})
 		if a.onChange != nil {
 			a.onChange()
