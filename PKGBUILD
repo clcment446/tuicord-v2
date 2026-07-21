@@ -14,11 +14,6 @@ conflicts=('tuicord')
 source=("git+https://github.com/clcment446/tuicord-v2.git")
 sha256sums=('SKIP')
 
-pkgver() {
-	cd "$srcdir/tuicord-v2"
-	printf "r%s.%s" "$(git rev-list --count HEAD)" "$(git rev-parse --short=8 HEAD)"
-}
-
 prepare() {
 	cd "$srcdir/tuicord-v2"
 	# Fetch modules now so build() can run offline. -modcacherw keeps the
