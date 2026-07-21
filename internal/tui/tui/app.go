@@ -866,6 +866,11 @@ func drawTree(buf *screen.Buffer, root Widget, hits HitIndex) {
 			H: entry.Clip.H,
 		}))
 	}
+	// Overlays (popups, toasts) draw on a higher layer so their painted cells
+	// occlude graphics beneath them (see screen.Buffer.SetLayer): a menu or toast
+	// over an inline image suppresses that image's Kitty placement instead of
+	// letting it bleed through the overlay's background.
+	buf.SetLayer(1)
 	for _, entry := range entries {
 		overlay, ok := entry.Widget.(Overlay)
 		if !ok {

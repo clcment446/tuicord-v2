@@ -203,6 +203,7 @@ func (p *ProfilePopup) Draw(r screen.Region) {
 			img := widget.NewKittyImageFrom(p.avatar).
 				SetID(stableImageID(p.details.AvatarURL)).
 				SetPlacementID(stableImageID("profile:avatar")).
+				SetZ(-1).
 				SetStyle(base)
 			if b := p.avatar.Bounds(); b.Dx() > 0 && b.Dy() > 0 {
 				img.SetPixelSize(b.Dx(), b.Dy())

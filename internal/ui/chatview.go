@@ -1007,6 +1007,8 @@ func (w *ChatView) drawInlineMedia(r screen.Region, x, y int, block *inlineMedia
 
 // drawPlayGlyph overlays a ▶ marker at the center of a video block. Inline
 // images render below the text layer (z=-1), so the glyph stays visible on top.
+// Cross-layer overlap (a popup or toast drawn over the image) is handled by
+// buffer occlusion, not z — see screen.Buffer.SetLayer.
 func (w *ChatView) drawPlayGlyph(r screen.Region, x, y, cols, rows int, style screen.Style) {
 	if cols <= 0 || rows <= 0 {
 		return
