@@ -311,8 +311,11 @@ func TestChatViewSizesAttachmentMediaFromMetadata(t *testing.T) {
 	if len(graphics) != 1 {
 		t.Fatalf("graphics len = %d, want 1", len(graphics))
 	}
+	// Upload size is the metadata size (400x300) snapped up to an exact multiple
+	// of the display cell grid (c=32,r=12) so occlusion re-clipping is seamless;
+	// the display size below is unchanged.
 	for _, want := range [][]byte{
-		[]byte("s=400"),
+		[]byte("s=416"),
 		[]byte("v=300"),
 	} {
 		if !bytes.Contains(graphics[0].Upload, want) {
@@ -347,9 +350,12 @@ func TestChatViewRespectsMediaProxyQueryDimensions(t *testing.T) {
 	if len(graphics) != 1 {
 		t.Fatalf("graphics len = %d, want 1", len(graphics))
 	}
+	// Upload uses the original attachment size (800x800), not the proxy-reduced
+	// display size, snapped up to a multiple of the display cell grid (c=48,r=12)
+	// for seamless occlusion re-clipping.
 	for _, want := range [][]byte{
-		[]byte("s=800"),
-		[]byte("v=800"),
+		[]byte("s=816"),
+		[]byte("v=804"),
 	} {
 		if !bytes.Contains(graphics[0].Upload, want) {
 			t.Fatalf("upload missing original-size %q: %q", string(want), string(graphics[0].Upload))

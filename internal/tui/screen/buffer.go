@@ -7,6 +7,12 @@ type Buffer struct {
 	w, h     int
 	cells    []Cell
 	graphics []Graphic
+
+	// layer is the current draw layer; cellLayer stamps which layer last wrote
+	// each cell. Higher layers (overlays) drawn over a graphic occlude it — see
+	// SetLayer and visibleGraphics.
+	layer     int
+	cellLayer []uint8
 }
 
 // NewBuffer returns a blank buffer of w by h cells.
@@ -17,7 +23,7 @@ func NewBuffer(w, h int) *Buffer {
 	if h < 0 {
 		h = 0
 	}
-	b := &Buffer{w: w, h: h, cells: make([]Cell, w*h)}
+	b := &Buffer{w: w, h: h, cells: make([]Cell, w*h), cellLayer: make([]uint8, w*h)}
 	b.Clear()
 	return b
 }
@@ -54,7 +60,25 @@ func (b *Buffer) Clear() {
 	for i := range b.cells {
 		b.cells[i] = Blank
 	}
+	for i := range b.cellLayer {
+		b.cellLayer[i] = 0
+	}
 	b.graphics = b.graphics[:0]
+	b.layer = 0
+}
+
+// SetLayer sets the draw layer stamped onto every subsequent cell write and
+// graphic. The retained widget tree draws at layer 0; overlays (popups, toasts)
+// are drawn at a higher layer so their cells occlude graphics beneath them.
+// Clear resets the layer to 0.
+func (b *Buffer) SetLayer(n int) {
+	if b == nil {
+		return
+	}
+	if n < 0 {
+		n = 0
+	}
+	b.layer = n
 }
 
 // Cell returns the cell at x,y. Out-of-bounds reads return Blank.
@@ -82,11 +106,13 @@ func (b *Buffer) Set(x, y int, c Cell) {
 	}
 	i := b.index(x, y)
 	b.cells[i] = c
+	b.cellLayer[i] = uint8(b.layer)
 	if c.Wide {
 		right := Blank
 		right.Style = c.Style
 		right.continuation = true
 		b.cells[i+1] = right
+		b.cellLayer[i+1] = uint8(b.layer)
 	}
 }
 
@@ -131,7 +157,99 @@ func (b *Buffer) AddGraphic(g Graphic) {
 	if g.Rect.W <= 0 || g.Rect.H <= 0 {
 		return
 	}
+	g.layer = b.layer
 	b.graphics = append(b.graphics, cloneGraphic(g))
+}
+
+// resolveGraphics returns the graphics as they should be drawn this frame after
+// occlusion. A graphic is occluded where a strictly-higher draw layer (an
+// overlay) painted over its cells. Strictly-higher matters — the graphic's own
+// layer cells and later same-layer text (the next chat line, the ▶ glyph) must
+// not occlude it. For each graphic:
+//   - not covered: emitted unchanged.
+//   - fully covered: dropped (its Clear is emitted by the diff).
+//   - partially covered with a Reclip: re-placed over the visible sub-rectangles
+//     (image shows around the overlay instead of graying out entirely).
+//   - partially covered without a Reclip (e.g. sixel): dropped.
+func (b *Buffer) resolveGraphics() []Graphic {
+	if b == nil || len(b.graphics) == 0 {
+		return nil
+	}
+	out := make([]Graphic, 0, len(b.graphics))
+	for _, g := range b.graphics {
+		hole, covered := b.occluderBBox(g)
+		if !covered {
+			out = append(out, cloneGraphic(g))
+			continue
+		}
+		if g.Reclip == nil {
+			continue // whole-placement suppression fallback
+		}
+		visible := subtractRect(intersect(g.Rect, b.Bounds()), hole)
+		if len(visible) == 0 {
+			continue // fully covered
+		}
+		resolved := cloneGraphic(g)
+		resolved.Data = g.Reclip(visible)
+		if len(resolved.ClearAll) > 0 {
+			resolved.Clear = append([]byte(nil), resolved.ClearAll...)
+		}
+		resolved.split = true
+		out = append(out, resolved)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// occluderBBox returns the bounding rectangle of the cells within g.Rect that a
+// strictly-higher layer painted, and whether any such cell exists.
+func (b *Buffer) occluderBBox(g Graphic) (Rect, bool) {
+	r := intersect(g.Rect, b.Bounds())
+	minX, minY := r.X+r.W, r.Y+r.H
+	maxX, maxY := r.X, r.Y
+	found := false
+	for y := r.Y; y < r.Y+r.H; y++ {
+		row := y * b.w
+		for x := r.X; x < r.X+r.W; x++ {
+			if int(b.cellLayer[row+x]) <= g.layer {
+				continue
+			}
+			found = true
+			minX, minY = min(minX, x), min(minY, y)
+			maxX, maxY = max(maxX, x+1), max(maxY, y+1)
+		}
+	}
+	if !found {
+		return Rect{}, false
+	}
+	return Rect{X: minX, Y: minY, W: maxX - minX, H: maxY - minY}, true
+}
+
+// subtractRect returns the rectangles covering a but not hole (hole is clamped
+// to a). It yields up to four rects: the full-width strips above and below hole,
+// and the left and right strips beside it. An empty result means a is fully
+// covered.
+func subtractRect(a, hole Rect) []Rect {
+	hole = intersect(a, hole)
+	if hole.W <= 0 || hole.H <= 0 {
+		return []Rect{a}
+	}
+	var out []Rect
+	if hole.Y > a.Y { // top
+		out = append(out, Rect{X: a.X, Y: a.Y, W: a.W, H: hole.Y - a.Y})
+	}
+	if bottom := hole.Y + hole.H; bottom < a.Y+a.H { // bottom
+		out = append(out, Rect{X: a.X, Y: bottom, W: a.W, H: a.Y + a.H - bottom})
+	}
+	if hole.X > a.X { // left
+		out = append(out, Rect{X: a.X, Y: hole.Y, W: hole.X - a.X, H: hole.H})
+	}
+	if right := hole.X + hole.W; right < a.X+a.W { // right
+		out = append(out, Rect{X: right, Y: hole.Y, W: a.X + a.W - right, H: hole.H})
+	}
+	return out
 }
 
 // Graphics returns a copy of terminal protocol output attached to this frame.
@@ -164,12 +282,15 @@ func (b *Buffer) clearCell(x, y int) {
 		left := b.index(x-1, y)
 		if b.cells[left].Wide {
 			b.cells[left] = Blank
+			b.cellLayer[left] = uint8(b.layer)
 		}
 	}
 	if cell.Wide && x+1 < b.w {
 		b.cells[i+1] = Blank
+		b.cellLayer[i+1] = uint8(b.layer)
 	}
 	b.cells[i] = Blank
+	b.cellLayer[i] = uint8(b.layer)
 }
 
 func normalizeCell(c Cell) Cell {
@@ -197,6 +318,7 @@ func cloneGraphic(g Graphic) Graphic {
 	g.Free = append([]byte(nil), g.Free...)
 	g.Upload = append([]byte(nil), g.Upload...)
 	g.Data = append([]byte(nil), g.Data...)
+	g.ClearAll = append([]byte(nil), g.ClearAll...)
 	return g
 }
 

@@ -24,6 +24,10 @@ type ItemGraphic struct {
 	Image                         image.Image
 	ImageID, PlacementID          uint32
 	PixelWidth, PixelHeight, Cols int
+	// Z is the Kitty z-index for the placement. Callers pass -1 to keep graphics
+	// below text within their layer; cross-layer overlap is resolved by buffer
+	// occlusion, not z (see screen.Buffer.SetLayer).
+	Z int
 }
 
 // ItemList draws and navigates a virtualized list of styled rows. Unlike List,
@@ -255,7 +259,7 @@ func (w *ItemList) drawRow(r screen.Region, y, index int) {
 		if cols <= 0 {
 			cols = 2
 		}
-		img := NewKittyImageFrom(g.Image).SetID(g.ImageID).SetPlacementID(g.PlacementID).SetPixelSize(g.PixelWidth, g.PixelHeight).SetStyle(rowStyle)
+		img := NewKittyImageFrom(g.Image).SetID(g.ImageID).SetPlacementID(g.PlacementID).SetPixelSize(g.PixelWidth, g.PixelHeight).SetZ(g.Z).SetStyle(rowStyle)
 		img.Draw(r.Clip(screen.Rect{X: 0, Y: y, W: cols, H: 1}))
 	}
 	if badgeW > 0 && badgeW < r.Width() {

@@ -872,6 +872,11 @@ func (mv *MainView) updateChannelChrome() {
 		return
 	}
 	id := mv.app.ActiveChannel()
+	// Refresh the member list for the active channel so DMs/groups show their
+	// recipients (guild switches refresh separately, but DM→DM does not).
+	if ch, ok := mv.app.Store().Channel(id); ok {
+		mv.refreshMembers(ch.GuildID)
+	}
 	if mv.chatBorder != nil {
 		mv.chatBorder.SetTitle(mv.channelBreadcrumb(id))
 	}
@@ -1179,7 +1184,13 @@ func unreadBadge(n int) string {
 }
 
 func (mv *MainView) refreshMembers(guild store.GuildID) {
-	members := mv.app.Store().Members(guild)
+	st := mv.app.Store()
+	members := st.Members(guild)
+	// Direct and group DMs carry no guild members; their participants live on the
+	// channel's recipient list (same fallback the @-mention menu uses).
+	if channel, ok := st.Channel(mv.app.ActiveChannel()); ok && channel.Kind == store.ChannelDM {
+		members = append([]store.Member(nil), channel.Recipients...)
+	}
 	items := make([]widget.Item, 0, len(members))
 	for _, m := range members {
 		items = append(items, widget.Item{Label: m.Name})
