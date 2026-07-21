@@ -66,8 +66,10 @@ func convertChannel(c discord.Channel) store.Channel {
 		out.Recipients = make([]store.Member, 0, len(c.DMRecipients))
 		for _, recipient := range c.DMRecipients {
 			out.Recipients = append(out.Recipients, store.Member{
-				ID:   store.UserID(recipient.ID),
-				Name: recipient.DisplayOrUsername(),
+				ID:        store.UserID(recipient.ID),
+				Name:      recipient.DisplayOrUsername(),
+				Username:  recipient.Username,
+				AvatarURL: recipient.AvatarURL(),
 			})
 		}
 	}
