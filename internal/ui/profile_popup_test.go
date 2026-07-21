@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -49,6 +50,27 @@ func TestProfilePopupRendersIdentityRolesAndSharedDM(t *testing.T) {
 	}
 	if opened != 9 {
 		t.Fatalf("opened DM = %d, want 9", opened)
+	}
+}
+
+func TestProfilePopupAvatarUsesIndependentKittyImage(t *testing.T) {
+	const avatarURL = "https://cdn.example/alice.png"
+	popup := NewProfilePopup(profileDetails{ID: 42, Name: "alice", AvatarURL: avatarURL}, Styles{}, nil, nil)
+	popup.SetAvatar(solidTestImage(48, 48))
+	buf := screen.NewBuffer(60, 20)
+	popup.Draw(buf.Clip(buf.Bounds()))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("profile avatar graphics = %d, want 1", len(graphics))
+	}
+	want := fmt.Sprintf("kitty:%d:%d", stableImageID("profile:avatar:"+avatarURL), stableImageID("profile:avatar"))
+	if graphics[0].Key != want {
+		t.Fatalf("profile avatar key = %q, want independent key %q", graphics[0].Key, want)
+	}
+	chatKey := fmt.Sprintf("kitty:%d", stableImageID(avatarURL))
+	if strings.HasPrefix(graphics[0].Key, chatKey+":") || graphics[0].Key == chatKey {
+		t.Fatalf("profile avatar reused chat Kitty image ID: %q", graphics[0].Key)
 	}
 }
 

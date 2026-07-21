@@ -200,8 +200,11 @@ func (p *ProfilePopup) Draw(r screen.Region) {
 	if p.avatar != nil {
 		const avatarCols, avatarRows = 8, 4
 		if rect.W > avatarCols+14 && rect.H > avatarRows+2 {
+			// Keep the popup's terminal image separate from chat avatars. Closing
+			// the popup frees its Kitty image ID; sharing the URL-derived chat ID
+			// would also delete every chat placement backed by that image.
 			img := widget.NewKittyImageFrom(p.avatar).
-				SetID(stableImageID(p.details.AvatarURL)).
+				SetID(stableImageID("profile:avatar:" + p.details.AvatarURL)).
 				SetPlacementID(stableImageID("profile:avatar")).
 				SetZ(-1).
 				SetStyle(base)

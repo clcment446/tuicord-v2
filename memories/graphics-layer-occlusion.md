@@ -72,6 +72,11 @@ it. (Whole-placement suppression was tried first and was wrong: it grayed out th
   avatar/picker thumbnails to -1). Rule: z = below text *within a layer*;
   cross-layer overlap is resolved by occlusion, not z. See [[media-floating-viewer]],
   [[inline-video-mpv]], [[chat-header-and-popup-interactions]].
+- A transient popup must not share a Kitty **image ID** with retained chat media.
+  Removing the popup emits `Free` (`d=I`) for its image; that deletes every
+  placement using the ID, while an unchanged chat graphic emits no replacement.
+  The profile avatar therefore namespaces its image ID with `profile:avatar:`
+  even when it displays the same URL as the chat author avatar.
 
 Tests: `internal/tui/screen/diff_test.go` (reclip/suppression/ClearAll),
 `buffer_test.go` (layer stamps). `go test -race ./internal/tui/... ./internal/ui/...`
