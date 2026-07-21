@@ -1861,7 +1861,14 @@ func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Chann
 	sem := make(chan struct{}, dmHydrationConcurrency)
 	var wg sync.WaitGroup
 	for i := range channels {
-		if channels[i].Name != "" || len(channels[i].DMRecipients) > 0 {
+		// Fetch full detail for any DM or group DM whose recipients were omitted.
+		// Keying off the name here would skip named group DMs, which commonly
+		// carry a custom name but still arrive without recipients, leaving their
+		// @ mention menu empty.
+		if len(channels[i].DMRecipients) > 0 {
+			continue
+		}
+		if channels[i].Type != discord.DirectMessage && channels[i].Type != discord.GroupDM {
 			continue
 		}
 		id := channels[i].ID

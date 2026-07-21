@@ -615,6 +615,37 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 	}
 }
 
+func TestReadyEventPreservesNamedGroupDMRecipients(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
+	a.store.UpsertChannel(store.Channel{
+		ID:      92,
+		GuildID: DirectMessagesGuildID,
+		Kind:    store.ChannelDM,
+		Name:    "The Crew",
+		Recipients: []store.Member{
+			{ID: 101, Name: "bob"},
+			{ID: 102, Name: "carol"},
+		},
+	})
+
+	// A named group DM that arrives without recipients must keep the members it
+	// was already hydrated with, otherwise its @ mention menu goes empty.
+	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{{
+		ID:   92,
+		Type: discord.GroupDM,
+		Name: "The Crew",
+	}}})
+
+	channel, ok := a.store.Channel(92)
+	if !ok || len(channel.Recipients) != 2 {
+		t.Fatalf("preserved group DM recipients = %+v,%v, want bob and carol", channel.Recipients, ok)
+	}
+	if channel.Recipients[0].ID != 101 || channel.Recipients[1].ID != 102 {
+		t.Fatalf("preserved group DM recipients = %+v, want bob (101), carol (102)", channel.Recipients)
+	}
+}
+
 func TestMessageCreateEventLoadsDiscordMessage(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.SetActive(1, 42)
