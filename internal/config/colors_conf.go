@@ -98,6 +98,8 @@ func (o *ColorOverrides) set(key, value string) error {
 		}
 		if enabled {
 			rule.Attrs |= attr
+		} else {
+			rule.Attrs &^= attr
 		}
 		rule.HasAttrs = true
 	default:
@@ -129,7 +131,7 @@ func parseAttr(name string) (screen.Attr, error) {
 		return screen.Italic, nil
 	case "underline", "underlined":
 		return screen.Underline, nil
-	case "reverse":
+	case "reverse", "spoiler":
 		return screen.Reverse, nil
 	case "strike", "strikethrough":
 		return screen.Strike, nil
@@ -146,6 +148,19 @@ func parseAttr(name string) (screen.Attr, error) {
 func (o *ColorOverrides) SetProperty(selector, property, value string) error {
 	if o == nil {
 		return fmt.Errorf("nil color overrides")
+	}
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return fmt.Errorf("selector must not be empty")
+	}
+	for _, segment := range strings.Split(selector, ".") {
+		if strings.TrimSpace(segment) == "" {
+			return fmt.Errorf("invalid selector %q", selector)
+		}
+	}
+	property = strings.TrimSpace(property)
+	if property == "" {
+		return fmt.Errorf("property must not be empty")
 	}
 	if o.Rules == nil {
 		o.Rules = make(map[string]ColorRule)
@@ -214,12 +229,20 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 	underline := func(style screen.Style) screen.Style { style.Attrs |= screen.Underline; return style }
 	muted := colors.Muted
 	accent := colors.Accent
+	selection := colors.Text
+	if colors.Selection.Fg.Set() {
+		selection.Fg = colors.Selection.Fg
+	}
+	if colors.Selection.Bg.Set() {
+		selection.Bg = colors.Selection.Bg
+	}
+	selection.Attrs |= colors.Selection.Attrs
 	styles := map[string]screen.Style{
 		"background": {Bg: colors.Background},
-		"text":       colors.Text, "muted": muted, "accent": accent, "error": colors.Error,
+		"text":       colors.Text, "muted": muted, "accent": accent, "selection": selection, "error": colors.Error,
 		"pending": muted, "panels.border": colors.Border, "panels.focus": accent,
 		"guilds": colors.Text, "guilds.channels": colors.Text, "guilds.members": colors.Text,
-		"guilds.header": bold(muted), "guilds.selected": accent, "guilds.badge": colors.Error,
+		"guilds.header": bold(muted), "guilds.selected": selection, "guilds.badge": colors.Error,
 		"guilds.separators.*": colors.Border, "guilds.separators.right": colors.Border,
 		"messages.content": colors.Text, "messages.author": accent, "messages.pending": muted,
 		// Focus is universally rendered by swapping a cell's foreground and
@@ -237,7 +260,7 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"messages.link.channel": underline(accent), "messages.link.message": underline(accent),
 		"messages.link.invite": underline(accent), "messages.mention": accent,
 		"messages.roleMention": accent, "messages.timestamp": muted,
-		"messages.reaction.selected": {Attrs: screen.Reverse},
+		"messages.reaction.selected": selection,
 		"embeds.border":              accent, "embeds.background": colors.Text, "embeds.author": muted,
 		"embeds.title": bold(colors.Text), "embeds.title.link": {Attrs: screen.Underline},
 		"embeds.field.name": {Attrs: screen.Bold}, "embeds.footer": muted,
@@ -249,16 +272,16 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"components.error":   colors.Error,
 		"composer":           colors.Text, "composer.status": muted, "toast": colors.Text,
 		"toast.title": bold(colors.Error), "toast.detail": muted,
-		"picker": colors.Text, "picker.selected": accent, "picker.hint": muted,
+		"picker": colors.Text, "picker.selected": selection, "picker.hint": muted,
 		"picker.favorite": accent, "picker.query": colors.Text,
-		"menu": colors.Text, "menu.selected": accent, "menu.danger": bold(colors.Error),
+		"menu": colors.Text, "menu.selected": selection, "menu.danger": bold(colors.Error),
 		"menu.disabled": muted, "menu.key": muted,
-		"settings": colors.Text, "settings.selected": accent,
+		"settings": colors.Text, "settings.selected": selection,
 		"settings.tab": muted, "settings.tab.active": accent,
-		"forum.header": muted, "forum.body": colors.Text, "forum.selected": accent,
+		"forum.header": muted, "forum.body": colors.Text, "forum.selected": selection,
 		"forum.badge": accent, "forum.filter": accent, "forum.archived": muted,
-		"forum.title": colors.Text, "forum.tags": colors.Text, "forum.tags.selected": accent,
-		"quick_switcher.input": colors.Text, "quick_switcher.selected": accent,
+		"forum.title": colors.Text, "forum.tags": colors.Text, "forum.tags.selected": selection,
+		"quick_switcher.input": colors.Text, "quick_switcher.selected": selection,
 		"login.input": colors.Text, "prompt.input": colors.Text,
 		"input.placeholder": muted, "input.cursor": {Attrs: screen.Reverse},
 		"composer.placeholder": muted, "composer.cursor": {Attrs: screen.Reverse},
@@ -268,7 +291,7 @@ func CellStyles(colors ColorStyles, overrides *ColorOverrides) map[string]screen
 		"forum.title.placeholder": muted, "forum.title.cursor": {Attrs: screen.Reverse},
 		"forum.body.placeholder": muted, "forum.body.cursor": {Attrs: screen.Reverse},
 		"auth.qr": colors.Text, "auth.title": accent, "auth.hint": muted,
-		"auth.status": muted, "auth.choice": colors.Text,
+		"auth.status": muted, "auth.choice": colors.Text, "auth.choice.selected": selection,
 		// QR module colors are carried in Fg. The QR renderer maps the dark
 		// module color to a half-block foreground and the light module color to
 		// its background as needed.

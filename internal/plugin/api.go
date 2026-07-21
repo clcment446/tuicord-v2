@@ -5,20 +5,28 @@ import (
 	"strconv"
 	"strings"
 
+	"awesomeProject/internal/config"
 	lua "github.com/yuin/gopher-lua"
 )
 
 // pluginContext carries everything a single plugin's tuicord API binds against.
 type pluginContext struct {
-	name     string
-	host     *Host
-	events   *eventBus
-	commands *commandRegistry
-	keys     *keyRegistry
-	themes   *themeRegistry
-	log      func(msg string)
-	grants   map[string]bool
-	fsRoot   *os.Root
+	name          string
+	host          *Host
+	events        *eventBus
+	commands      *commandRegistry
+	keys          *keyRegistry
+	themes        *themeRegistry
+	log           func(msg string)
+	grants        map[string]bool
+	fsRoot        *os.Root
+	configTarget  *config.Config
+	configContext bool
+	starting      bool
+	configured    bool
+	startupTheme  string
+	runtimeTheme  string
+	applyTheme    func(string) error
 }
 
 // installAPI builds the global `tuicord` table in L, wiring every binding to
@@ -96,10 +104,33 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		return 0
 	})
 
-	// --- theming & custom UI -------------------------------------------------
+	// --- declarative config, theming & custom UI -----------------------------
+	reg("configure", func(L *lua.LState) int {
+		if !pctx.configContext || pctx.configTarget == nil || !pctx.starting {
+			L.RaiseError("tuicord.configure is only available while loading config.lua")
+			return 0
+		}
+		if pctx.configured {
+			L.RaiseError("tuicord.configure may only be called once")
+			return 0
+		}
+		if err := config.DecodeLua(pctx.configTarget, L.CheckTable(1)); err != nil {
+			L.RaiseError("configure: %v", err)
+			return 0
+		}
+		pctx.configured = true
+		return 0
+	})
 	reg("style", func(L *lua.LState) int {
 		selector := L.CheckString(1)
 		props := tableToStringMap(L.CheckTable(2))
+		validated := config.ColorOverrides{Rules: make(map[string]config.ColorRule)}
+		for property, value := range props {
+			if err := validated.SetProperty(selector, property, value); err != nil {
+				L.RaiseError("style %q.%s: %v", selector, property, err)
+				return 0
+			}
+		}
 		if pctx.host.Style != nil {
 			pctx.host.Style(selector, props)
 		}
@@ -114,9 +145,38 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		return 0
 	})
 	reg("theme", func(L *lua.LState) int {
-		name := L.CheckString(1)
-		palette := tableToStringMap(L.CheckTable(2))
-		pctx.themes.add(name, palette, L)
+		name := strings.TrimSpace(L.CheckString(1))
+		if name == "" {
+			L.RaiseError("theme name must not be empty")
+			return 0
+		}
+		theme, err := decodeTheme(L.CheckTable(2))
+		if err != nil {
+			L.RaiseError("theme %q: %v", name, err)
+			return 0
+		}
+		pctx.themes.add(name, theme, L)
+		return 0
+	})
+	reg("use_theme", func(L *lua.LState) int {
+		name := strings.TrimSpace(L.CheckString(1))
+		if _, ok := pctx.themes.lookup(name); !ok {
+			L.RaiseError("unknown theme %q", name)
+			return 0
+		}
+		if pctx.starting {
+			if pctx.configContext {
+				pctx.startupTheme = name
+			} else {
+				pctx.runtimeTheme = name
+			}
+			return 0
+		}
+		if pctx.applyTheme != nil {
+			if err := pctx.applyTheme(name); err != nil {
+				L.RaiseError("use theme %q: %v", name, err)
+			}
+		}
 		return 0
 	})
 

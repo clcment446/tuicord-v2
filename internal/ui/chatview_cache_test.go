@@ -4,8 +4,10 @@ import (
 	"strings"
 	"testing"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/screen"
 )
 
 // renderText flattens a rendered line's segments so tests can assert on the
@@ -109,6 +111,30 @@ func TestChatViewCacheInvalidatesWhenResolverGainsMembers(t *testing.T) {
 	if got := renderText(view.render(40)); !strings.Contains(got, "@alice") {
 		t.Errorf("render after UpsertMember = %q, want the resolved mention; "+
 			"the cache ignored a change to state the resolver reads", got)
+	}
+}
+
+func TestChatViewCacheInvalidatesOnStyleGeneration(t *testing.T) {
+	st := store.New(0)
+	message := store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "styled"}
+	st.AppendMessage(message)
+	state := &StyleState{}
+	styles := Styles{
+		Cells:  map[string]screen.Style{"messages.content": {Fg: screen.RGB(1, 2, 3)}},
+		Custom: map[string]bool{}, Overrides: &config.ColorOverrides{}, State: state,
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, styles)
+	view.render(40)
+	key := messagePlacementPrefix(message)
+	first := view.bodyCache[key]
+	if first == nil {
+		t.Fatal("first body was not cached")
+	}
+	styles.Cells["messages.content"] = screen.Style{Fg: screen.RGB(9, 8, 7)}
+	state.Generation++
+	view.render(40)
+	if view.bodyCache[key] == first {
+		t.Fatal("style generation change reused cached message body")
 	}
 }
 

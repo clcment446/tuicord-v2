@@ -1,8 +1,6 @@
-// Package config loads and persists the tuicord user configuration.
-//
-// Configuration lives at ~/.config/tuicord-v2/config.toml. Load returns sane
-// defaults when the file is absent and writes a commented default file on first
-// run, so a fresh install starts with a discoverable, editable config.
+// Package config defines tuicord's typed runtime configuration and prepares its
+// Lua-first files. Authored configuration lives in config.lua; config.toml and
+// colors.conf remain read-only legacy migration inputs.
 package config
 
 import (
@@ -208,19 +206,15 @@ type Display struct {
 	StickyAnchor bool `toml:"sticky_anchor"`
 }
 
-// Auth controls how interactive Discord authentication is presented.
+// Auth is retained in Config for legacy TOML decoding. Preferred-mode churn is
+// persisted in uistate.State rather than rewriting authored config.lua.
 type Auth struct {
-	// PreferredMode is "tui" for an in-terminal browser surface or "browser"
-	// for a full Firefox window. Empty means the login prompt chooses the
-	// default terminal mode first.
+	// PreferredMode is "tui" for an in-terminal browser surface or "browser".
 	PreferredMode string `toml:"preferred_mode"`
 }
 
-// Account is one saved account in the multi-account registry. Tokens are NEVER
-// stored here — only a stable keyring key (the go-keyring "user" under which
-// this account's token is saved) and a display label. ID and Label are learned
-// after the account first connects (from READY) and saved back for display
-// before the next connect.
+// Account is a legacy config.toml account entry used only to seed uistate.
+// Tokens are NEVER stored here, only a stable keyring key and learned metadata.
 type Account struct {
 	// Key is the stable keyring user key for this account's token. The legacy
 	// single-account token uses the key "token"; new accounts get a fresh key.
@@ -232,10 +226,8 @@ type Account struct {
 	ID uint64 `toml:"id"`
 }
 
-// Accounts is the saved multi-account registry. It is held by pointer on Config
-// so Config stays comparable (its List slice is not) — the same reason Plugins
-// is a pointer. A nil pointer means "no registry yet"; the single stored token
-// is migrated into a one-entry registry on first multi-account launch.
+// Accounts is the legacy config.toml registry used to seed uistate. It remains
+// pointer-held so Config stays comparable, but is not accepted by authored Lua.
 type Accounts struct {
 	// Active is the index into List of the last active account.
 	Active int `toml:"active"`
@@ -266,7 +258,7 @@ type Integrations struct {
 }
 
 // Plugins controls the Lua plugin system. Plugins are loaded from the plugins/
-// directory beside config.toml. They run under a restricted sandbox; extra
+// directory beside config.lua. They run under a restricted sandbox; extra
 // capabilities (filesystem, network) are granted per-plugin via Grants.
 type Plugins struct {
 	// Enabled is the master switch. When false, no plugins are loaded.
@@ -433,64 +425,137 @@ func Default() Config {
 	}
 }
 
-// Path returns the config file path, honoring XDG_CONFIG_HOME.
-func Path() (string, error) {
+// Dir returns the application configuration directory, honoring
+// XDG_CONFIG_HOME through os.UserConfigDir.
+func Dir() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, AppName, "config.toml"), nil
+	return filepath.Join(dir, AppName), nil
 }
 
-// LockPath returns the path to the single-instance lock file beside
-// config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
+// Path returns the primary authored configuration path (config.lua).
+func Path() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.lua"), nil
+}
+
+// ConfigLuaPath is a compatibility alias for Path.
+func ConfigLuaPath() (string, error) { return Path() }
+
+// LegacyTOMLPath returns the read-only legacy config.toml migration input.
+func LegacyTOMLPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "config.toml"), nil
+}
+
+// LegacyColorsPath returns the read-only legacy colors.conf migration input.
+func LegacyColorsPath() (string, error) {
+	dir, err := Dir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "colors.conf"), nil
+}
+
 func LockPath() (string, error) {
-	path, err := Path()
+	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(path), "tuicord.lock"), nil
+	return filepath.Join(dir, "tuicord.lock"), nil
 }
 
-// PluginsDir returns the directory Lua plugins are loaded from, beside
-// config.toml. It honors XDG_CONFIG_HOME through the same resolution as Path.
 func PluginsDir() (string, error) {
-	path, err := Path()
+	dir, err := Dir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(filepath.Dir(path), "plugins"), nil
+	return filepath.Join(dir, "plugins"), nil
 }
 
-// ConfigLuaPath returns the path to the optional Lua configuration file beside
-// config.toml. It is loaded independently of the plugin system, so settings and
-// keybindings can be expressed in Lua without writing a plugin.
-func ConfigLuaPath() (string, error) {
-	path, err := Path()
+// Startup describes what the wiring layer should execute after files are
+// prepared. A legacy migration is deliberately not executed on the launch that
+// created it: that launch uses the already-decoded TOML/colors values exactly.
+type Startup struct {
+	LuaPath    string
+	ExecuteLua bool
+	Legacy     bool
+}
+
+// LoadStartup prepares the Lua-first configuration and returns a typed base.
+// Existing config.lua starts from Default and is executed exactly once by the
+// plugin manager. If only config.toml exists, it is loaded with colors.conf for
+// this launch and an atomic config.lua migration is generated without touching
+// either legacy file.
+func LoadStartup() (Config, Startup, error) {
+	luaPath, err := Path()
 	if err != nil {
-		return "", err
+		return Default(), Startup{}, err
 	}
-	return filepath.Join(filepath.Dir(path), "config.lua"), nil
+	dir := filepath.Dir(luaPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return Default(), Startup{}, err
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "plugins"), 0o755); err != nil {
+		return Default(), Startup{}, err
+	}
+	if _, err := os.Stat(luaPath); err == nil {
+		return Default(), Startup{LuaPath: luaPath, ExecuteLua: true}, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return Default(), Startup{}, err
+	}
+
+	legacyPath := filepath.Join(dir, "config.toml")
+	if _, err := os.Stat(legacyPath); err == nil {
+		cfg, err := loadFrom(legacyPath)
+		if err != nil {
+			return cfg, Startup{}, err
+		}
+		if err := writeLuaMigration(luaPath, cfg); err != nil {
+			return cfg, Startup{}, err
+		}
+		return cfg, Startup{LuaPath: luaPath, Legacy: true}, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return Default(), Startup{}, err
+	}
+
+	cfg := Default()
+	if err := writeFirstRunFile(luaPath, defaultLuaConfigTemplate); err != nil {
+		return cfg, Startup{}, err
+	}
+	return cfg, Startup{LuaPath: luaPath, ExecuteLua: true}, nil
 }
 
-// Load reads the config file, layering it over Default. When the file does not
-// exist it writes the default file and returns Default. Decode errors are
-// returned so the user can fix a malformed file rather than silently losing it.
+// Load prepares config files and returns the typed base. Applications that need
+// authored Lua values should use LoadStartup and execute Startup.LuaPath.
 func Load() (Config, error) {
-	path, err := Path()
-	if err != nil {
-		return Default(), err
-	}
-	return loadFrom(path)
+	cfg, _, err := LoadStartup()
+	return cfg, err
 }
 
-// Save writes the current configuration to the user config path.
+// Save writes an explicit Lua configuration. Runtime machine state should use
+// internal/uistate instead; Save remains useful for migration/tools.
 func Save(cfg Config) error {
 	path, err := Path()
 	if err != nil {
 		return err
 	}
-	return saveTo(path, cfg)
+	contents, err := renderLuaConfig(cfg, "saved")
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(path, 0o644, func(w io.Writer) error {
+		_, err := io.WriteString(w, contents)
+		return err
+	})
 }
 
 func saveTo(path string, cfg Config) error {

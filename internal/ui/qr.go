@@ -243,7 +243,11 @@ func drawModeChoice(r screen.Region, x, y int, label string, selected, preferred
 	if preferred {
 		hint = " (preferred)"
 	}
-	drawText(r, x, y, marker+label+hint, styles.Cell("auth.choice"))
+	style := styles.Cell("auth.choice")
+	if selected {
+		style = styles.Cell("auth.choice.selected")
+	}
+	drawText(r, x, y, marker+label+hint, style)
 }
 
 func browserMouseActions(ev input.MouseEvent, x, y int) []map[string]any {

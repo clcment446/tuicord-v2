@@ -20,6 +20,7 @@ import (
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
+	"awesomeProject/internal/uistate"
 
 	"github.com/diamondburned/arikawa/v3/utils/ws"
 	"github.com/diamondburned/ningen/v3"
@@ -40,62 +41,87 @@ func run() error {
 	clearTokens := flag.Bool("clear", false, "remove saved account tokens from the OS keyring and exit")
 	flag.Parse()
 
-	cfg, err := config.Load()
+	cfg, startup, err := config.LoadStartup()
 	if err != nil {
-		return fmt.Errorf("load config: %w", err)
-	}
-	if *clearTokens {
-		return clearStoredTokens(cfg)
+		return fmt.Errorf("prepare config: %w", err)
 	}
 
-	// One instance per account. Two clients on one token double the gateway
-	// sessions and startup REST volume, which is what trips Discord's abuse
-	// detection.
+	// One process owns config execution and the account session. In particular,
+	// do not run config.lua twice in competing startup instances.
 	releaseLock, err := acquireInstanceLock()
 	if err != nil {
 		return err
 	}
 	defer releaseLock()
-	// Ensure a non-nil override set so plugins can add color rules at runtime.
-	// The Styles built below and the plugin Host share this same pointer, so a
-	// tuicord.style call is visible to widgets on the next render.
+
+	luaManager, pluginLog, err := newBootstrapPluginManager(&cfg)
+	if err != nil {
+		return fmt.Errorf("create Lua manager: %w", err)
+	}
+	var shell *ui.Shell
+	defer func() {
+		// Stop Lua while its attached Host targets are still alive.
+		luaManager.Close()
+		if shell != nil {
+			shell.Close()
+		}
+		if pluginLog != nil {
+			_ = pluginLog.Close()
+		}
+	}()
+	if startup.ExecuteLua {
+		if err := luaManager.LoadConfig(startup.LuaPath); err != nil {
+			return fmt.Errorf("load config.lua: %w", err)
+		}
+	}
+	if _, selected, ok := luaManager.ConsumeStartupTheme(); ok {
+		config.ApplyTheme(&cfg, selected)
+	}
 	if cfg.ColorOverrides == nil {
 		cfg.ColorOverrides = &config.ColorOverrides{Rules: map[string]config.ColorRule{}}
 	}
+	activeTheme, err := config.ThemeFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("resolve active theme: %w", err)
+	}
 	styles := uiStyles(cfg)
+
+	state, err := uistate.Load()
+	if err != nil {
+		return fmt.Errorf("load UI state: %w", err)
+	}
+	if seedLegacyState(state, cfg) {
+		if err := state.Save(); err != nil {
+			return fmt.Errorf("seed UI state: %w", err)
+		}
+	}
+	if *clearTokens {
+		return clearStoredTokens(state)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	// Resolve which accounts exist and which is active. On first run (or a
-	// pre-multi-account install) the single stored token is migrated into a
-	// one-entry registry keyed by the legacy keyring key; its label is filled in
-	// after the first connect.
-	registry := cfg.AccountList()
-	activeIdx := cfg.ActiveAccount()
+	registry := state.AccountList()
+	activeIdx := state.ActiveAccount()
 	if len(registry) == 0 {
-		registry = []config.Account{{Key: keyring.LegacyTokenKey}}
+		registry = []uistate.Account{{Key: keyring.LegacyTokenKey}}
 		activeIdx = 0
 	}
 	activeKey := registry[activeIdx].Key
 
 	warnStore := func(err error) {
-		// A missing Secret Service daemon must not prevent a valid pasted token
-		// from being used for this session. The token is still read from TOKEN on
-		// the next run, or can be pasted again.
 		fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
 	}
 	loginPrompt := func(ctx context.Context) (string, error) {
-		return ui.RunLogin(ctx, styles, theme(cfg), cfg.Auth.PreferredMode, cfg.Accessibility, func(mode string) {
-			cfg.Auth.PreferredMode = mode
-			if err := config.Save(cfg); err != nil {
+		return ui.RunLogin(ctx, styles, tuiTheme(cfg.Colors, cfg.ColorOverrides), state.AuthPreferredMode, cfg.Accessibility, func(mode string) {
+			state.AuthPreferredMode = mode
+			if err := state.Save(); err != nil {
 				fmt.Fprintln(os.Stderr, "tuicord: warning: save auth preference:", err)
 			}
 		})
 	}
 
-	// The active account's token is resolved — and interactively logged in if
-	// missing — before the UI loop starts, since login takes over the terminal.
 	token, err := auth.ResolveToken(ctx, auth.Options{
 		Store:        auth.KeyringStore{Key: activeKey},
 		OnStoreError: warnStore,
@@ -104,62 +130,50 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve token: %w", err)
 	}
-
 	ning, err := discord.NewNingen(token)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
 
 	uiApp := tui.New(
-		tui.WithTheme(theme(cfg)),
+		tui.WithTheme(tuiTheme(cfg.Colors, cfg.ColorOverrides)),
 		tui.WithMouse(cfg.Accessibility.MouseOn),
 		tui.WithFocusableSplits(cfg.Accessibility.FocusSplits),
 		tui.WithTTYColors(cfg.Display.TTYColors),
 	)
 	st := store.New(0)
 	orch := app.New(ning, st, uiApp)
+	mv := ui.NewMainViewWithState(orch, cfg, styles, state)
+	shell = ui.NewShell(orch, mv, cfg, styles, stop)
+	mv.OnPersistError(func(err error) { shell.ShowToast("View state", err) })
 
-	mv := ui.NewMainView(orch, cfg, styles)
-	shell := ui.NewShell(orch, mv, cfg, styles, stop)
-	defer shell.Close()
-	mv.OnPersistError(func(err error) {
-		shell.ShowToast("View state", err)
-	})
-
-	// The account manager owns per-account callback routing (panel refreshes for
-	// the active account, badges and notifications for every connected account),
-	// lazy connect, and switching. The active account is handed in prebuilt (its
-	// orchestrator/store back MainView/Shell); other accounts are built lazily
-	// from the keyring on first switch, with no interactive prompt.
 	surface := &uiSurface{mv: mv, shell: shell}
 	seeds := make([]accounts.Seed, len(registry))
-	for i, a := range registry {
-		seeds[i] = accounts.Seed{Key: a.Key, Label: a.Label, ID: a.ID}
+	for i, account := range registry {
+		seeds[i] = accounts.Seed{Key: account.Key, Label: account.Label, ID: account.ID}
 	}
 	seeds[activeIdx].Ning = ning
 	seeds[activeIdx].App = orch
 	seeds[activeIdx].Store = st
 
-	manager := accounts.New(accounts.Options{
+	accountManager := accounts.New(accounts.Options{
 		UI:      uiApp,
 		Ctx:     ctx,
 		Surface: surface,
 		Build: func(key string) (*ningen.State, error) {
-			t, err := keyring.GetTokenFor(key)
+			token, err := keyring.GetTokenFor(key)
 			if err != nil {
 				return nil, fmt.Errorf("read token for account %q: %w", key, err)
 			}
-			// Stray whitespace in a stored token yields an opaque gateway 4004;
-			// connect with the trimmed value.
-			t = strings.TrimSpace(t)
-			if t == "" {
+			token = strings.TrimSpace(token)
+			if token == "" {
 				return nil, fmt.Errorf("no saved token for account %q", key)
 			}
-			return discord.NewNingen(t)
+			return discord.NewNingen(token)
 		},
 		Persist: func(reg config.Accounts) {
-			cfg.Accounts = &reg
-			if err := config.Save(cfg); err != nil {
+			state.Accounts = stateAccounts(reg)
+			if err := state.Save(); err != nil {
 				fmt.Fprintln(os.Stderr, "tuicord: warning: save accounts:", err)
 			}
 		},
@@ -167,24 +181,19 @@ func run() error {
 		Active:      activeIdx,
 		AutoConnect: true,
 	})
-	surface.manager = manager
-	mv.SetAccountSelectHandler(func(i int) { _ = manager.Switch(i) })
+	surface.manager = accountManager
+	mv.SetAccountSelectHandler(func(i int) { _ = accountManager.Switch(i) })
 
-	// Plugins bind to the launch account's orchestrator; they do not follow
-	// account switches in this phase.
-	if mgr := setupPlugins(orch, uiApp, shell, cfg, styles); mgr != nil {
-		// Registered after shell.Close above so LIFO shutdown stops/cancels all
-		// plugin work while its Host targets are still alive.
-		defer mgr.Close()
+	// Attach the live Host only after App/MainView/Shell exist. Config keymaps and
+	// commands remain registered in the same manager; ordinary plugins now load
+	// according to the Lua-derived Config.
+	if errs := attachAndLoadPlugins(luaManager, orch, uiApp, shell, cfg, styles, activeTheme); len(errs) > 0 {
+		shell.ShowToast("Plugin load", pluginLoadError(errs))
 	}
 
-	// Build, activate, and connect the active account (its LoadGuilds is
-	// load-bearing; the user-session READY does not reliably deliver the guild
-	// directory). Lazy connect means only visited accounts pull at launch.
-	if err := manager.Start(); err != nil {
+	if err := accountManager.Start(); err != nil {
 		return fmt.Errorf("start accounts: %w", err)
 	}
-
 	return uiApp.RunContext(ctx, shell)
 }
 
@@ -253,16 +262,37 @@ func isGatewayAuthFailure(err error) bool {
 	return errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode
 }
 
-// clearStoredTokens removes every registry account's token — plus the legacy
-// single-account token — from the OS keyring, so the next launch starts from
-// an interactive login. Stale entries for accounts pruned from the registry by
-// hand keep their config key here only while listed; the legacy key covers the
-// pre-registry install.
-func clearStoredTokens(cfg config.Config) error {
+func seedLegacyState(state *uistate.State, cfg config.Config) bool {
+	if state == nil {
+		return false
+	}
+	changed := false
+	if state.Accounts == nil && cfg.Accounts != nil {
+		state.Accounts = stateAccounts(*cfg.Accounts)
+		changed = true
+	}
+	if state.AuthPreferredMode == "" && cfg.Auth.PreferredMode != "" {
+		state.AuthPreferredMode = cfg.Auth.PreferredMode
+		changed = true
+	}
+	return changed
+}
+
+func stateAccounts(reg config.Accounts) *uistate.Accounts {
+	out := &uistate.Accounts{Active: reg.Active, List: make([]uistate.Account, len(reg.List))}
+	for i, account := range reg.List {
+		out.List[i] = uistate.Account{Key: account.Key, Label: account.Label, ID: account.ID}
+	}
+	return out
+}
+
+// clearStoredTokens removes every machine-state registry token plus the legacy
+// single-account key, so the next launch starts from interactive login.
+func clearStoredTokens(state *uistate.State) error {
 	keys := map[string]bool{keyring.LegacyTokenKey: true}
-	for _, a := range cfg.AccountList() {
-		if a.Key != "" {
-			keys[a.Key] = true
+	for _, account := range state.AccountList() {
+		if account.Key != "" {
+			keys[account.Key] = true
 		}
 	}
 	var failed []string
@@ -291,20 +321,22 @@ func uiStyles(cfg config.Config) ui.Styles {
 		Pending: cells["pending"],
 		Error:   cells["error"],
 		Cells:   cells, Custom: custom, Overrides: cfg.ColorOverrides,
+		State: &ui.StyleState{},
 	}
 }
 
-// theme maps the configured palette onto the toolkit's Theme carrier.
-func theme(cfg config.Config) tui.Theme {
-	s := cfg.Colors.Styles()
-	cells := config.CellStyles(s, cfg.ColorOverrides)
+func tuiTheme(colors config.Colors, overrides *config.ColorOverrides) tui.Theme {
+	cells := config.CellStyles(colors.Styles(), overrides)
 	return tui.Theme{
 		Background: cells["background"].Bg,
 		Text:       cells["text"],
 		Muted:      cells["muted"],
 		Accent:     cells["accent"],
-		Selection:  cells["guilds.selected"],
+		Selection:  cells["selection"],
 		Border:     cells["panels.border"],
 		Error:      cells["error"],
 	}
 }
+
+// theme is retained for focused wiring tests and older internal callers.
+func theme(cfg config.Config) tui.Theme { return tuiTheme(cfg.Colors, cfg.ColorOverrides) }

@@ -64,11 +64,11 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 		onSticker: onSticker, onClose: onClose, list: widget.NewItemList(nil),
 		header: widget.NewText(""), hint: widget.NewText(""), node: layout.Node{Grow: 1},
 	}
-	p.list.SetStyle(styles.Text)
-	p.list.SetSelectedStyle(styles.Accent)
-	p.header.SetStyle(styles.Text)
+	p.list.SetStyle(styles.Cell("picker"))
+	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
+	p.header.SetStyle(styles.Cell("picker"))
 	p.header.SetWrap(false)
-	p.hint.SetStyle(styles.Muted)
+	p.hint.SetStyle(styles.Cell("picker.hint"))
 	p.hint.SetWrap(false)
 	p.hint.SetContent("↑/↓ move · enter insert · esc close")
 	title := "Autocomplete"
@@ -181,7 +181,7 @@ func (p *InlinePicker) refilter() {
 			}
 		}
 		if !match.entry.usable {
-			item.Style = p.styles.Muted
+			item.Style = p.styles.Cell("muted")
 		}
 		items = append(items, item)
 	}
