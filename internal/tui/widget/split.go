@@ -31,6 +31,8 @@ type Split struct {
 	collapsedSecond   bool
 	hiddenFirst       bool
 	hiddenSecond      bool
+	hideFirstBelow    int
+	hideSecondBelow   int
 	expandedBasis     int
 
 	node layout.Node
@@ -142,6 +144,27 @@ func (w *Split) HideFirst(hidden bool) *Split {
 func (w *Split) HideSecond(hidden bool) *Split {
 	if w != nil {
 		w.hiddenSecond = hidden
+		w.rebuild()
+	}
+	return w
+}
+
+// HideFirstBelow removes the complete first pane, including its divider gap,
+// when the root terminal width is below cells. Zero disables responsive hiding.
+func (w *Split) HideFirstBelow(cells int) *Split {
+	if w != nil {
+		w.hideFirstBelow = maxInt(cells, 0)
+		w.rebuild()
+	}
+	return w
+}
+
+// HideSecondBelow removes the complete second pane, including its reserved
+// minimum width and divider gap, when the root terminal width is below cells.
+// The policy is stored on Split so it survives drag/collapse rebuilds.
+func (w *Split) HideSecondBelow(cells int) *Split {
+	if w != nil {
+		w.hideSecondBelow = maxInt(cells, 0)
 		w.rebuild()
 	}
 	return w
@@ -400,22 +423,22 @@ func (w *Split) rebuild() {
 	gap := 1
 	switch {
 	case w.collapsedFirst:
-		first = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenFirst}
-		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond}
+		first = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenFirst, HideBelow: w.hideFirstBelow}
+		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, HideBelow: w.hideSecondBelow}
 		if w.second != nil {
 			second.Children = []*layout.Node{stretchNode(w.second.Layout())}
 		}
 		gap = 0
 	case w.collapsedSecond:
-		first = &layout.Node{Grow: 1, Min: 1}
-		second = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenSecond}
+		first = &layout.Node{Grow: 1, Min: 1, HideBelow: w.hideFirstBelow}
+		second = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenSecond, HideBelow: w.hideSecondBelow}
 		if w.first != nil {
 			first.Children = []*layout.Node{stretchNode(w.first.Layout())}
 		}
 		gap = 0
 	default:
-		first = &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max, Hidden: w.hiddenFirst}
-		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, Hidden: w.hiddenSecond}
+		first = &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max, Hidden: w.hiddenFirst, HideBelow: w.hideFirstBelow}
+		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, Hidden: w.hiddenSecond, HideBelow: w.hideSecondBelow}
 		if w.first != nil {
 			first.Children = []*layout.Node{stretchNode(w.first.Layout())}
 		}

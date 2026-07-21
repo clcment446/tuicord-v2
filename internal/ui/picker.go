@@ -129,12 +129,12 @@ func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fake
 		onClose:   onClose,
 		node:      layout.Node{Grow: 1},
 	}
-	p.list.SetStyle(styles.Text)
-	p.list.SetSelectedStyle(styles.Accent)
-	p.queryText.SetStyle(styles.Text)
+	p.list.SetStyle(styles.Cell("picker"))
+	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
+	p.queryText.SetStyle(styles.Cell("picker.query"))
 	p.queryText.SetWrap(false)
 	p.tabText.SetWrap(false)
-	p.hintText.SetStyle(styles.Muted)
+	p.hintText.SetStyle(styles.Cell("picker.hint"))
 	p.hintText.SetWrap(false)
 	p.hintText.SetContent("←/→ tabs · ↑/↓ move · alt-f fav · enter insert · esc close")
 
@@ -334,7 +334,7 @@ func (p *Picker) refilter() {
 			}
 		}
 		if !e.usable {
-			item.Style = p.styles.Muted
+			item.Style = p.styles.Cell("muted")
 		}
 		items[i] = item
 	}

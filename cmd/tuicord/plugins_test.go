@@ -11,7 +11,6 @@ import (
 	"awesomeProject/internal/discord"
 	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
-	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
 
 	"github.com/diamondburned/arikawa/v3/session"
@@ -24,14 +23,13 @@ func TestPluginHostAccessorsDoNotWaitForUIEventLoop(t *testing.T) {
 	uiApp := tui.New()
 	orch := app.New(discord.WrapSession(session.New("")), store.New(0), uiApp)
 	orch.SetActive(12, 34)
-	host := newPluginHost(
-		orch,
-		uiApp,
-		nil,
-		&config.ColorOverrides{},
-		make(map[string]screen.Style),
-		config.Colors{},
-	)
+	cfg := config.Default()
+	cfg.ColorOverrides = &config.ColorOverrides{Rules: map[string]config.ColorRule{}}
+	activeTheme, err := config.ThemeFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newPluginHost(orch, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
 
 	type ids struct {
 		guild, channel, self uint64
@@ -57,14 +55,13 @@ func TestPluginHostAccessorsDoNotWaitForUIEventLoop(t *testing.T) {
 func TestManagerCloseDoesNotWaitForStoppedUIAccessor(t *testing.T) {
 	uiApp := tui.New()
 	orch := app.New(discord.WrapSession(session.New("")), store.New(0), uiApp)
-	host := newPluginHost(
-		orch,
-		uiApp,
-		nil,
-		&config.ColorOverrides{},
-		make(map[string]screen.Style),
-		config.Colors{},
-	)
+	cfg := config.Default()
+	cfg.ColorOverrides = &config.ColorOverrides{Rules: map[string]config.ColorRule{}}
+	activeTheme, err := config.ThemeFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := newPluginHost(orch, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
 	entered := make(chan struct{})
 	access := host.ActiveChannel
 	host.ActiveChannel = func() uint64 {

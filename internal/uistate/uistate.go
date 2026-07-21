@@ -1,8 +1,8 @@
-// Package uistate persists per-user, per-client view preferences that are not
-// part of Discord's account settings: which guilds and channels the user has
-// pinned locally, and which folders and categories they have collapsed.
+// Package uistate persists per-user, per-client machine state: local view
+// preferences, the token-key account registry, and preferred interactive auth
+// mode. Tokens themselves remain in the OS keyring.
 //
-// It is deliberately separate from package config. config.toml is hand-editable
+// It is deliberately separate from package config. config.lua is hand-editable
 // user configuration; this file is machine-managed churn that the client writes
 // as the user clicks around, so it lives under the XDG state directory
 // (~/.local/state/tuicord/ui.toml) rather than the config directory.
@@ -27,17 +27,50 @@ import (
 // AppName is the state-directory namespace.
 const AppName = "tuicord"
 
-// State is the persisted set of client-side view preferences. Guild and channel
-// IDs are Discord snowflakes; folder IDs are the (possibly small) integers
-// Discord assigns guild folders. The zero value is a valid, empty state.
+// Account is one machine-managed account registry entry. Tokens remain in the
+// OS keyring; this state stores only the stable key, learned label, and user ID.
+type Account struct {
+	Key   string `toml:"key"`
+	Label string `toml:"label"`
+	ID    uint64 `toml:"id"`
+}
+
+// Accounts is the machine-managed multi-account registry.
+type Accounts struct {
+	Active int       `toml:"active"`
+	List   []Account `toml:"list"`
+}
+
+// State is the persisted set of client-side view preferences and small pieces
+// of machine-managed startup churn. Guild/channel/user IDs are Discord
+// snowflakes. The zero value is a valid, empty state.
 type State struct {
-	PinnedGuilds        []uint64 `toml:"pinned_guilds"`
-	PinnedChannels      []uint64 `toml:"pinned_channels"`
-	CollapsedFolders    []int64  `toml:"collapsed_folders"`
-	CollapsedCategories []uint64 `toml:"collapsed_categories"`
-	RecentStickers      []uint64 `toml:"recent_stickers"`
-	FavoriteEmojis      []string `toml:"favorite_emojis"`
-	FavoriteStickers    []uint64 `toml:"favorite_stickers"`
+	PinnedGuilds        []uint64  `toml:"pinned_guilds"`
+	PinnedChannels      []uint64  `toml:"pinned_channels"`
+	CollapsedFolders    []int64   `toml:"collapsed_folders"`
+	CollapsedCategories []uint64  `toml:"collapsed_categories"`
+	RecentStickers      []uint64  `toml:"recent_stickers"`
+	FavoriteEmojis      []string  `toml:"favorite_emojis"`
+	FavoriteStickers    []uint64  `toml:"favorite_stickers"`
+	Accounts            *Accounts `toml:"accounts"`
+	AuthPreferredMode   string    `toml:"auth_preferred_mode"`
+}
+
+// AccountList returns a copy of the registry list, or nil when it has not been
+// initialized yet.
+func (s *State) AccountList() []Account {
+	if s == nil || s.Accounts == nil {
+		return nil
+	}
+	return append([]Account(nil), s.Accounts.List...)
+}
+
+// ActiveAccount returns the stored active index clamped to the registry.
+func (s *State) ActiveAccount() int {
+	if s == nil || s.Accounts == nil || len(s.Accounts.List) == 0 || s.Accounts.Active < 0 || s.Accounts.Active >= len(s.Accounts.List) {
+		return 0
+	}
+	return s.Accounts.Active
 }
 
 func (s *State) ToggleFavoriteEmoji(key string) bool {

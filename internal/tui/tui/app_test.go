@@ -12,6 +12,19 @@ import (
 	"awesomeProject/internal/tui/screen"
 )
 
+func TestSetThemeUpdatesStateAndRenderedBackground(t *testing.T) {
+	app := New(WithTheme(Theme{Background: screen.RGB(1, 2, 3)}))
+	next := Theme{Background: screen.RGB(9, 8, 7), Accent: screen.Style{Fg: screen.RGB(6, 5, 4)}}
+	app.SetTheme(next)
+	if got := app.Theme(); got != next {
+		t.Fatalf("Theme = %+v, want %+v", got, next)
+	}
+	buf := app.Render(nil, Size{W: 1, H: 1})
+	if got := buf.Cell(0, 0).Style.Bg; got != next.Background {
+		t.Fatalf("rendered background = %+v, want %+v", got, next.Background)
+	}
+}
+
 func TestWriteRawIsNonBlockingBoundedAndAtomic(t *testing.T) {
 	app := New()
 	for i := 0; i < 100; i++ {

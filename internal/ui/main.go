@@ -57,6 +57,8 @@ type MainView struct {
 	memberList          *widget.ItemList
 	accountList         *widget.ItemList
 	accountBorder       *widget.Border
+	themedBorders       []*widget.Border
+	themedSplits        []*widget.Split
 	onAccountSelect     func(int)
 	chat                *ChatView
 	chatBorder          *widget.Border
@@ -112,6 +114,13 @@ const (
 // NewMainView assembles the four-panel layout and wires selection callbacks.
 func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	state, _ := uistate.Load()
+	return NewMainViewWithState(a, cfg, styles, state)
+}
+
+// NewMainViewWithState uses the caller's shared machine state. Main uses this
+// so account/auth writes and view-preference writes cannot overwrite one
+// another through independent stale State snapshots.
+func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *uistate.State) *MainView {
 	if state == nil {
 		state = &uistate.State{}
 	}
@@ -195,6 +204,61 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 	return mv
 }
 
+// SetStyles refreshes straightforward retained MainView surfaces after a live
+// theme change. Dynamic chat rendering also uses the shared semantic map and
+// style generation. More complex already-open overlays remain snapshot-based.
+func (mv *MainView) SetStyles(styles Styles) {
+	if mv == nil {
+		return
+	}
+	mv.styles = styles
+	if mv.guildList != nil {
+		mv.guildList.SetStyle(styles.Cell("guilds"))
+		mv.guildList.SetSelectedStyle(styles.Cell("guilds.selected"))
+		mv.guildList.SetBadgeStyle(styles.Cell("guilds.badge"))
+	}
+	if mv.channelList != nil {
+		mv.channelList.SetStyle(styles.Cell("guilds.channels"))
+		mv.channelList.SetSelectedStyle(styles.Cell("guilds.selected"))
+		mv.channelList.SetBadgeStyle(styles.Cell("guilds.badge"))
+	}
+	if mv.memberList != nil {
+		mv.memberList.SetStyle(styles.Cell("guilds.members"))
+	}
+	if mv.accountList != nil {
+		mv.accountList.SetStyle(styles.Cell("guilds"))
+		mv.accountList.SetSelectedStyle(styles.Cell("guilds.selected"))
+		mv.accountList.SetBadgeStyle(styles.Cell("guilds.badge"))
+	}
+	if mv.chat != nil {
+		mv.chat.SetStyles(styles)
+	}
+	if mv.forumPreview != nil {
+		mv.forumPreview.SetStyles(styles)
+	}
+	if mv.forumView != nil {
+		mv.forumView.SetStyles(styles)
+	}
+	if mv.composerStatus != nil {
+		mv.composerStatus.SetStyle(styles.Cell("composer.status"))
+	}
+	if mv.composerFiles != nil {
+		mv.composerFiles.SetStyle(styles.Cell("messages.attachment"))
+	}
+	if mv.composer != nil {
+		mv.composer.SetStyle(styles.Cell("composer"))
+		mv.composer.SetPlaceholderStyle(styles.Cell("composer.placeholder"))
+		mv.composer.SetCursorStyle(styles.Cell("composer.cursor"))
+	}
+	for _, border := range mv.themedBorders {
+		border.SetStyle(styles.Cell("panels.border"))
+		border.SetFocusStyle(styles.Cell("panels.focus"))
+	}
+	for _, split := range mv.themedSplits {
+		split.SetStyle(styles.Cell("panels.border"))
+	}
+}
+
 func (mv *MainView) compose() tui.Widget {
 	guildRail := mv.titled("Servers", mv.guildList)
 	channels := mv.titled("Channels", mv.channelList)
@@ -236,6 +300,7 @@ func (mv *MainView) compose() tui.Widget {
 		MaxFirst(accountsMaxWidth).
 		CollapsibleFirst()
 	composerRow.SetStyle(mv.styles.Cell("panels.border"))
+	mv.themedSplits = append(mv.themedSplits, composerRow)
 	accountsPolicy.Apply(mv.accountBorder.Layout(), layout.Row)
 	if accountsPolicy.Visible != nil {
 		composerRow.HideFirst(!*accountsPolicy.Visible)
@@ -268,9 +333,15 @@ func (mv *MainView) compose() tui.Widget {
 		CollapsibleSecond().
 		Vertical()
 	chatAndMembers.SetStyle(mv.styles.Cell("panels.border"))
+	mv.themedSplits = append(mv.themedSplits, chatAndMembers)
 	membersNode := members.Layout()
 	membersPolicy.Apply(membersNode, layout.Row)
-	membersNode.HideBelow = mv.cfg.Layout.MembersHideBelow
+	if mv.cfg.Layout.MembersAutoHide {
+		// Hide the Split pane wrapper, not only the members widget inside it.
+		// Otherwise its minimum width and divider remain reserved while the
+		// invisible child leaves the chat/composer clipped to zero on narrow TTYs.
+		chatAndMembers.HideSecondBelow(mv.cfg.Layout.MembersHideBelow)
+	}
 	if membersPolicy.Visible != nil {
 		chatAndMembers.HideSecond(!*membersPolicy.Visible)
 	}
@@ -287,6 +358,7 @@ func (mv *MainView) compose() tui.Widget {
 		MaxFirst(40).
 		CollapsibleFirst()
 	channelsAndRest.SetStyle(mv.styles.Cell("panels.border"))
+	mv.themedSplits = append(mv.themedSplits, channelsAndRest)
 	channelsPolicy.Apply(channels.Layout(), layout.Row)
 	if channelsPolicy.Visible != nil {
 		channelsAndRest.HideFirst(!*channelsPolicy.Visible)
@@ -304,6 +376,7 @@ func (mv *MainView) compose() tui.Widget {
 		MaxFirst(24).
 		CollapsibleFirst()
 	root.SetStyle(mv.styles.Cell("panels.border"))
+	mv.themedSplits = append(mv.themedSplits, root)
 	guildsPolicy.Apply(guildRail.Layout(), layout.Row)
 	if guildsPolicy.Visible != nil {
 		root.HideFirst(!*guildsPolicy.Visible)
@@ -1540,5 +1613,6 @@ func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
 	b := titled(title, child)
 	b.SetStyle(mv.styles.Cell("panels.border"))
 	b.SetFocusStyle(mv.styles.Cell("panels.focus"))
+	mv.themedBorders = append(mv.themedBorders, b)
 	return b
 }

@@ -10,12 +10,13 @@ import (
 	"sync"
 	"time"
 
+	"awesomeProject/internal/config"
 	lua "github.com/yuin/gopher-lua"
 )
 
-// Options configures a Manager. It is deliberately built from plain values so
-// this package needs no dependency on internal/config; the wiring layer
-// translates the user's config into these fields.
+// Options configures a Manager. ConfigTarget is the one typed integration
+// point for declarative config.lua; UI and Discord operations remain decoupled
+// behind Host functions.
 type Options struct {
 	// Dir is the directory scanned for plugins (*.lua files or <name>/init.lua).
 	Dir string
@@ -26,8 +27,12 @@ type Options struct {
 	Disabled []string
 	// Grants maps a plugin name to its granted capabilities ("fs", "net").
 	Grants map[string][]string
-	// Host supplies the side-effecting operations bindings call.
+	// Host supplies the side-effecting operations bindings call. It may be a
+	// bootstrap-safe empty Host and populated later with AttachHost.
 	Host *Host
+	// ConfigTarget is the typed runtime configuration configured by config.lua.
+	// It is ignored for ordinary plugin files.
+	ConfigTarget *config.Config
 	// Log receives plugin log/print output and load diagnostics. Nil discards.
 	Log io.Writer
 	// QueueSize bounds the plugin job queue; <=0 uses a sane default.
@@ -50,9 +55,11 @@ type Manager struct {
 	themes   *themeRegistry
 	host     *Host
 
-	mu     sync.Mutex
-	states []managedState
-	loaded []string
+	mu                   sync.Mutex
+	states               []managedState
+	loaded               []string
+	startupTheme         string
+	startupThemeConsumed bool
 
 	logMu sync.Mutex
 }
@@ -137,7 +144,7 @@ func (m *Manager) LoadConfig(path string) error {
 		}
 		return err
 	}
-	if err := m.loadOne(pluginFile{name: "config", path: path}); err != nil {
+	if err := m.loadOne(pluginFile{name: "config", path: path, configContext: true}); err != nil {
 		m.logf("config.lua failed: %v", err)
 		return err
 	}
@@ -169,15 +176,23 @@ func (m *Manager) loadOne(f pluginFile) error {
 			}
 		}
 		pctx := &pluginContext{
-			name:     f.name,
-			host:     m.host,
-			events:   m.events,
-			commands: m.commands,
-			keys:     m.keys,
-			themes:   m.themes,
-			log:      func(msg string) { m.logf("[%s] %s", f.name, msg) },
-			grants:   grants,
-			fsRoot:   fsRoot,
+			name:          f.name,
+			host:          m.host,
+			events:        m.events,
+			commands:      m.commands,
+			keys:          m.keys,
+			themes:        m.themes,
+			log:           func(msg string) { m.logf("[%s] %s", f.name, msg) },
+			grants:        grants,
+			fsRoot:        fsRoot,
+			configContext: f.configContext,
+			starting:      true,
+			applyTheme:    m.applyTheme,
+		}
+		var workingConfig config.Config
+		if f.configContext && m.opts.ConfigTarget != nil {
+			workingConfig = *m.opts.ConfigTarget
+			pctx.configTarget = &workingConfig
 		}
 		installAPI(L, pctx)
 		if err := safeDoFile(m.rt.context(), L, f.path, m.opts.StartupTimeout); err != nil {
@@ -191,9 +206,20 @@ func (m *Manager) loadOne(f pluginFile) error {
 			loadErr = err
 			return
 		}
+		pctx.starting = false
+		if pctx.configTarget != nil {
+			*m.opts.ConfigTarget = workingConfig
+		}
 		m.mu.Lock()
 		m.states = append(m.states, managedState{L: L, fsRoot: fsRoot})
+		if pctx.startupTheme != "" {
+			m.startupTheme = pctx.startupTheme
+			m.startupThemeConsumed = false
+		}
 		m.mu.Unlock()
+		if pctx.runtimeTheme != "" {
+			_ = m.applyTheme(pctx.runtimeTheme)
+		}
 	})
 	if !ok {
 		return fmt.Errorf("runtime stopped")
@@ -249,20 +275,71 @@ func (m *Manager) ThemeNames() []string {
 	return m.themes.names()
 }
 
-// ApplyTheme applies a registered theme by name via the Host, reporting whether
-// a theme with that name exists.
+// ApplyTheme applies a registered theme by name via the live Host, reporting
+// whether a theme with that name exists.
 func (m *Manager) ApplyTheme(name string) bool {
-	if m == nil {
-		return false
-	}
-	palette, ok := m.themes.lookup(name)
+	return m != nil && m.applyTheme(name) == nil
+}
+
+func (m *Manager) applyTheme(name string) error {
+	theme, ok := m.themes.lookup(name)
 	if !ok {
-		return false
+		return fmt.Errorf("unknown theme %q", name)
 	}
 	if m.host != nil && m.host.ApplyTheme != nil {
-		m.host.ApplyTheme(palette)
+		m.host.ApplyTheme(theme)
 	}
-	return true
+	return nil
+}
+
+// ConsumeStartupTheme resolves the config.lua startup selection and marks it as
+// already projected into Config. Main calls this before constructing login or
+// any widget, preventing a redundant bootstrap Post when the live Host attaches.
+func (m *Manager) ConsumeStartupTheme() (string, config.Theme, bool) {
+	if m == nil {
+		return "", config.Theme{}, false
+	}
+	m.mu.Lock()
+	name := m.startupTheme
+	if name != "" {
+		m.startupThemeConsumed = true
+	}
+	m.mu.Unlock()
+	if name == "" {
+		return "", config.Theme{}, false
+	}
+	theme, ok := m.themes.lookup(name)
+	return name, theme, ok
+}
+
+// AttachHost populates the bootstrap Host in place so commands and keymaps
+// registered by config.lua keep working. If the caller did not consume the
+// startup theme into Config, attachment applies it through the live Host.
+func (m *Manager) AttachHost(host *Host) {
+	if m == nil || host == nil {
+		return
+	}
+	*m.host = *host
+	m.mu.Lock()
+	name := m.startupTheme
+	apply := name != "" && !m.startupThemeConsumed
+	m.mu.Unlock()
+	if apply {
+		_ = m.applyTheme(name)
+	}
+}
+
+// SetPluginConfig updates discovery policy after config.lua has populated the
+// typed Config. Call it before Load.
+func (m *Manager) SetPluginConfig(disabled []string, grants map[string][]string) {
+	if m == nil {
+		return
+	}
+	m.opts.Disabled = append([]string(nil), disabled...)
+	m.opts.Grants = make(map[string][]string, len(grants))
+	for name, values := range grants {
+		m.opts.Grants[name] = append([]string(nil), values...)
+	}
 }
 
 // KeySpecs returns the key specs plugins have bound, so the UI can match an
@@ -400,8 +477,9 @@ func grantSet(caps []string) map[string]bool {
 
 // pluginFile is a discovered plugin: its display name and entry file path.
 type pluginFile struct {
-	name string
-	path string
+	name          string
+	path          string
+	configContext bool
 }
 
 // discover lists plugins in dir. A top-level "foo.lua" becomes plugin "foo"; a

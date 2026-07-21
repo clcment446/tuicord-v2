@@ -4,7 +4,7 @@
 --   ~/.config/tuicord-v2/plugins/hello.lua   (honors XDG_CONFIG_HOME)
 --
 -- Plugins run sandboxed: no filesystem, network, or os access unless the user
--- grants it in config.toml under [plugins.grants]. All Discord snowflake IDs
+-- grants it in config.lua under configure({plugins={grants=...}}). All Discord snowflake IDs
 -- cross into Lua as decimal strings.
 
 tuicord.name = "hello"
@@ -32,7 +32,7 @@ tuicord.on("channel.switch", function(ev)
   tuicord.log("switched to channel " .. ev.channel_id)
 end)
 
--- Recolor a semantic surface at runtime. Selectors mirror colors.conf; the
+-- Recolor a semantic surface at runtime. Selectors mirror theme styles; the
 -- change takes effect on the next render.
 tuicord.command("red-authors", function()
   tuicord.style("messages.author", { fg = "#ff0000", bold = true })

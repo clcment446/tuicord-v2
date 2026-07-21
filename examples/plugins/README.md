@@ -6,7 +6,7 @@ your plugins directory and they load on startup.
 
 ## Location
 
-Plugins live beside `config.toml`:
+Plugins live beside the primary `config.lua`:
 
 ```
 ~/.config/tuicord-v2/plugins/          # honors XDG_CONFIG_HOME
@@ -17,35 +17,52 @@ Plugins live beside `config.toml`:
 The directory is created for you on first run. See `hello.lua` in this folder
 for a working example.
 
-## config.lua (settings & keybindings in Lua)
+## config.lua (primary configuration)
 
-A `config.lua` beside `config.toml` is loaded on every startup **independently
-of the plugin system** — even when `[plugins] enabled = false`. It runs with the
-same sandboxed `tuicord` API, so it's the place to keep personal keybindings and
-setup expressed in Lua rather than as a plugin. It complements `config.toml`
-(static settings) rather than replacing it. See `config.lua` in this folder.
+`config.lua` is loaded exactly once before login and before the TUI is built,
+independently of whether ordinary plugins are enabled. `tuicord.configure`
+strictly overlays the Go `config.Config` defaults using the existing TOML field
+names. Unknown keys and wrong types fail startup with a field path. Accounts and
+auth mode churn are machine state in `ui.toml`, not authored account data.
 
 ```lua
 -- ~/.config/tuicord-v2/config.lua
+tuicord.configure({
+  layout = { channels_width = 24 },
+  plugins = { enabled = true, disabled = {}, grants = {} },
+})
 tuicord.keymap("ctrl+j", function() tuicord.send("gg") end)
-tuicord.command("shrug", function() tuicord.send("¯\\_(ツ)_/¯") end, "send a shrug")
 ```
+
+An older `config.lua` without `configure` remains valid and gets all defaults.
+If config.lua is absent but legacy config.toml exists, that TOML plus colors.conf
+is used unchanged for one launch and an explicit Lua migration is generated;
+the legacy files are not removed.
 
 ## Themes
 
-Plugins (or `config.lua`) register named palettes with `tuicord.theme(name,
-palette)`; switch between them in-app with `;theme <name>` (or `;theme` to list
-them). A palette sets the seven semantic colors:
+`tuicord.theme(name, definition)` validates and registers a typed theme. The
+legacy flat seven-color table remains valid. The preferred form adds semantic
+styles, and partial palettes inherit from the built-in default deterministically:
 
 ```lua
 tuicord.theme("dracula", {
-  background = "#282a36", text = "#f8f8f2", muted = "#6272a4",
-  accent = "#bd93f9", selection = "#44475a", border = "#44475a", error = "#ff5555",
+  palette = {
+    background = "#282a36", text = "#f8f8f2", muted = "#6272a4",
+    accent = "#bd93f9", selection = "#44475a", border = "#44475a", error = "#ff5555",
+  },
+  styles = {
+    ["messages.author"] = { bold = true },
+    ["guilds.selected"] = { bg = "#44475a" },
+  },
 })
+tuicord.use_theme("dracula") -- startup selection in config.lua
 ```
 
-Switching updates surfaces that resolve their color live; a few surfaces that
-snapshot styles at construction only pick up the change on restart.
+Use `;theme <name>` at runtime (or `;theme` to list). Runtime switching updates
+shared semantic cells, the App background/theme, chat cache generation, and
+straightforward MainView/Shell surfaces. Some already-open snapshot-based
+popups and complex widgets still fully update only when reopened.
 
 ## The `tuicord` API
 
@@ -62,7 +79,9 @@ A global `tuicord` table is available to every plugin.
 | `tuicord.react(channel_id, message_id, emoji)` | Add a reaction. |
 | `tuicord.notify(title, body)` | Show a transient notice. |
 | `tuicord.style(selector, opts)` | Recolor a semantic surface at runtime; `opts` is `{fg=, bg=, attrs=, bold=true, ...}`. Selectors mirror `colors.conf`. |
-| `tuicord.theme(name, palette)` | Register a named palette (`{background=, text=, muted=, accent=, selection=, border=, error=}`). Switch to it in-app with `;theme <name>`. |
+| `tuicord.configure(opts)` | Strict typed config overlay; available only in config.lua. |
+| `tuicord.theme(name, definition)` | Register a validated flat or `{palette=, styles=}` theme. |
+| `tuicord.use_theme(name)` | Select during config startup or apply through the live Host at runtime. |
 | `tuicord.overlay(title, lines)` | Open a read-only panel of text `lines` (dismiss with Esc). Rendered with the active theme. |
 | `tuicord.active_channel()` / `active_guild()` / `self_id()` | Current IDs (as strings). |
 | `tuicord.log(...)` | Write to `~/.config/tuicord-v2/plugin.log`. `print` is redirected here too. |
@@ -82,11 +101,12 @@ etc.). Pass them straight back to API calls.
 ## Sandbox and grants
 
 Plugins run without `os`, `io`, `require`, or arbitrary code loading. Grant extra
-capabilities per plugin in `config.toml`:
+capabilities per plugin in `config.lua`:
 
-```toml
-[plugins.grants]
-my-plugin = ["fs", "net"]
+```lua
+tuicord.configure({
+  plugins = { enabled = true, grants = { ["my-plugin"] = {"fs", "net"} } },
+})
 ```
 
 - `fs` adds `tuicord.fs.read/write/list`, confined to the plugin's own data
@@ -95,8 +115,8 @@ my-plugin = ["fs", "net"]
 
 ## Disabling
 
-```toml
-[plugins]
-enabled = false               # turn the whole system off
-disabled = ["hello"]          # or skip specific plugins by name
+```lua
+tuicord.configure({
+  plugins = { enabled = false, disabled = {"hello"}, grants = {} },
+})
 ```
