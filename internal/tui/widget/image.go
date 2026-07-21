@@ -343,6 +343,14 @@ func (w *Image) drawTerminalGraphic(r screen.Region, img image.Image) {
 		place := func(target screen.Rect, placementID uint32) []byte {
 			return kittyPlaceCropped(id, z, bounds, uploadW, uploadH, target, placementID)
 		}
+		// A re-clip uses placement ids base..base+maxReclipStrips-1 (one per
+		// visible sub-rect). ClearAll deletes exactly those placements — not every
+		// placement of the image id — so other placements of the same image (e.g.
+		// the same avatar shown elsewhere, or in the profile popup) survive.
+		clearAll := make([]byte, 0, maxReclipStrips*8)
+		for i := 0; i < maxReclipStrips; i++ {
+			clearAll = append(clearAll, kittyDeletePlacement(id, base+uint32(i))...)
+		}
 		r.AddGraphic(screen.Graphic{
 			Key:        w.graphicKey("kitty"),
 			PayloadKey: payloadKey,
@@ -352,16 +360,18 @@ func (w *Image) drawTerminalGraphic(r screen.Region, img image.Image) {
 			Data:       place(visible, base),
 			// Reclip re-places the image over the given visible sub-rectangles
 			// (each a distinct placement) when an overlay partially occludes it;
-			// ClearAll removes every placement of the image (keeping the payload)
-			// before a re-clip is emitted. See screen.Buffer occlusion.
+			// ClearAll removes those placements before a re-clip is re-emitted.
 			Reclip: func(visible []screen.Rect) []byte {
 				var out []byte
 				for i, sub := range visible {
+					if i >= maxReclipStrips {
+						break
+					}
 					out = append(out, place(sub, base+uint32(i))...)
 				}
 				return out
 			},
-			ClearAll: kittyDeleteAllPlacements(id),
+			ClearAll: clearAll,
 		})
 	case ImageSixel:
 		cropped := cropImage(img, sourceX0, sourceY0, sourceW, sourceH, fullPixelW, fullPixelH)
@@ -585,6 +595,11 @@ func kittyPlace(opts KittyOptions, id uint32) []byte {
 	return []byte(out.String())
 }
 
+// maxReclipStrips bounds the placements a single image uses when re-clipped
+// around an occluder. subtractRect yields at most four rectangles (top, bottom,
+// left, right of the occluder), so four placement ids suffice.
+const maxReclipStrips = 4
+
 // snapToCellMultiple rounds px to the nearest positive multiple of cells, so an
 // image uploaded at that size divides evenly into the cell grid and every cell
 // maps to an exact integer block of source pixels.
@@ -650,16 +665,6 @@ func kittyDeleteImage(id uint32) []byte {
 		return nil
 	}
 	return []byte(fmt.Sprintf("\x1b_Ga=d,d=I,i=%d\x1b\\", id))
-}
-
-// kittyDeleteAllPlacements removes every placement of the image (d=i, lowercase)
-// without freeing the stored payload, so re-clipped sub-placements can be
-// replaced without re-uploading the image.
-func kittyDeleteAllPlacements(id uint32) []byte {
-	if id == 0 {
-		return nil
-	}
-	return []byte(fmt.Sprintf("\x1b_Ga=d,d=i,i=%d\x1b\\", id))
 }
 
 func cursorMove(x, y int) []byte {
