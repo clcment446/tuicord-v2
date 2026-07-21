@@ -1163,11 +1163,14 @@ func TestChatViewUDispatchesFocusedAuthorProfileAction(t *testing.T) {
 	var action rune
 	var author store.UserID
 	view.OnMessageAction(func(got rune, msg store.Message) { action, author = got, msg.AuthorID })
-	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'U'}) {
-		t.Fatal("U was not handled")
-	}
-	if action != 'u' || author != 42 {
-		t.Fatalf("profile action = %q for %d, want u for 42", action, author)
+	for _, key := range []rune{'u', 'U'} {
+		action, author = 0, 0
+		if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: key}) {
+			t.Fatalf("%c was not handled", key)
+		}
+		if action != 'u' || author != 42 {
+			t.Fatalf("%c profile action = %q for %d, want u for 42", key, action, author)
+		}
 	}
 }
 
