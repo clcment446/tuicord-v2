@@ -79,6 +79,18 @@ func NewForumView(styles Styles, ascii bool, onOpen func(store.ChannelID), onLoa
 	return fv
 }
 
+// SetStyles refreshes the retained forum list after a live theme switch.
+func (fv *ForumView) SetStyles(styles Styles) {
+	if fv == nil {
+		return
+	}
+	fv.styles = styles
+	fv.header.SetStyle(styles.Cell("forum.header"))
+	fv.list.SetStyle(styles.Cell("forum.body"))
+	fv.list.SetSelectedStyle(styles.Cell("forum.selected"))
+	fv.list.SetBadgeStyle(styles.Cell("forum.badge"))
+}
+
 func (fv *ForumView) setBody(preview tui.Widget) {
 	left := widget.Column(fv.header, fv.list)
 	left.Children()[0].Layout().Basis = 1

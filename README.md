@@ -11,8 +11,23 @@ go build -o tuicord ./cmd/tuicord
 ./tuicord
 ```
 
-First launch walks you through login (token, QR, or captcha). The token is kept
-in your system keyring afterward.
+First launch creates `~/.config/tuicord-v2/config.lua` and `plugins/`, then
+walks you through login (token, QR, or captcha). The token is kept in your
+system keyring afterward.
+
+## Configuration
+
+`config.lua` is the primary authored configuration. It is executed once before
+login and UI construction. Use strict `tuicord.configure({...})`, register typed
+themes with `tuicord.theme`, and select the startup theme with
+`tuicord.use_theme`. See [`examples/plugins/config.lua`](examples/plugins/config.lua)
+and [`examples/plugins/README.md`](examples/plugins/README.md).
+
+Existing Lua files without `configure` continue to use defaults. When only a
+legacy `config.toml` exists, tuicord uses it and `colors.conf` for that launch,
+atomically generates an equivalent Lua migration, and leaves both legacy files
+untouched. Machine-managed accounts and auth-mode preference live in
+`~/.local/state/tuicord/ui.toml`; tokens remain in the OS keyring.
 
 ## Testing
 

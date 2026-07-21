@@ -253,7 +253,7 @@ func (a *App) Render(root Widget, size Size) *screen.Buffer {
 		size.H = 0
 	}
 	buf := screen.NewBuffer(size.W, size.H)
-	if bg := a.theme.Background; bg.Set() {
+	if bg := a.Theme().Background; bg.Set() {
 		buf.Fill(screen.Rect{W: size.W, H: size.H}, screen.Cell{Content: " ", Style: screen.Style{Bg: bg}})
 	}
 	// Publish the new root before rebuilding focus so every replacement change

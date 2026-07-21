@@ -119,6 +119,8 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	st.TogglePinnedChannel(200)
 	st.ToggleCollapsedFolder(-3)
 	st.ToggleCollapsedCategory(300)
+	st.Accounts = &Accounts{Active: 1, List: []Account{{Key: "token", Label: "Alice", ID: 11}, {Key: "acct-2", Label: "Bob", ID: 22}}}
+	st.AuthPreferredMode = "browser"
 	if err := st.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
@@ -135,6 +137,9 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if !got.IsPinnedGuild(100) || !got.IsPinnedChannel(200) ||
 		!got.IsFolderCollapsed(-3) || !got.IsCategoryCollapsed(300) {
 		t.Fatalf("round-trip lost state: %+v", got)
+	}
+	if got.ActiveAccount() != 1 || len(got.AccountList()) != 2 || got.AccountList()[1].Label != "Bob" || got.AuthPreferredMode != "browser" {
+		t.Fatalf("machine startup state did not round-trip: %+v", got)
 	}
 }
 

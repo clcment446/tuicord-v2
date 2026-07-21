@@ -13,7 +13,9 @@
 // widgets directly. Instead each binding calls a Host function, which is
 // responsible for marshalling the real mutation onto the UI goroutine (via
 // tui.App.Post). The rule is: Lua code runs on the plugin goroutine, its
-// effects land on the UI goroutine.
+// effects land on the UI goroutine. The exception is bootstrap-only
+// declarative configuration and startup theme selection: those mutate a typed
+// config target synchronously before a live UI Host is attached.
 //
 // # Identifiers
 //

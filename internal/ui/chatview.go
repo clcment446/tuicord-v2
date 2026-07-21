@@ -185,6 +185,58 @@ type Styles struct {
 	Cells     map[string]screen.Style
 	Custom    map[string]bool
 	Overrides *config.ColorOverrides
+	State     *StyleState
+}
+
+// StyleState is shared by every copy of Styles. Generation invalidates cached
+// rendered message bodies after a live theme or semantic style change.
+type StyleState struct {
+	Generation uint64
+}
+
+// Version returns the current shared style generation.
+func (s Styles) Version() uint64 {
+	if s.State == nil {
+		return 0
+	}
+	return s.State.Generation
+}
+
+// Install repopulates shared semantic maps and refreshes the legacy aliases on
+// this Styles value. Other copies resolve Cells live; MainView/Shell are given
+// the refreshed value for straightforward snapshot-style widgets.
+func (s *Styles) Install(cells map[string]screen.Style, custom map[string]bool) {
+	if s == nil {
+		return
+	}
+	if s.Cells == nil {
+		s.Cells = make(map[string]screen.Style)
+	}
+	for key := range s.Cells {
+		delete(s.Cells, key)
+	}
+	for key, style := range cells {
+		s.Cells[key] = style
+	}
+	if s.Custom == nil {
+		s.Custom = make(map[string]bool)
+	}
+	for key := range s.Custom {
+		delete(s.Custom, key)
+	}
+	for key, value := range custom {
+		s.Custom[key] = value
+	}
+	s.Text = s.Cells["messages.content"]
+	s.Muted = s.Cells["muted"]
+	s.Accent = s.Cells["accent"]
+	s.Border = s.Cells["panels.border"]
+	s.Pending = s.Cells["pending"]
+	s.Error = s.Cells["error"]
+	if s.State == nil {
+		s.State = &StyleState{}
+	}
+	s.State.Generation++
 }
 
 // Cell returns a semantic cell style, falling back to the legacy palette for
@@ -256,6 +308,14 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 func (w *ChatView) OnReachTop(fn func()) {
 	if w != nil {
 		w.onReachTop = fn
+	}
+}
+
+// SetStyles refreshes the palette used for subsequent renders. The shared
+// generation makes cached message bodies miss and repaint in the new theme.
+func (w *ChatView) SetStyles(styles Styles) {
+	if w != nil {
+		w.styles = styles
 	}
 }
 
@@ -1450,9 +1510,10 @@ type chatCacheEntry struct {
 	// metaRev and componentEpoch version the state a body reads but does not
 	// own: resolved mentions and roles (store), and component presentation
 	// (this widget).
-	metaRev        uint64
-	componentEpoch uint64
-	deps           []mediaDep
+	metaRev         uint64
+	componentEpoch  uint64
+	styleGeneration uint64
+	deps            []mediaDep
 	// gen is the render generation that last used this entry, for sweeping.
 	gen uint64
 }
@@ -1624,7 +1685,8 @@ func (w *ChatView) cachedBody(m store.Message, channel store.ChannelID, width in
 		return nil, false
 	}
 	if e.rev != m.Rev() || e.width != width || e.channel != channel ||
-		e.metaRev != w.store.MetaRev() || e.componentEpoch != w.componentEpoch {
+		e.metaRev != w.store.MetaRev() || e.componentEpoch != w.componentEpoch ||
+		e.styleGeneration != w.styles.Version() {
 		return nil, false
 	}
 	for _, d := range e.deps {
@@ -1661,14 +1723,15 @@ func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int
 	}
 	deps := append([]mediaDep(nil), w.bodyDeps...)
 	w.bodyCache[messagePlacementPrefix(m)] = &chatCacheEntry{
-		lines:          body,
-		rev:            m.Rev(),
-		width:          width,
-		channel:        channel,
-		metaRev:        w.store.MetaRev(),
-		componentEpoch: w.componentEpoch,
-		deps:           deps,
-		gen:            w.renderGen,
+		lines:           body,
+		rev:             m.Rev(),
+		width:           width,
+		channel:         channel,
+		metaRev:         w.store.MetaRev(),
+		componentEpoch:  w.componentEpoch,
+		styleGeneration: w.styles.Version(),
+		deps:            deps,
+		gen:             w.renderGen,
 	}
 }
 

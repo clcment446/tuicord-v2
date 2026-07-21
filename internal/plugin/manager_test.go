@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"awesomeProject/internal/config"
 )
 
 // writePlugin drops a .lua file into dir and returns dir for use as Options.Dir.
@@ -33,7 +35,7 @@ type captureHost struct {
 	reply   chan replyCall
 	style   chan styleCall
 	overlay chan overlayCall
-	theme   chan map[string]string
+	theme   chan config.Theme
 }
 
 type replyCall struct {
@@ -62,7 +64,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		reply:   make(chan replyCall, 8),
 		style:   make(chan styleCall, 8),
 		overlay: make(chan overlayCall, 8),
-		theme:   make(chan map[string]string, 8),
+		theme:   make(chan config.Theme, 8),
 	}
 	h := &Host{
 		Send:          func(content string) { c.sent <- content },
@@ -72,7 +74,7 @@ func newCaptureHost() (*captureHost, *Host) {
 		Reply:         func(ch, msg uint64, content string, mention bool) { c.reply <- replyCall{ch, msg, content, mention} },
 		Style:         func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
 		OpenOverlay:   func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
-		ApplyTheme:    func(palette map[string]string) { c.theme <- palette },
+		ApplyTheme:    func(theme config.Theme) { c.theme <- theme },
 		ActiveChannel: func() uint64 { return 111 },
 		ActiveGuild:   func() uint64 { return 222 },
 		SelfID:        func() uint64 { return 333 },
@@ -423,7 +425,7 @@ func TestFSRejectsAbsoluteTraversalAndSymlinkEscapes(t *testing.T) {
 func TestExamplePluginsLoad(t *testing.T) {
 	// The shipped samples must stay valid against the live API.
 	_, h := newCaptureHost()
-	m := NewManager(Options{Dir: filepath.Join("..", "..", "examples", "plugins"), Host: h})
+	m := NewManager(Options{Dir: filepath.Join("..", "..", "examples", "plugins"), Host: h, Disabled: []string{"config"}})
 	defer m.Close()
 	if errs := m.Load(); len(errs) != 0 {
 		t.Fatalf("example plugins failed to load: %v", errs)
@@ -448,6 +450,22 @@ func TestExamplePluginsLoad(t *testing.T) {
 // isolation (with the fs grant) and drives every command, asserting each API
 // surface reaches the host. It is the closest automated stand-in for a manual
 // run of the plugin system.
+func TestExampleConfigLoadsAndSelectsTheme(t *testing.T) {
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	path := filepath.Join("..", "..", "examples", "plugins", "config.lua")
+	if err := m.LoadConfig(path); err != nil {
+		t.Fatalf("example config.lua failed to load: %v", err)
+	}
+	if name, theme, ok := m.ConsumeStartupTheme(); !ok || name != "mono" || theme.Palette.Background != "#000000" {
+		t.Fatalf("example startup theme = %q %+v %v", name, theme.Palette, ok)
+	}
+	if cfg.Layout.ChannelsWidth != 20 || !contains(m.CommandNames(), "shrug") {
+		t.Fatalf("example config/registrations were not applied: %+v %v", cfg.Layout, m.CommandNames())
+	}
+}
+
 func TestEverythingPluginExercisesAllSurfaces(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("..", "..", "examples", "plugins", "everything.lua"))
 	if err != nil {
@@ -661,9 +679,9 @@ func TestThemeRegisterAndApply(t *testing.T) {
 		t.Fatal("ApplyTheme returned false for a registered theme")
 	}
 	select {
-	case palette := <-c.theme:
-		if palette["background"] != "#282a36" || palette["accent"] != "#bd93f9" {
-			t.Fatalf("applied palette = %v", palette)
+	case theme := <-c.theme:
+		if theme.Palette.Background != "#282a36" || theme.Palette.Accent != "#bd93f9" {
+			t.Fatalf("applied palette = %v", theme.Palette)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for ApplyTheme")
@@ -700,6 +718,195 @@ func TestLoadConfigLua(t *testing.T) {
 	}
 	if !contains(m.Loaded(), "config") {
 		t.Fatalf("config context not marked loaded: %v", m.Loaded())
+	}
+}
+
+func TestConfigConfigureAndStartupThemeSelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.lua")
+	body := `
+		tuicord.configure({ layout = { channels_width = 44 }, plugins = { enabled = false } })
+		tuicord.theme("startup", {
+			palette = { background = "#010203", accent = "#112233" },
+			styles = { ["messages.author"] = { fg = "#abcdef", bold = true } },
+		})
+		tuicord.use_theme("startup")
+		tuicord.command("kept", function() end)
+	`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	if err := m.LoadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Layout.ChannelsWidth != 44 || cfg.Plugins == nil || cfg.Plugins.Enabled {
+		t.Fatalf("configured cfg = %+v", cfg)
+	}
+	name, theme, ok := m.ConsumeStartupTheme()
+	if !ok || name != "startup" || theme.Palette.Background != "#010203" || theme.Palette.Text != config.Default().Colors.Text {
+		t.Fatalf("startup theme = %q %+v %v", name, theme.Palette, ok)
+	}
+	if !theme.Styles.HasOverride("messages.author") || !contains(m.CommandNames(), "kept") {
+		t.Fatal("config registrations/styles were not retained")
+	}
+}
+
+func TestConfigRejectsDuplicateConfigure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.lua")
+	if err := os.WriteFile(path, []byte(`
+		tuicord.configure({ layout = { channels_width = 44 } })
+		tuicord.configure({ layout = { channels_width = 55 } })
+	`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	if err := m.LoadConfig(path); err == nil || !strings.Contains(err.Error(), "only be called once") {
+		t.Fatalf("duplicate configure error = %v", err)
+	}
+	if cfg != config.Default() {
+		t.Fatalf("duplicate configure mutated config: %+v", cfg)
+	}
+}
+
+func TestStyleRejectsInvalidPropertiesBeforeHost(t *testing.T) {
+	dir := writePlugin(t, "bad-style", `tuicord.style("messages.author", { fg = "not-a-color" })`)
+	called := false
+	m := NewManager(Options{Dir: dir, Host: &Host{Style: func(string, map[string]string) { called = true }}})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 1 || !strings.Contains(errs[0].Error(), "invalid hex color") {
+		t.Fatalf("invalid style errors = %v", errs)
+	}
+	if called {
+		t.Fatal("invalid style reached Host")
+	}
+}
+
+func TestBootstrapConfigKeyUsesHostAttachedLater(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.lua")
+	if err := os.WriteFile(path, []byte(`tuicord.keymap("ctrl+j", function() tuicord.send("attached") end)`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg, Host: &Host{}})
+	defer m.Close()
+	if err := m.LoadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	c, live := newCaptureHost()
+	m.AttachHost(live)
+	if !m.RunKey("ctrl+j") || recvStr(t, c.sent) != "attached" {
+		t.Fatal("bootstrap keymap did not use attached live Host")
+	}
+}
+
+func TestFailedConfigLeavesTypedConfigAndRegistrationsUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.lua")
+	if err := os.WriteFile(path, []byte(`
+		tuicord.configure({ layout = { channels_width = 77 } })
+		tuicord.command("leaked", function() end)
+		error("stop")
+	`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	if err := m.LoadConfig(path); err == nil {
+		t.Fatal("expected config load error")
+	}
+	if cfg != config.Default() || contains(m.CommandNames(), "leaked") {
+		t.Fatalf("failed config mutated state: cfg=%+v commands=%v", cfg, m.CommandNames())
+	}
+}
+
+func TestAttachHostAppliesUnconsumedStartupTheme(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.lua")
+	if err := os.WriteFile(path, []byte(`
+		tuicord.theme("startup", { background = "#010203" })
+		tuicord.use_theme("startup")
+	`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	if err := m.LoadConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	applied := make(chan config.Theme, 1)
+	m.AttachHost(&Host{ApplyTheme: func(theme config.Theme) { applied <- theme }})
+	select {
+	case theme := <-applied:
+		if theme.Palette.Background != "#010203" {
+			t.Fatalf("attached theme = %+v", theme.Palette)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AttachHost did not apply startup selection")
+	}
+}
+
+func TestConfigureRejectedInPluginAndRollsBack(t *testing.T) {
+	dir := writePlugin(t, "bad-config", `
+		tuicord.command("leaked", function() end)
+		tuicord.configure({ layout = { channels_width = 99 } })
+	`)
+	m := NewManager(Options{Dir: dir})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 1 {
+		t.Fatalf("load errors = %v", errs)
+	}
+	if contains(m.CommandNames(), "leaked") {
+		t.Fatal("failed plugin leaked a registration")
+	}
+}
+
+func TestInvalidThemeDeclarationFailsTransactionally(t *testing.T) {
+	dir := writePlugin(t, "bad-theme", `
+		tuicord.theme("good-before-error", { accent = "#123456" })
+		tuicord.theme("invalid", { palette = { accent = "not-a-color" } })
+	`)
+	m := NewManager(Options{Dir: dir})
+	defer m.Close()
+	if errs := m.Load(); len(errs) != 1 {
+		t.Fatalf("load errors = %v", errs)
+	}
+	if names := m.ThemeNames(); len(names) != 0 {
+		t.Fatalf("failed plugin leaked themes: %v", names)
+	}
+}
+
+func TestGeneratedLegacyMigrationLoadsAsLuaConfig(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", root)
+	appDir := filepath.Join(root, config.AppName)
+	if err := os.MkdirAll(appDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(appDir, "config.toml"), []byte("[layout]\nchannels_width=39\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, startup, err := config.LoadStartup(); err != nil || !startup.Legacy {
+		t.Fatalf("migration startup = %+v, %v", startup, err)
+	}
+	cfg, startup, err := config.LoadStartup()
+	if err != nil || !startup.ExecuteLua {
+		t.Fatalf("Lua startup = %+v, %v", startup, err)
+	}
+	m := NewManager(Options{ConfigTarget: &cfg})
+	defer m.Close()
+	if err := m.LoadConfig(startup.LuaPath); err != nil {
+		t.Fatalf("load generated migration: %v", err)
+	}
+	if cfg.Layout.ChannelsWidth != 39 {
+		t.Fatalf("migrated channels width = %d", cfg.Layout.ChannelsWidth)
+	}
+	if name, _, ok := m.ConsumeStartupTheme(); !ok || name != "legacy-migrated" {
+		t.Fatalf("migrated startup theme = %q, %v", name, ok)
 	}
 }
 
@@ -775,9 +982,9 @@ func TestFailedStartupRestoresShadowedRegistrations(t *testing.T) {
 		t.Fatal("restored theme is not registered")
 	}
 	select {
-	case palette := <-c.theme:
-		if palette["background"] != "#111111" {
-			t.Fatalf("restored theme palette = %v", palette)
+	case theme := <-c.theme:
+		if theme.Palette.Background != "#111111" {
+			t.Fatalf("restored theme palette = %v", theme.Palette)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for restored theme")

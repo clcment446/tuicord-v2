@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
@@ -8,86 +9,73 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
-	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
 )
 
-// setupPlugins constructs the Lua plugin manager, wires its Host to the
-// orchestrator/UI, loads the optional config.lua and the plugins directory, and
-// registers the manager as the app's event sink and the shell's command/key
-// host.
-//
-// config.lua is loaded whenever it exists, independent of the plugins toggle,
-// so users can express settings and keybindings in Lua without writing a
-// plugin. The plugins directory is loaded only when [plugins].enabled.
-//
-// It never fails startup: a missing file or a broken plugin is reported to the
-// user via a toast and logged, but the client keeps running. It returns the
-// manager so the caller can Close it on shutdown, or nil when there is nothing
-// to load.
-func setupPlugins(orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles) *plugin.Manager {
+// newBootstrapPluginManager creates the single process-wide Lua manager before
+// login or any UI object. Its Host is intentionally inert; config mutation and
+// startup theme selection are synchronous typed operations owned by Manager.
+func newBootstrapPluginManager(cfg *config.Config) (*plugin.Manager, *os.File, error) {
 	pluginsDir, err := config.PluginsDir()
 	if err != nil {
-		shell.ShowToast("Plugins", err)
-		return nil
+		return nil, nil, err
 	}
 	base := filepath.Dir(pluginsDir)
-	configLua := filepath.Join(base, "config.lua")
-
-	_, statErr := os.Stat(configLua)
-	hasConfigLua := statErr == nil
-	if !cfg.PluginsEnabled() && !hasConfigLua {
-		return nil
-	}
-
 	var logW *os.File
 	if f, err := os.OpenFile(filepath.Join(base, "plugin.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644); err == nil {
 		logW = f
 	}
-
-	host := newPluginHost(orch, uiApp, shell, cfg.ColorOverrides, styles.Cells, cfg.Colors)
-
-	var grants map[string][]string
-	var disabled []string
-	if cfg.Plugins != nil {
-		grants = cfg.Plugins.Grants
-		disabled = cfg.Plugins.Disabled
-	}
-
 	opts := plugin.Options{
-		Dir:      pluginsDir,
-		DataDir:  filepath.Join(base, "plugin-data"),
-		Disabled: disabled,
-		Grants:   grants,
-		Host:     host,
+		Dir:          pluginsDir,
+		DataDir:      filepath.Join(base, "plugin-data"),
+		Host:         &plugin.Host{},
+		ConfigTarget: cfg,
 	}
 	if logW != nil {
 		opts.Log = logW
 	}
-
-	mgr := plugin.NewManager(opts)
-	// config.lua first: its settings/keybinds apply even when plugins are off.
-	if err := mgr.LoadConfig(configLua); err != nil {
-		shell.ShowToast("config.lua", err)
-	}
-	if cfg.PluginsEnabled() {
-		if errs := mgr.Load(); len(errs) > 0 {
-			shell.ShowToast("Plugin load", errs[0])
-		}
-	}
-
-	orch.SetEventSink(mgr)
-	shell.SetPluginHost(mgr)
-	return mgr
+	return plugin.NewManager(opts), logW, nil
 }
 
-// newPluginHost builds the side-effecting Host the tuicord Lua API binds
-// against. Mutations marshal onto the UI goroutine via Post. Synchronous state
-// accessors use App's atomic snapshot instead: a Post-and-receive round trip can
-// never complete before the UI loop starts or after it shuts down, deadlocking
-// plugin startup or Manager.Close.
-func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, cells map[string]screen.Style, palette config.Colors) *plugin.Host {
+// attachAndLoadPlugins preserves config.lua registrations by populating the
+// manager's bootstrap Host in place, then loads ordinary plugins under the
+// Lua-derived policy. Plugin startup side effects Post to the now-live UI Host.
+func attachAndLoadPlugins(mgr *plugin.Manager, orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles, activeTheme config.Theme) []error {
+	if mgr == nil {
+		return nil
+	}
+	mgr.AttachHost(newPluginHost(orch, uiApp, shell, cfg.ColorOverrides, styles, activeTheme))
+	orch.SetEventSink(mgr)
+	shell.SetPluginHost(mgr)
+
+	var disabled []string
+	var grants map[string][]string
+	if cfg.Plugins != nil {
+		disabled = cfg.Plugins.Disabled
+		grants = cfg.Plugins.Grants
+	}
+	mgr.SetPluginConfig(disabled, grants)
+	if !cfg.PluginsEnabled() {
+		return nil
+	}
+	return mgr.Load()
+}
+
+// newPluginHost builds the live side-effecting Host. Every UI/store mutation is
+// posted; synchronous accessors use app's immutable atomic snapshot and never
+// wait for an event loop that may not be running.
+func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, styles ui.Styles, activeTheme config.Theme) *plugin.Host {
+	install := func(theme config.Theme) {
+		activeTheme = theme
+		overrides.Replace(theme.Styles)
+		fresh := config.CellStyles(theme.Palette.Styles(), overrides)
+		styles.Install(fresh, config.CustomCellKeys(fresh, overrides))
+		if shell != nil {
+			shell.SetStyles(styles)
+		}
+		uiApp.SetTheme(tuiTheme(theme.Palette, overrides))
+	}
 	return &plugin.Host{
 		Style: func(selector string, props map[string]string) {
 			uiApp.Post(func() {
@@ -98,29 +86,23 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 					}
 				}
 				if changed {
+					fresh := config.CellStyles(activeTheme.Palette.Styles(), overrides)
+					styles.Install(fresh, config.CustomCellKeys(fresh, overrides))
+					if shell != nil {
+						shell.SetStyles(styles)
+					}
 					uiApp.Invalidate()
 				}
 			})
 		},
-		ApplyTheme: func(p map[string]string) {
-			uiApp.Post(func() {
-				palette = mergePalette(palette, p)
-				fresh := config.CellStyles(palette.Styles(), overrides)
-				// Repopulate the shared cells map in place so every widget that
-				// resolves via Styles.Cell picks up the new palette on the next
-				// render, without rebuilding the widget tree.
-				for k := range cells {
-					delete(cells, k)
-				}
-				for k, v := range fresh {
-					cells[k] = v
-				}
-				uiApp.Invalidate()
-			})
+		ApplyTheme: func(theme config.Theme) {
+			uiApp.Post(func() { install(theme) })
 		},
 		OpenOverlay: func(title string, lines []string) {
 			uiApp.Post(func() {
-				shell.OpenPluginOverlay(title, lines)
+				if shell != nil {
+					shell.OpenPluginOverlay(title, lines)
+				}
 				uiApp.Invalidate()
 			})
 		},
@@ -133,19 +115,20 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 		Reply: func(channelID, messageID uint64, content string, mention bool) {
 			uiApp.Post(func() {
 				msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID))
-				if !ok {
-					return
+				if ok {
+					orch.Reply(content, msg, mention)
 				}
-				orch.Reply(content, msg, mention)
 			})
 		},
 		React: func(channelID, messageID uint64, emoji string) {
-			uiApp.Post(func() {
-				orch.AddReaction(store.ChannelID(channelID), store.MessageID(messageID), emoji)
-			})
+			uiApp.Post(func() { orch.AddReaction(store.ChannelID(channelID), store.MessageID(messageID), emoji) })
 		},
 		Notify: func(title, body string) {
-			uiApp.Post(func() { shell.ShowNotice(title, body) })
+			uiApp.Post(func() {
+				if shell != nil {
+					shell.ShowNotice(title, body)
+				}
+			})
 		},
 		ActiveChannel: func() uint64 { return uint64(orch.Snapshot().ActiveChannel) },
 		ActiveGuild:   func() uint64 { return uint64(orch.Snapshot().ActiveGuild) },
@@ -153,25 +136,6 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 	}
 }
 
-// mergePalette overlays hex values from a plugin theme onto the current palette.
-// Keys mirror config.Colors fields; unknown or empty values are ignored.
-func mergePalette(base config.Colors, p map[string]string) config.Colors {
-	set := func(dst *string, key string) {
-		if v, ok := p[key]; ok && v != "" {
-			*dst = v
-		}
-	}
-	set(&base.Background, "background")
-	set(&base.Text, "text")
-	set(&base.Muted, "muted")
-	set(&base.Accent, "accent")
-	set(&base.Selection, "selection")
-	set(&base.Border, "border")
-	set(&base.Error, "error")
-	return base
-}
-
-// findMessage locates a message by ID within a channel's loaded history.
 func findMessage(st *store.Store, channel store.ChannelID, id store.MessageID) (store.Message, bool) {
 	if st == nil {
 		return store.Message{}, false
@@ -182,4 +146,11 @@ func findMessage(st *store.Store, channel store.ChannelID, id store.MessageID) (
 		}
 	}
 	return store.Message{}, false
+}
+
+func pluginLoadError(errs []error) error {
+	if len(errs) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d plugin(s) failed; first: %w", len(errs), errs[0])
 }

@@ -1,5 +1,7 @@
 package plugin
 
+import "awesomeProject/internal/config"
+
 // Host is the set of side-effecting operations the tuicord Lua API can perform.
 // It is a struct of functions rather than an interface so the wiring layer can
 // supply closures that capture the app/UI without this package importing them,
@@ -33,8 +35,8 @@ type Host struct {
 	Style func(selector string, props map[string]string)
 	// OpenOverlay shows a read-only panel of text lines with the given title.
 	OpenOverlay func(title string, lines []string)
-	// ApplyTheme swaps the active color palette. Keys are the semantic palette
-	// names (background, text, muted, accent, selection, border, error); values
-	// are hex colors. Missing keys keep their current value.
-	ApplyTheme func(palette map[string]string)
+	// ApplyTheme swaps the active validated theme. Runtime hosts marshal this
+	// mutation onto the UI goroutine; bootstrap selection is resolved directly
+	// into Config before a live Host is attached.
+	ApplyTheme func(theme config.Theme)
 }

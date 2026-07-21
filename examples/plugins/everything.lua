@@ -1,10 +1,9 @@
 -- everything.lua — exercises every tuicord plugin API surface.
 --
 -- Drop it in ~/.config/tuicord-v2/plugins/ and, to test the opt-in grants, add
--- to config.toml:
+-- inside the plugins table passed to tuicord.configure in config.lua:
 --
---   [plugins.grants]
---   everything = ["fs", "net"]
+--   grants = { everything = {"fs", "net"} },
 --
 -- Then use the ;commands below. `;status` opens an overlay summarizing live
 -- state and how many of each event has fired.

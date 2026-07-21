@@ -35,10 +35,25 @@ func WithTheme(theme Theme) Option {
 	}
 }
 
+// SetTheme safely replaces the live application theme and invalidates the
+// frame so the background and toolkit-level palette repaint immediately.
+func (a *App) SetTheme(theme Theme) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.theme = theme
+	a.dirty = true
+	a.mu.Unlock()
+	a.signal()
+}
+
 // Theme returns the App's configured theme, or the zero Theme if none was set.
 func (a *App) Theme() Theme {
 	if a == nil {
 		return Theme{}
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	return a.theme
 }

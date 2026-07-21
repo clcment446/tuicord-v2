@@ -119,6 +119,21 @@ type Shell struct {
 // SetPluginHost registers the Lua plugin manager for command and key dispatch.
 func (s *Shell) SetPluginHost(host PluginHost) { s.plugins = host }
 
+// SetStyles refreshes the Shell's palette for new notices, menus, and overlays,
+// and updates the straightforward retained MainView surfaces.
+func (s *Shell) SetStyles(styles Styles) {
+	if s == nil {
+		return
+	}
+	s.styles = styles
+	if s.mv != nil {
+		s.mv.SetStyles(styles)
+	}
+	if menu, ok := s.popup.(*widget.Menu); ok {
+		s.styleMenu(menu)
+	}
+}
+
 // OpenPluginOverlay shows a read-only panel of plugin-supplied text lines. It
 // swaps in a full-screen overlay dismissed with Esc, like the help panel. Call
 // on the UI goroutine.
@@ -1847,14 +1862,12 @@ func (s *Shell) styleMenu(menu *widget.Menu) {
 	if menu == nil {
 		return
 	}
-	menu.SetStyle(s.styles.Text)
-	menu.SetSelectedStyle(s.styles.Accent)
-	menu.SetBorderStyle(s.styles.Border)
-	danger := s.styles.Error
-	danger.Attrs |= screen.Bold
-	menu.SetDangerStyle(danger)
-	menu.SetDisabledStyle(s.styles.Muted)
-	menu.SetKeyStyle(s.styles.Muted)
+	menu.SetStyle(s.styles.Cell("menu"))
+	menu.SetSelectedStyle(s.styles.Cell("menu.selected"))
+	menu.SetBorderStyle(s.styles.Cell("panels.border"))
+	menu.SetDangerStyle(s.styles.Cell("menu.danger"))
+	menu.SetDisabledStyle(s.styles.Cell("menu.disabled"))
+	menu.SetKeyStyle(s.styles.Cell("menu.key"))
 }
 
 func (s *Shell) canManageMessages(channel store.ChannelID) bool {
