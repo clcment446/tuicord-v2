@@ -50,6 +50,7 @@ type ChatView struct {
 	focusedExplicit         bool
 	keyboardFocused         bool
 	vimNavigation           bool
+	vimKeys                 config.VimKeys
 	vimPendingG             bool
 	vimStickOldest          bool
 	mouseBreakpointTracking bool
@@ -439,6 +440,19 @@ func (w *ChatView) SetFocusOwner(focused bool) {
 func (w *ChatView) SetVimNavigation(enabled bool) {
 	if w != nil {
 		w.vimNavigation = enabled
+		if w.vimKeys == (config.VimKeys{}) {
+			w.vimKeys = config.Default().Keys.Vim
+		}
+	}
+}
+
+// SetVimKeys replaces the modal action map used by this view.
+func (w *ChatView) SetVimKeys(keys config.VimKeys) {
+	if w != nil {
+		if keys == (config.VimKeys{}) {
+			keys = config.Default().Keys.Vim
+		}
+		w.vimKeys = keys
 	}
 }
 
@@ -2357,8 +2371,8 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			w.vimPendingG = false
 			w.vimStickOldest = false
 		}
-		if vimRune && w.vimNavigation {
-			if ev.Rune == 'g' {
+		if w.vimNavigation {
+			if keyMatches(ev, w.vimKeys.JumpOldest) {
 				if w.vimPendingG {
 					w.vimPendingG = false
 					w.scrollToOldest()
@@ -2369,43 +2383,56 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			}
 			w.vimPendingG = false
 			w.vimStickOldest = false
-			switch ev.Rune {
-			case 'G':
+			switch {
+			case keyMatches(ev, w.vimKeys.JumpNewest):
 				w.scrollToNewest()
 				return true
-			case 'V':
+			case keyMatches(ev, w.vimKeys.Select):
 				if !w.keyboardFocused || w.focusStopIndex < 0 {
 					return false
 				}
 				w.selectionActive = !w.selectionActive
 				w.selectionStart = w.focusStopIndex
 				return true
-			case 'Y':
+			case keyMatches(ev, w.vimKeys.Copy):
 				if !w.keyboardFocused || !w.focusedMessageSet || w.onMessageCopy == nil {
 					return false
 				}
 				w.onMessageCopy(w.selectedMessages())
 				w.selectionActive = false
 				return true
-			case 'j':
+			case keyMatches(ev, w.vimKeys.ScrollDown):
 				w.scrollDown()
 				return true
-			case 'k':
+			case keyMatches(ev, w.vimKeys.ScrollUp):
 				w.scrollUp()
 				return true
-			case 'J':
+			case keyMatches(ev, w.vimKeys.NextMessage):
 				w.moveFocus(1)
 				return true
-			case 'K':
+			case keyMatches(ev, w.vimKeys.PrevMessage):
 				w.moveFocus(-1)
 				return true
-			case '-':
+			case keyMatches(ev, w.vimKeys.Fold):
 				if w.foldFocusedHeader() {
 					return true
 				}
-			case 'd', 'D', 'r', 'R', 'e', 'E', 'a', 'A', 'u', 'U':
+			case keyMatches(ev, w.vimKeys.Delete), keyMatches(ev, w.vimKeys.Reply), keyMatches(ev, w.vimKeys.Edit), keyMatches(ev, w.vimKeys.AddReaction), keyMatches(ev, w.vimKeys.Profile):
 				if w.keyboardFocused && w.focusedMessageSet && w.onMessageAction != nil {
-					w.onMessageAction(unicode.ToLower(ev.Rune), w.focusedMessage)
+					action := unicode.ToLower(ev.Rune)
+					for _, candidate := range []struct {
+						spec   string
+						action rune
+					}{
+						{w.vimKeys.Delete, 'd'}, {w.vimKeys.Reply, 'r'}, {w.vimKeys.Edit, 'e'},
+						{w.vimKeys.AddReaction, 'a'}, {w.vimKeys.Profile, 'u'},
+					} {
+						if keyMatches(ev, candidate.spec) {
+							action = candidate.action
+							break
+						}
+					}
+					w.onMessageAction(action, w.focusedMessage)
 					return true
 				}
 			}

@@ -106,10 +106,35 @@ type Keys struct {
 	// Also available as the ;paste command.
 	PasteImage string `toml:"paste_image"`
 	// Video player controls, active only while its overlay is open.
-	VideoPause        string `toml:"video_pause"`
-	VideoSeekBackward string `toml:"video_seek_backward"`
-	VideoSeekForward  string `toml:"video_seek_forward"`
-	VideoReplay       string `toml:"video_replay"`
+	VideoPause        string  `toml:"video_pause"`
+	VideoSeekBackward string  `toml:"video_seek_backward"`
+	VideoSeekForward  string  `toml:"video_seek_forward"`
+	VideoReplay       string  `toml:"video_replay"`
+	Vim               VimKeys `toml:"vim"`
+}
+
+// VimKeys maps modal chat actions. Empty values disable an action.
+type VimKeys struct {
+	Insert      string `toml:"insert"`
+	ExitInput   string `toml:"exit_input"`
+	ScrollDown  string `toml:"scroll_down"`
+	ScrollUp    string `toml:"scroll_up"`
+	JumpOldest  string `toml:"jump_oldest"`
+	JumpNewest  string `toml:"jump_newest"`
+	NextMessage string `toml:"next_message"`
+	PrevMessage string `toml:"previous_message"`
+	Select      string `toml:"select"`
+	Copy        string `toml:"copy"`
+	Fold        string `toml:"fold"`
+	Profile     string `toml:"profile"`
+	Delete      string `toml:"delete"`
+	Reply       string `toml:"reply"`
+	Edit        string `toml:"edit"`
+	AddReaction string `toml:"add_reaction"`
+	FocusPrev   string `toml:"focus_previous"`
+	FocusNext   string `toml:"focus_next"`
+	PanelPrev   string `toml:"panel_previous"`
+	PanelNext   string `toml:"panel_next"`
 }
 
 // Nitro controls how the picker sends emoji and stickers the account cannot use
@@ -373,6 +398,13 @@ func Default() Config {
 			VideoSeekBackward: "left",
 			VideoSeekForward:  "right",
 			VideoReplay:       "r",
+			Vim: VimKeys{
+				Insert: "i", ExitInput: "esc", ScrollDown: "j", ScrollUp: "k",
+				JumpOldest: "g", JumpNewest: "G", NextMessage: "J", PrevMessage: "K",
+				Select: "V", Copy: "Y", Fold: "-", Profile: "u", Delete: "d",
+				Reply: "r", Edit: "e", AddReaction: "a",
+				FocusPrev: "h", FocusNext: "l", PanelPrev: "H", PanelNext: "L",
+			},
 		},
 		Nitro: Nitro{Fake: true},
 		Media: Media{

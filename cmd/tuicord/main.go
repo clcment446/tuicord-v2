@@ -140,6 +140,7 @@ func run() error {
 		tui.WithMouse(cfg.Accessibility.MouseOn),
 		tui.WithFocusableSplits(cfg.Accessibility.FocusSplits),
 		tui.WithTTYColors(cfg.Display.TTYColors),
+		tui.WithVimKeys(cfg.Keys.Vim.FocusPrev, cfg.Keys.Vim.FocusNext, cfg.Keys.Vim.PanelPrev, cfg.Keys.Vim.PanelNext),
 	)
 	st := store.New(0)
 	orch := app.New(ning, st, uiApp)

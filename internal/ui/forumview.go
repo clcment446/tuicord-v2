@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
@@ -41,6 +42,7 @@ type ForumView struct {
 	styles        Styles
 	ascii         bool
 	vimNavigation bool
+	vimKeys       config.VimKeys
 	forum         store.Channel
 	targets       []forumTarget
 
@@ -276,7 +278,19 @@ func (fv *ForumView) VimFocusEnabled() bool { return fv != nil && fv.vimNavigati
 func (fv *ForumView) SetVimNavigation(enabled bool) {
 	if fv != nil {
 		fv.vimNavigation = enabled
+		if fv.vimKeys == (config.VimKeys{}) {
+			fv.vimKeys = config.Default().Keys.Vim
+		}
 		fv.list.SetVimNavigation(enabled)
+	}
+}
+
+func (fv *ForumView) SetVimKeys(keys config.VimKeys) {
+	if fv != nil {
+		if keys == (config.VimKeys{}) {
+			keys = config.Default().Keys.Vim
+		}
+		fv.vimKeys = keys
 	}
 }
 
@@ -300,9 +314,9 @@ func (fv *ForumView) Handle(ev tui.Event) bool {
 			case input.KeyDown:
 				direction = 1
 			case input.KeyRune:
-				if fv.vimNavigation && key.Mods == 0 && key.Rune == 'k' {
+				if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollUp) {
 					direction = -1
-				} else if fv.vimNavigation && key.Mods == 0 && key.Rune == 'j' {
+				} else if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollDown) {
 					direction = 1
 				}
 			}
