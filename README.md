@@ -38,3 +38,6 @@ and there's a Lua plugin system for adding commands and restyling things.
 Entry point is `cmd/tuicord`. Everything else is under `internal/` — `discord`
 (gateway), `tui`/`ui` (rendering), `plugin` (Lua), `media` (images),
 `auth`/`keyring` (login). Demos live in `examples/`.
+
+## Release
+Modify PKGBUILD pkgver then run `./releash.sh` with the gh cli installed.
