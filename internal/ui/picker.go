@@ -330,7 +330,7 @@ func (p *Picker) refilter() {
 			if img != nil {
 				b := img.Bounds()
 				item.Label = "  " + item.Label
-				item.Graphic = &widget.ItemGraphic{Image: img, ImageID: stableImageID(e.mediaURL), PlacementID: stableImageID("picker:" + e.favoriteKey), PixelWidth: b.Dx(), PixelHeight: b.Dy(), Cols: 2}
+				item.Graphic = &widget.ItemGraphic{Image: img, ImageID: stableImageID(e.mediaURL), PlacementID: stableImageID("picker:" + e.favoriteKey), PixelWidth: b.Dx(), PixelHeight: b.Dy(), Cols: 2, Z: -1}
 			}
 		}
 		if !e.usable {

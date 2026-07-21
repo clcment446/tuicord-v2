@@ -86,9 +86,13 @@ func frameWithDiff(prev, next *Buffer, sync bool, diff []byte) []byte {
 // should be emitted after cell diffs so terminal images sit on top of fallback
 // cells.
 func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
-	prevByKey := graphicMap(prev)
-	prevPayloads := graphicPayloadSet(prev)
-	nextGraphics := next.Graphics()
+	// Occlusion: resolve both frames' graphics against their overlay coverage, so
+	// a graphic covered by a higher layer is dropped (its Clear emitted) or
+	// re-clipped around the overlay, and reappears whole once the overlay is gone.
+	prevGraphics := prev.resolveGraphics()
+	nextGraphics := next.resolveGraphics()
+	prevByKey := graphicMap(prevGraphics)
+	prevPayloads := graphicPayloadSet(prevGraphics)
 	nextByKey := make(map[string]Graphic, len(nextGraphics))
 	nextPayloads := make(map[string]struct{}, len(nextGraphics))
 	for _, g := range nextGraphics {
@@ -103,7 +107,11 @@ func GraphicDiff(prev, next *Buffer) (clears, graphics []byte) {
 		if ok && equalGraphic(old, next) {
 			continue
 		}
-		if !ok || old.PayloadKey != next.PayloadKey {
+		// A re-clipped (split) graphic occupies a variable set of placements, so
+		// any change must delete them all first (old.Clear is ClearAll) before the
+		// new bytes are placed — the same-payload fast path would otherwise leave
+		// stale sub-placements behind.
+		if !ok || old.PayloadKey != next.PayloadKey || old.split || next.split {
 			clears = append(clears, old.Clear...)
 			if _, stillUsed := nextPayloads[old.PayloadKey]; !stillUsed {
 				clears = append(clears, old.Free...)
@@ -189,8 +197,7 @@ func equalCell(a, b Cell) bool {
 		a.continuation == b.continuation
 }
 
-func graphicMap(buf *Buffer) map[string]Graphic {
-	graphics := buf.Graphics()
+func graphicMap(graphics []Graphic) map[string]Graphic {
 	out := make(map[string]Graphic, len(graphics))
 	for _, g := range graphics {
 		out[g.Key] = g
@@ -198,8 +205,7 @@ func graphicMap(buf *Buffer) map[string]Graphic {
 	return out
 }
 
-func graphicPayloadSet(buf *Buffer) map[string]struct{} {
-	graphics := buf.Graphics()
+func graphicPayloadSet(graphics []Graphic) map[string]struct{} {
 	out := make(map[string]struct{}, len(graphics))
 	for _, g := range graphics {
 		if g.PayloadKey != "" {

@@ -171,7 +171,13 @@ func (w *Image) SetPixelSize(width, height int) *Image {
 	return w
 }
 
-// SetZ sets the Kitty z-index used by terminal graphics rendering.
+// SetZ sets the Kitty z-index used by terminal graphics rendering. The
+// convention across the app is z=-1 for every graphic: below text within its
+// own draw layer (so glyphs like the ▶ play marker and focus highlights stay on
+// top), while overlap between UI layers — a popup or toast over an inline image
+// — is resolved by buffer occlusion, not z (see screen.Buffer.SetLayer). Note a
+// z=-1 image still sits *above* cell backgrounds, so an overlay cannot hide it
+// by painting a background; only occlusion (dropping the placement) can.
 func (w *Image) SetZ(z int) *Image {
 	if w == nil {
 		return nil
@@ -319,31 +325,43 @@ func (w *Image) drawTerminalGraphic(r screen.Region, img image.Image) {
 	sourceH := maxInt(sourceY1-sourceY0, 1)
 	switch w.mode {
 	case ImageKitty:
-		payloadKey, upload, err := w.kittyUpload(img, fullPixelW, fullPixelH)
+		// Upload at an exact cell-multiple pixel size so every cell maps to a whole
+		// integer block of source pixels. Re-clipped strips (occlusion) are then
+		// pixel-perfect sub-windows of one shared grid — no per-strip rounding, no
+		// seam. Display size (c/r cells) is unchanged; kittyUpload resamples to
+		// these dims, a shift of at most half a cell from the fitted size.
+		uploadW := snapToCellMultiple(fullPixelW, fullCellsW)
+		uploadH := snapToCellMultiple(fullPixelH, fullCellsH)
+		payloadKey, upload, err := w.kittyUpload(img, uploadW, uploadH)
 		if err != nil {
 			w.err = err
 			return
 		}
-		placement := kittyPlace(KittyOptions{
-			SourceX:      sourceX0,
-			SourceY:      sourceY0,
-			SourceWidth:  sourceW,
-			SourceHeight: sourceH,
-			CellWidth:    visible.W,
-			CellHeight:   visible.H,
-			X:            visible.X,
-			Y:            visible.Y,
-			PlacementID:  w.effectivePlacementID(),
-			MoveCursor:   true,
-			Z:            w.z,
-		}, w.id)
+		id := w.id
+		z := w.z
+		base := w.effectivePlacementID()
+		place := func(target screen.Rect, placementID uint32) []byte {
+			return kittyPlaceCropped(id, z, bounds, uploadW, uploadH, target, placementID)
+		}
 		r.AddGraphic(screen.Graphic{
 			Key:        w.graphicKey("kitty"),
 			PayloadKey: payloadKey,
-			Clear:      kittyDeletePlacement(w.id, w.effectivePlacementID()),
-			Free:       kittyDeleteImage(w.id),
+			Clear:      kittyDeletePlacement(id, base),
+			Free:       kittyDeleteImage(id),
 			Upload:     upload,
-			Data:       placement,
+			Data:       place(visible, base),
+			// Reclip re-places the image over the given visible sub-rectangles
+			// (each a distinct placement) when an overlay partially occludes it;
+			// ClearAll removes every placement of the image (keeping the payload)
+			// before a re-clip is emitted. See screen.Buffer occlusion.
+			Reclip: func(visible []screen.Rect) []byte {
+				var out []byte
+				for i, sub := range visible {
+					out = append(out, place(sub, base+uint32(i))...)
+				}
+				return out
+			},
+			ClearAll: kittyDeleteAllPlacements(id),
 		})
 	case ImageSixel:
 		cropped := cropImage(img, sourceX0, sourceY0, sourceW, sourceH, fullPixelW, fullPixelH)
@@ -567,6 +585,56 @@ func kittyPlace(opts KittyOptions, id uint32) []byte {
 	return []byte(out.String())
 }
 
+// snapToCellMultiple rounds px to the nearest positive multiple of cells, so an
+// image uploaded at that size divides evenly into the cell grid and every cell
+// maps to an exact integer block of source pixels.
+func snapToCellMultiple(px, cells int) int {
+	if cells < 1 {
+		cells = 1
+	}
+	unit := maxInt((px+cells/2)/cells, 1)
+	return unit * cells
+}
+
+// kittyPlaceCropped places the sub-rectangle target (in buffer cells) of an
+// image whose full cell rect is bounds and whose full pixel size is
+// fullPixelW×fullPixelH, mapping target back to the matching source pixels. It
+// is used both for the normal single placement and for occlusion re-clipping.
+//
+// Each cell maps to a fixed integer block of unitW×unitH source pixels, so every
+// placement — the whole image or any re-clipped strip — is a sub-window of one
+// shared pixel grid. That makes re-clipped strips align seamlessly with each
+// other (independent per-strip rounding would otherwise drift by up to a pixel
+// and show a visible seam). It crops at most one cell's worth of source off the
+// right/bottom edge, which is imperceptible.
+func kittyPlaceCropped(id uint32, z int, bounds screen.Rect, fullPixelW, fullPixelH int, target screen.Rect, placementID uint32) []byte {
+	cellsW := maxInt(bounds.W, 1)
+	cellsH := maxInt(bounds.H, 1)
+	// Map each cell boundary to a source pixel with a single shared rounded
+	// function, so a boundary shared by two strips resolves to the exact same
+	// pixel and the pieces align. (Truncating each strip independently drifted by
+	// up to a pixel and showed a seam.)
+	srcX := func(cell int) int { return (2*(cell-bounds.X)*fullPixelW + cellsW) / (2 * cellsW) }
+	srcY := func(cell int) int { return (2*(cell-bounds.Y)*fullPixelH + cellsH) / (2 * cellsH) }
+	sx0 := srcX(target.X)
+	sy0 := srcY(target.Y)
+	sx1 := srcX(target.X + target.W)
+	sy1 := srcY(target.Y + target.H)
+	return kittyPlace(KittyOptions{
+		SourceX:      sx0,
+		SourceY:      sy0,
+		SourceWidth:  maxInt(sx1-sx0, 1),
+		SourceHeight: maxInt(sy1-sy0, 1),
+		CellWidth:    target.W,
+		CellHeight:   target.H,
+		X:            target.X,
+		Y:            target.Y,
+		PlacementID:  placementID,
+		MoveCursor:   true,
+		Z:            z,
+	}, id)
+}
+
 func kittyDeletePlacement(id, placementID uint32) []byte {
 	if id == 0 {
 		return nil
@@ -582,6 +650,16 @@ func kittyDeleteImage(id uint32) []byte {
 		return nil
 	}
 	return []byte(fmt.Sprintf("\x1b_Ga=d,d=I,i=%d\x1b\\", id))
+}
+
+// kittyDeleteAllPlacements removes every placement of the image (d=i, lowercase)
+// without freeing the stored payload, so re-clipped sub-placements can be
+// replaced without re-uploading the image.
+func kittyDeleteAllPlacements(id uint32) []byte {
+	if id == 0 {
+		return nil
+	}
+	return []byte(fmt.Sprintf("\x1b_Ga=d,d=i,i=%d\x1b\\", id))
 }
 
 func cursorMove(x, y int) []byte {

@@ -97,4 +97,21 @@ type Graphic struct {
 	Free       []byte
 	Upload     []byte
 	Data       []byte
+
+	// Reclip, when set, regenerates the placement bytes for a graphic that a
+	// higher layer partially covers, given the visible sub-rectangles (buffer
+	// cells). ClearAll removes every placement the graphic may have emitted
+	// (whole or re-clipped) before new bytes are drawn. Graphics without Reclip
+	// fall back to whole-placement suppression when occluded.
+	Reclip   func(visible []Rect) []byte
+	ClearAll []byte
+
+	// layer is the draw layer the graphic was added on (see Buffer.SetLayer). It
+	// drives occlusion: a graphic is suppressed or re-clipped when a
+	// strictly-higher layer paints over its cells. It is never emitted and is
+	// excluded from equalGraphic, so it does not affect the frame bytes.
+	layer int
+	// split is set on a resolved graphic when it was re-clipped around an
+	// occluder, so the diff clears every placement before re-emitting.
+	split bool
 }

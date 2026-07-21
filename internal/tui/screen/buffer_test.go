@@ -53,3 +53,29 @@ func TestFillAndClip(t *testing.T) {
 		t.Fatalf("out-of-region set = %q", got)
 	}
 }
+
+func TestSetLayerStampsCells(t *testing.T) {
+	b := NewBuffer(2, 1)
+	b.Set(0, 0, Cell{Content: "a"})
+	b.SetLayer(1)
+	b.Set(1, 0, Cell{Content: "b"})
+	if b.cellLayer[0] != 0 {
+		t.Fatalf("cell 0 layer = %d, want 0", b.cellLayer[0])
+	}
+	if b.cellLayer[1] != 1 {
+		t.Fatalf("cell 1 layer = %d, want 1", b.cellLayer[1])
+	}
+}
+
+func TestClearResetsLayerStamps(t *testing.T) {
+	b := NewBuffer(1, 1)
+	b.SetLayer(1)
+	b.Set(0, 0, Cell{Content: "a"})
+	b.Clear()
+	if b.layer != 0 {
+		t.Fatalf("layer = %d, want 0 after Clear", b.layer)
+	}
+	if b.cellLayer[0] != 0 {
+		t.Fatalf("cell layer = %d, want 0 after Clear", b.cellLayer[0])
+	}
+}

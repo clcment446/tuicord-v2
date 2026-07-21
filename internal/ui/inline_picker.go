@@ -177,7 +177,7 @@ func (p *InlinePicker) refilter() {
 			if img != nil {
 				b := img.Bounds()
 				item.Label = "  " + item.Label
-				item.Graphic = &widget.ItemGraphic{Image: img, ImageID: stableImageID(match.entry.mediaURL), PlacementID: stableImageID("inline-picker:" + match.entry.favoriteKey), PixelWidth: b.Dx(), PixelHeight: b.Dy(), Cols: 2}
+				item.Graphic = &widget.ItemGraphic{Image: img, ImageID: stableImageID(match.entry.mediaURL), PlacementID: stableImageID("inline-picker:" + match.entry.favoriteKey), PixelWidth: b.Dx(), PixelHeight: b.Dy(), Cols: 2, Z: -1}
 			}
 		}
 		if !match.entry.usable {
