@@ -1,7 +1,7 @@
 # Maintainer: Styly <claudiotorresptpt@gmail.com>
 _pkgname=tuicord
 pkgname=tuicord-git
-pkgver=r84.9625f752
+pkgver=v0.1.0
 pkgrel=1
 pkgdesc="A Discord client that runs in your terminal, written in Go"
 arch=('x86_64' 'aarch64')
@@ -21,8 +21,10 @@ pkgver() {
 
 prepare() {
 	cd "$srcdir/tuicord-v2"
-	# Fetch modules now so build() can run offline.
+	# Fetch modules now so build() can run offline. -modcacherw keeps the
+	# module cache writable so it can be cleaned up afterwards.
 	export GOPATH="$srcdir/gopath"
+	export GOFLAGS="-modcacherw"
 	go mod download
 }
 
