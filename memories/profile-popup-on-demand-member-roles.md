@@ -37,6 +37,11 @@ avatar-fetch refresh). It skips the fetch when roles are already known.
 Tests: `TestEnsureMemberDetailFetchesRolesWhenMissing`,
 `TestEnsureMemberDetailSkipsFetchWhenRolesKnown`. Full `go test ./...` passes.
 
+Vim's `u` action must also pass the selected `store.Message` identity into the
+profile path. Passing only `AuthorID` turns a member-cache miss into a Profile
+notice even though `Message.Author` and `AuthorAvatarURL` are already available.
+Use those fields as fallbacks when opening and after async detail refresh.
+
 ## Notes
 
 Known adjacent issue left untouched: `openProfile` passes `dmGuild=0` to

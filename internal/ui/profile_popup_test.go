@@ -4,10 +4,15 @@ import (
 	"strings"
 	"testing"
 
+	"awesomeProject/internal/app"
+	"awesomeProject/internal/config"
+	"awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
+	"awesomeProject/internal/tui/widget"
+	"github.com/diamondburned/arikawa/v3/session"
 )
 
 func TestProfilePopupRendersIdentityRolesAndSharedDM(t *testing.T) {
@@ -44,6 +49,28 @@ func TestProfilePopupRendersIdentityRolesAndSharedDM(t *testing.T) {
 	}
 	if opened != 9 {
 		t.Fatalf("opened DM = %d, want 9", opened)
+	}
+}
+
+func TestVimUserActionOpensProfileFromMessageIdentity(t *testing.T) {
+	st := store.New(0)
+	tuiApp := tui.New()
+	logic := app.New(discord.WrapSession(session.New("")), st, tuiApp)
+	mv := &MainView{app: logic, Root: widget.NewText("main")}
+	shell := &Shell{app: logic, mv: mv, cfg: config.Default()}
+	msg := store.Message{AuthorID: 42, Author: "alice", AuthorAvatarURL: "https://cdn.example/alice.png"}
+
+	shell.handleMessageAction('u', msg)
+
+	popup, ok := shell.popup.(*ProfilePopup)
+	if !ok {
+		t.Fatalf("popup = %T, want *ProfilePopup", shell.popup)
+	}
+	if popup.details.ID != 42 || popup.details.Name != "alice" || popup.details.AvatarURL != msg.AuthorAvatarURL {
+		t.Fatalf("profile details = %+v, want selected message author identity", popup.details)
+	}
+	if len(shell.Toasts()) != 0 {
+		t.Fatalf("profile action created %d notices, want none", len(shell.Toasts()))
 	}
 }
 

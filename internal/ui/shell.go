@@ -223,7 +223,7 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 		}
 	case 'u':
 		if msg.AuthorID != 0 {
-			s.openProfile(msg.AuthorID)
+			s.openMessageAuthorProfile(msg)
 		}
 	case 'd':
 		if s.app != nil && msg.AuthorID != 0 && msg.AuthorID == s.app.SelfID() {
@@ -1266,18 +1266,28 @@ func (s *Shell) dispatchEntityAction(action markup.Action) {
 // The card shows role-colored role chips, the profile picture (fetched
 // asynchronously), and the servers the local caches know are shared.
 func (s *Shell) openProfile(id store.UserID) {
+	s.openProfileWithFallback(id, store.Member{})
+}
+
+// openMessageAuthorProfile preserves the identity carried by the selected
+// message. Message authors are not guaranteed to be present in the guild or DM
+// member caches, but that cache miss must not turn Vim's u action into a notice.
+func (s *Shell) openMessageAuthorProfile(msg store.Message) {
+	s.openProfileWithFallback(msg.AuthorID, store.Member{
+		ID:        msg.AuthorID,
+		Name:      msg.Author,
+		AvatarURL: msg.AuthorAvatarURL,
+	})
+}
+
+func (s *Shell) openProfileWithFallback(id store.UserID, fallback store.Member) {
 	st := s.app.Store()
-	details := buildProfileDetails(st, s.app.ActiveGuild(), 0, id)
-	if details.Name == "" && details.Username == "" {
-		if m, ok := memberForContext(st, s.app.ActiveGuild(), s.app.ActiveChannel(), id); ok {
-			details.Name = m.Name
-			details.Username = m.Username
-			details.Nick = m.Nick
-			if details.AvatarURL == "" {
-				details.AvatarURL = m.AvatarURL
-			}
-		}
+	guild := s.app.ActiveGuild()
+	details := buildProfileDetails(st, guild, 0, id)
+	if m, ok := memberForContext(st, guild, s.app.ActiveChannel(), id); ok {
+		details = fillProfileIdentity(details, m)
 	}
+	details = fillProfileIdentity(details, fallback)
 	if details.Name == "" && details.Username == "" {
 		s.ShowNotice("Profile", "User "+strconv.FormatUint(uint64(id), 10))
 		return
@@ -1290,14 +1300,30 @@ func (s *Shell) openProfile(id store.UserID) {
 	s.fetchProfileAvatar(popup, details.AvatarURL)
 	// Roles are absent from message/history payloads, so fetch the full guild
 	// member on demand and refresh the still-open card once it resolves.
-	guild := s.app.ActiveGuild()
 	s.app.EnsureMemberDetail(guild, id, func() {
 		if s.popup != popup {
 			return
 		}
-		popup.SetDetails(buildProfileDetails(s.app.Store(), guild, 0, id))
+		refreshed := buildProfileDetails(s.app.Store(), guild, 0, id)
+		popup.SetDetails(fillProfileIdentity(refreshed, fallback))
 		s.app.Invalidate()
 	})
+}
+
+func fillProfileIdentity(details profileDetails, fallback store.Member) profileDetails {
+	if details.Name == "" {
+		details.Name = fallback.Name
+	}
+	if details.Username == "" {
+		details.Username = fallback.Username
+	}
+	if details.Nick == "" {
+		details.Nick = fallback.Nick
+	}
+	if details.AvatarURL == "" {
+		details.AvatarURL = fallback.AvatarURL
+	}
+	return details
 }
 
 // fetchProfileAvatar resolves a profile card's picture off the UI goroutine and
