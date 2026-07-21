@@ -80,6 +80,9 @@ type fakeSender struct {
 	channelsErr          error
 	channelsN            int
 	channelDetail        *discord.Channel
+	member               *discord.Member
+	memberErr            error
+	memberDone           chan struct{}
 }
 
 func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessageData) (*discord.Message, error) {
@@ -210,6 +213,13 @@ func (f *fakeSender) Channel(discord.ChannelID) (*discord.Channel, error) {
 	return f.channelDetail, nil
 }
 
+func (f *fakeSender) Member(discord.GuildID, discord.UserID) (*discord.Member, error) {
+	if f.memberDone != nil {
+		defer close(f.memberDone)
+	}
+	return f.member, f.memberErr
+}
+
 func newTestApp(send sender) *App {
 	a := &App{
 		store: store.New(0),
@@ -230,6 +240,9 @@ func newTestApp(send sender) *App {
 	}
 	if details, ok := send.(channelDetailsLoader); ok {
 		a.channelDetail = details
+	}
+	if memberDetail, ok := send.(memberDetailsLoader); ok {
+		a.memberDetail = memberDetail
 	}
 	return a
 }
@@ -612,6 +625,81 @@ func TestReadyEventPreservesHydratedDMUserNames(t *testing.T) {
 	channel, ok := a.store.Channel(91)
 	if !ok || len(channel.Recipients) != 1 || channel.Recipients[0].ID != 100 {
 		t.Fatalf("preserved DM recipients = %+v,%v, want alice (100)", channel.Recipients, ok)
+	}
+}
+
+func TestReadyEventPreservesNamedGroupDMRecipients(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.UpsertGuild(store.Guild{ID: DirectMessagesGuildID, Name: "Direct Messages"})
+	a.store.UpsertChannel(store.Channel{
+		ID:      92,
+		GuildID: DirectMessagesGuildID,
+		Kind:    store.ChannelDM,
+		Name:    "The Crew",
+		Recipients: []store.Member{
+			{ID: 101, Name: "bob"},
+			{ID: 102, Name: "carol"},
+		},
+	})
+
+	// A named group DM that arrives without recipients must keep the members it
+	// was already hydrated with, otherwise its @ mention menu goes empty.
+	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{{
+		ID:   92,
+		Type: discord.GroupDM,
+		Name: "The Crew",
+	}}})
+
+	channel, ok := a.store.Channel(92)
+	if !ok || len(channel.Recipients) != 2 {
+		t.Fatalf("preserved group DM recipients = %+v,%v, want bob and carol", channel.Recipients, ok)
+	}
+	if channel.Recipients[0].ID != 101 || channel.Recipients[1].ID != 102 {
+		t.Fatalf("preserved group DM recipients = %+v, want bob (101), carol (102)", channel.Recipients)
+	}
+}
+
+func TestEnsureMemberDetailFetchesRolesWhenMissing(t *testing.T) {
+	fs := &fakeSender{
+		memberDone: make(chan struct{}),
+		member: &discord.Member{
+			User:    discord.User{ID: 42, Username: "alice"},
+			RoleIDs: []discord.RoleID{7, 8},
+		},
+	}
+	a := newTestApp(fs)
+	// Author identity is known (as from a history payload) but carries no roles.
+	a.store.RememberMemberIdentity(1, store.Member{ID: 42, Name: "alice"})
+
+	// Synchronize on the done callback, not fs.memberDone: the fake closes
+	// memberDone when Member() returns, which happens before the fetch goroutine
+	// posts the store update and invokes done. Waiting on the callback gives a
+	// happens-before edge for the store mutation and the refreshed read.
+	refreshedCh := make(chan struct{})
+	a.EnsureMemberDetail(1, 42, func() { close(refreshedCh) })
+
+	select {
+	case <-refreshedCh:
+	case <-time.After(time.Second):
+		t.Fatalf("done callback was not invoked after member fetch")
+	}
+	m, ok := a.store.Member(1, 42)
+	if !ok || len(m.RoleIDs) != 2 || m.RoleIDs[0] != 7 || m.RoleIDs[1] != 8 {
+		t.Fatalf("fetched member roles = %+v,%v, want [7 8]", m.RoleIDs, ok)
+	}
+}
+
+func TestEnsureMemberDetailSkipsFetchWhenRolesKnown(t *testing.T) {
+	fs := &fakeSender{memberDone: make(chan struct{})}
+	a := newTestApp(fs)
+	a.store.UpsertMember(1, store.Member{ID: 42, Name: "alice", RoleIDs: []store.RoleID{7}})
+
+	a.EnsureMemberDetail(1, 42, func() { t.Fatalf("must not refresh when roles already known") })
+
+	select {
+	case <-fs.memberDone:
+		t.Fatalf("member detail was fetched despite known roles")
+	default:
 	}
 }
 
