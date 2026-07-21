@@ -29,6 +29,36 @@ func TestSplitBasisClampsAndDragCanCancel(t *testing.T) {
 	}
 }
 
+func TestSplitResponsiveHideRemovesPaneReservationAndSurvivesRebuild(t *testing.T) {
+	split := NewSplit(NewText("chat"), NewText("members")).
+		Basis(200).
+		MinSecond(20).
+		HideSecondBelow(120)
+
+	wide := layout.Solve(split.Layout(), 120, 1)
+	first := split.Layout().Children[0]
+	second := split.Layout().Children[1]
+	if got := wide[first].W; got != 99 {
+		t.Fatalf("first pane at threshold width = %d, want 99", got)
+	}
+	if got := wide[second].W; got != 20 {
+		t.Fatalf("second pane at threshold width = %d, want 20", got)
+	}
+
+	// Basis rebuilds the generated wrappers. The responsive policy must remain
+	// on the wrapper and remove both its minimum width and the divider gap.
+	split.Basis(180)
+	first = split.Layout().Children[0]
+	second = split.Layout().Children[1]
+	narrow := layout.Solve(split.Layout(), 119, 1)
+	if _, ok := narrow[second]; ok {
+		t.Fatal("second pane remained in layout below responsive threshold")
+	}
+	if got := narrow[first].W; got != 119 {
+		t.Fatalf("first pane below threshold = %d, want full 119", got)
+	}
+}
+
 func TestSplitGivesPaneChildFullWidth(t *testing.T) {
 	field := NewTextInput("")
 	field.Handle(input.PasteEvent{Text: "abcde"})

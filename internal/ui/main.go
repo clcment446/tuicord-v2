@@ -336,7 +336,12 @@ func (mv *MainView) compose() tui.Widget {
 	mv.themedSplits = append(mv.themedSplits, chatAndMembers)
 	membersNode := members.Layout()
 	membersPolicy.Apply(membersNode, layout.Row)
-	membersNode.HideBelow = mv.cfg.Layout.MembersHideBelow
+	if mv.cfg.Layout.MembersAutoHide {
+		// Hide the Split pane wrapper, not only the members widget inside it.
+		// Otherwise its minimum width and divider remain reserved while the
+		// invisible child leaves the chat/composer clipped to zero on narrow TTYs.
+		chatAndMembers.HideSecondBelow(mv.cfg.Layout.MembersHideBelow)
+	}
 	if membersPolicy.Visible != nil {
 		chatAndMembers.HideSecond(!*membersPolicy.Visible)
 	}
