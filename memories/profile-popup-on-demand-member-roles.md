@@ -42,3 +42,15 @@ Tests: `TestEnsureMemberDetailFetchesRolesWhenMissing`,
 Known adjacent issue left untouched: `openProfile` passes `dmGuild=0` to
 `buildProfileDetails`, so the shared-DM list on the card is always empty.
 See [[named-group-dm-mention-recipients]] for the related DM recipient work.
+
+`TestEnsureMemberDetailFetchesRolesWhenMissing` had a `-race`-only data race
+(plain `go test` passed, hiding it). The test waited on `<-fs.memberDone`, but
+`fakeSender.Member` closes `memberDone` via `defer` the moment it returns —
+i.e. *before* `EnsureMemberDetail`'s goroutine reaches `a.ui.Post` where
+`UpsertMember` and the `done` callback actually run. So the post-wait reads
+(`refreshed`, `a.store.Member`) raced the goroutine's writes. Fix: synchronize
+on the `done` callback (`close(refreshedCh)`) instead of `memberDone` — the
+callback runs after the store mutation, giving a real happens-before edge.
+General trap: the `*Done` channels in `fakeSender` signal "the stub returned",
+NOT "the posted UI mutation completed"; never use them to gate reads of
+post-mutation state. Always run `go test -race` on this package.

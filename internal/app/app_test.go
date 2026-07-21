@@ -671,11 +671,16 @@ func TestEnsureMemberDetailFetchesRolesWhenMissing(t *testing.T) {
 	// Author identity is known (as from a history payload) but carries no roles.
 	a.store.RememberMemberIdentity(1, store.Member{ID: 42, Name: "alice"})
 
-	var refreshed bool
-	a.EnsureMemberDetail(1, 42, func() { refreshed = true })
-	<-fs.memberDone
+	// Synchronize on the done callback, not fs.memberDone: the fake closes
+	// memberDone when Member() returns, which happens before the fetch goroutine
+	// posts the store update and invokes done. Waiting on the callback gives a
+	// happens-before edge for the store mutation and the refreshed read.
+	refreshedCh := make(chan struct{})
+	a.EnsureMemberDetail(1, 42, func() { close(refreshedCh) })
 
-	if !refreshed {
+	select {
+	case <-refreshedCh:
+	case <-time.After(time.Second):
 		t.Fatalf("done callback was not invoked after member fetch")
 	}
 	m, ok := a.store.Member(1, 42)
