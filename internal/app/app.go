@@ -112,6 +112,9 @@ type channelLoader interface {
 type channelDetailsLoader interface {
 	Channel(discord.ChannelID) (*discord.Channel, error)
 }
+type memberDetailsLoader interface {
+	Member(discord.GuildID, discord.UserID) (*discord.Member, error)
+}
 type channelManager interface {
 	CreateChannel(discord.GuildID, api.CreateChannelData) (*discord.Channel, error)
 	ModifyChannel(discord.ChannelID, api.ModifyChannelData) error
@@ -285,6 +288,7 @@ type App struct {
 	dirs                directoryLoader
 	chans               channelLoader
 	channelDetail       channelDetailsLoader
+	memberDetail        memberDetailsLoader
 	channelManage       channelManager
 	threads             threadClient
 	forum               forumPoster
@@ -347,6 +351,7 @@ func New(n *ningen.State, st *store.Store, ui *tui.App) *App {
 		dirs:                sess,
 		chans:               sess,
 		channelDetail:       sess,
+		memberDetail:        sess,
 		channelManage:       sess,
 		threads:             sess,
 		forum:               restForumPoster{sess: sess},
@@ -1752,6 +1757,32 @@ func (a *App) LoadRoles(guild store.GuildID) {
 	go a.loadRolesFrom(guild, generation, version)
 }
 
+// EnsureMemberDetail fetches a guild member's full record (including role IDs)
+// when the store lacks it, then runs done on the UI goroutine so an open
+// profile card can refresh. Message and REST history payloads carry only the
+// author's global identity, so a profile opened from them would otherwise show
+// an empty roles section until the user happens to post a live message.
+func (a *App) EnsureMemberDetail(guild store.GuildID, user store.UserID, done func()) {
+	if a == nil || a.memberDetail == nil || guild == 0 || guild == DirectMessagesGuildID || user == 0 {
+		return
+	}
+	if m, ok := a.store.Member(guild, user); ok && len(m.RoleIDs) > 0 {
+		return
+	}
+	go func() {
+		member, err := a.memberDetail.Member(discord.GuildID(guild), discord.UserID(user))
+		if err != nil || member == nil {
+			return
+		}
+		a.ui.Post(func() {
+			a.store.UpsertMember(guild, convertMember(*member, discord.GuildID(guild)))
+			if done != nil {
+				done()
+			}
+		})
+	}()
+}
+
 // LoadGuilds fetches the cheap directory data needed to render the server and
 // DM lists. It is guarded so startup or reconnect paths do not hammer REST.
 func (a *App) LoadGuilds(limit uint) {
@@ -1861,7 +1892,14 @@ func (a *App) hydratePrivateChannels(channels []discord.Channel) []discord.Chann
 	sem := make(chan struct{}, dmHydrationConcurrency)
 	var wg sync.WaitGroup
 	for i := range channels {
-		if channels[i].Name != "" || len(channels[i].DMRecipients) > 0 {
+		// Fetch full detail for any DM or group DM whose recipients were omitted.
+		// Keying off the name here would skip named group DMs, which commonly
+		// carry a custom name but still arrive without recipients, leaving their
+		// @ mention menu empty.
+		if len(channels[i].DMRecipients) > 0 {
+			continue
+		}
+		if channels[i].Type != discord.DirectMessage && channels[i].Type != discord.GroupDM {
 			continue
 		}
 		id := channels[i].ID

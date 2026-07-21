@@ -799,12 +799,17 @@ func ingestGuild(s *store.Store, g *gateway.GuildCreateEvent) {
 
 func ingestPrivateChannel(s *store.Store, c discord.Channel) {
 	converted := convertChannel(c)
-	if c.Name == "" && len(c.DMRecipients) == 0 && converted.Kind == store.ChannelDM {
+	// A sparse channel payload may omit DM recipients while still carrying a
+	// name (group DMs are frequently named), so preservation must key off the
+	// missing recipients alone, not an empty name. Otherwise a named group DM's
+	// hydrated members are wiped and its @ menu goes empty.
+	if len(c.DMRecipients) == 0 && converted.Kind == store.ChannelDM {
 		if existing, ok := s.Channel(converted.ID); ok {
-			if existing.Name != "" {
+			if c.Name == "" && existing.Name != "" {
 				converted.Name = existing.Name
 			}
 			converted.Recipients = append([]store.Member(nil), existing.Recipients...)
+			converted.RecipientIDs = append([]store.UserID(nil), existing.RecipientIDs...)
 		}
 	}
 	s.UpsertChannel(converted)
