@@ -23,7 +23,9 @@ gh auth status >/dev/null 2>&1 || { echo "gh is not authenticated (run: gh auth 
 
 # Build in a throwaway dir so src/, pkg/ and the git clone don't touch the repo.
 BUILD_DIR="$(mktemp -d)"
-trap 'rm -rf "$BUILD_DIR"' EXIT
+# Go's module cache is written read-only; make it writable before removing.
+cleanup() { chmod -R u+w "$BUILD_DIR" 2>/dev/null || true; rm -rf "$BUILD_DIR"; }
+trap cleanup EXIT
 cp "$SCRIPT_DIR/PKGBUILD" "$BUILD_DIR/"
 
 echo "==> Building package in $BUILD_DIR"
