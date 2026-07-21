@@ -145,6 +145,22 @@ type ChatView struct {
 	lastFirstMessage   store.MessageID
 	lastLastMessage    store.MessageID
 
+	// stickyAnchor re-anchors a scrolled viewport to the message at its top
+	// whenever lines elsewhere change height (folds, async media, unfurls).
+	// BottomScroll alone assumes all growth is appended below the viewport,
+	// which teleports the view when content above it grows or shrinks.
+	stickyAnchor bool
+	// anchorKey/anchorIntra identify the top visible line of the previous
+	// draw: the placement prefix of its message and the line's index within
+	// that message's block. anchorOffset is the scroll offset that draw used;
+	// a differing offset on the next draw means the user scrolled, so the
+	// stale anchor must not override their position.
+	anchorKey    string
+	anchorIntra  int
+	anchorDelta  int
+	anchorOffset int
+	anchorSet    bool
+
 	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
 	// message currently being rendered a viewport-unique placement key.
 	emojiKeyPrefix string
@@ -226,6 +242,7 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		focusStopIndex:  -1,
 		mediaCfg:        media.DefaultConfig(),
 		node:            layout.Node{Grow: 1},
+		stickyAnchor:    true,
 	}
 }
 
@@ -1041,10 +1058,22 @@ func (w *ChatView) Draw(r screen.Region) {
 	prepended := channel == w.lastMessageChannel &&
 		w.lastFirstMessage != 0 && firstMessage != 0 &&
 		firstMessage != w.lastFirstMessage && lastMessage == w.lastLastMessage
+	preOffset := w.bottomScroll.Offset()
 	if prepended {
 		w.bottomScroll.UpdatePrepend(len(lines), r.Height())
 	} else {
 		w.bottomScroll.Update(len(lines), r.Height())
+	}
+	// Re-anchor a scrolled viewport onto the message that was at its top last
+	// draw. Skipped when the user is at the bottom, scrolled since (the offset
+	// no longer matches the one the anchor was captured under), or switched
+	// channels; and when the anchor message left the transcript, BottomScroll's
+	// own adjustment stands.
+	if w.stickyAnchor && w.anchorSet && preOffset > 0 && preOffset == w.anchorOffset &&
+		channel == w.lastMessageChannel {
+		if idx, ok := anchorLineIndex(lines, w.anchorKey, w.anchorIntra); ok {
+			w.bottomScroll.SetOffset(len(lines) - r.Height() - (idx - w.anchorDelta))
+		}
 	}
 	w.buildFocusIndex(lines, r.Height())
 	if w.lastMessageChannel != 0 && channel != w.lastMessageChannel {
@@ -1057,6 +1086,7 @@ func (w *ChatView) Draw(r screen.Region) {
 	w.lastLastMessage = lastMessage
 	// Bottom-align: show the last r.Height() lines, offset by scroll.
 	start := max(len(lines)-r.Height()-w.bottomScroll.Offset(), 0)
+	w.captureAnchor(lines, start)
 	end := min(start+r.Height(), len(lines))
 	displayLines := lines[start:end]
 	stickyPinned := false
@@ -1541,9 +1571,13 @@ func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width in
 	w.collectDeps = true
 
 	var body []chatLine
+	if m.Reply != nil {
+		body = append(body, stampMessage([]chatLine{w.renderReplyLine(*m.Reply, channel, width)}, m)...)
+	}
 	if m.Content != "" && !suppressContent(m) {
 		body = append(body, stampMessage(w.renderContent(m.Content, width, style), m)...)
 	}
+	body = append(body, stampMessage(w.renderForwards(m, width, style), m)...)
 	body = append(body, stampMessage(w.renderMedia(m, width, style), m)...)
 	body = append(body, stampMessage(w.renderEmbeds(m, width, style), m)...)
 	body = append(body, stampMessage(w.renderComponentTree(m, width, style), m)...)

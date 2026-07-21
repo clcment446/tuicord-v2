@@ -151,6 +151,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
+	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
 	mv.chat.SetHighlightFocusBlock(cfg.Accessibility.HighlightFocusBlock)

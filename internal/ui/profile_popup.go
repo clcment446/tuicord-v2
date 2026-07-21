@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"image"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -10,6 +12,7 @@ import (
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/text"
 	"awesomeProject/internal/tui/tui"
+	"awesomeProject/internal/tui/widget"
 )
 
 type profileDM struct {
@@ -17,13 +20,24 @@ type profileDM struct {
 	Name string
 }
 
+// profileRole is a role chip on the profile card, colored like the role.
+type profileRole struct {
+	Name string
+	// Color is the role's 0xRRGGBB color, or zero for an uncolored role.
+	Color uint32
+}
+
 type profileDetails struct {
-	ID       store.UserID
-	Name     string
-	Username string
-	Nick     string
-	Roles    []string
-	DMs      []profileDM
+	ID        store.UserID
+	Name      string
+	Username  string
+	Nick      string
+	AvatarURL string
+	Roles     []profileRole
+	// Guilds lists servers this client shares with the user, best effort from
+	// the local member caches.
+	Guilds []string
+	DMs    []profileDM
 }
 
 // ProfilePopup is a modal floating profile card. It owns pointer capture while
@@ -44,6 +58,18 @@ type ProfilePopup struct {
 	originY          int
 	dmRow            int
 	selectedDM       int
+
+	// avatar is the fetched profile picture, delivered asynchronously via
+	// SetAvatar once the media fetcher resolves details.AvatarURL.
+	avatar image.Image
+}
+
+// SetAvatar attaches the fetched profile picture. Must be called on the UI
+// goroutine.
+func (p *ProfilePopup) SetAvatar(img image.Image) {
+	if p != nil {
+		p.avatar = img
+	}
 }
 
 func NewProfilePopup(details profileDetails, styles Styles, onOpenDM func(store.ChannelID), onClose func()) *ProfilePopup {
@@ -59,9 +85,31 @@ func buildProfileDetails(st *store.Store, guild, dmGuild store.GuildID, id store
 	details.Name = member.Name
 	details.Username = member.Username
 	details.Nick = member.Nick
+	details.AvatarURL = member.AvatarURL
+	type positionedRole struct {
+		role     store.Role
+		position int
+	}
+	var roles []positionedRole
 	for _, roleID := range member.RoleIDs {
 		if role, ok := st.Role(guild, roleID); ok {
-			details.Roles = append(details.Roles, role.Name)
+			roles = append(roles, positionedRole{role: role, position: role.Position})
+		}
+	}
+	// Discord orders role lists highest first.
+	sort.SliceStable(roles, func(i, j int) bool { return roles[i].position > roles[j].position })
+	for _, r := range roles {
+		details.Roles = append(details.Roles, profileRole{Name: r.role.Name, Color: r.role.Color})
+	}
+	for _, g := range st.Guilds() {
+		if g.Unavailable {
+			continue
+		}
+		if m, ok := st.Member(g.ID, id); ok {
+			if details.AvatarURL == "" {
+				details.AvatarURL = m.AvatarURL
+			}
+			details.Guilds = append(details.Guilds, g.Name)
 		}
 	}
 	for _, channel := range st.Channels(dmGuild) {
@@ -83,10 +131,22 @@ func (p *ProfilePopup) Measure(avail tui.Size) tui.Size {
 	return avail
 }
 
+// maxProfileGuilds caps the common-server rows; the remainder collapses into a
+// single "+N more" row.
+const maxProfileGuilds = 5
+
+func (p *ProfilePopup) guildRows() int {
+	if len(p.details.Guilds) == 0 {
+		return 0
+	}
+	// blank + "Servers" header + entries (capped, extra collapsed into one row)
+	return 2 + min(len(p.details.Guilds), maxProfileGuilds+1)
+}
+
 func (p *ProfilePopup) dimensions(w, h int) (int, int) {
 	width := min(52, max(30, w-4))
 	roleRows := max(len(p.details.Roles), 1)
-	height := 10 + roleRows + len(p.details.DMs)
+	height := 10 + roleRows + p.guildRows() + len(p.details.DMs)
 	return min(width, max(w, 0)), min(height, max(h, 0))
 }
 
@@ -128,6 +188,19 @@ func (p *ProfilePopup) Draw(r screen.Region) {
 	drawPreviewText(box, 2, 3, "Username: "+fallbackProfileValue(p.details.Username), rect.W-4, base)
 	drawPreviewText(box, 2, 4, "Server nick: "+fallbackProfileValue(p.details.Nick), rect.W-4, base)
 	drawPreviewText(box, 2, 5, "ID: "+strconv.FormatUint(uint64(p.details.ID), 10), rect.W-4, muted)
+	if p.avatar != nil {
+		const avatarCols, avatarRows = 8, 4
+		if rect.W > avatarCols+14 && rect.H > avatarRows+2 {
+			img := widget.NewKittyImageFrom(p.avatar).
+				SetID(stableImageID(p.details.AvatarURL)).
+				SetPlacementID(stableImageID("profile:avatar")).
+				SetStyle(base)
+			if b := p.avatar.Bounds(); b.Dx() > 0 && b.Dy() > 0 {
+				img.SetPixelSize(b.Dx(), b.Dy())
+			}
+			img.Draw(box.Clip(screen.Rect{X: rect.W - avatarCols - 2, Y: 1, W: avatarCols, H: avatarRows}))
+		}
+	}
 	row := 7
 	drawPreviewText(box, 2, row, "Roles", rect.W-4, title)
 	row++
@@ -136,7 +209,28 @@ func (p *ProfilePopup) Draw(r screen.Region) {
 		row++
 	} else {
 		for _, role := range p.details.Roles {
-			drawPreviewText(box, 3, row, "@"+role, rect.W-5, base)
+			style := base
+			if role.Color != 0 {
+				style.Fg = rgbColor(role.Color)
+			}
+			drawPreviewText(box, 3, row, "@"+role.Name, rect.W-5, style)
+			row++
+		}
+	}
+	if len(p.details.Guilds) > 0 {
+		row++
+		drawPreviewText(box, 2, row, "Servers in common", rect.W-4, title)
+		row++
+		shown := p.details.Guilds
+		if len(shown) > maxProfileGuilds+1 {
+			shown = shown[:maxProfileGuilds]
+		}
+		for _, name := range shown {
+			drawPreviewText(box, 3, row, "· "+name, rect.W-5, base)
+			row++
+		}
+		if extra := len(p.details.Guilds) - len(shown); extra > 0 {
+			drawPreviewText(box, 3, row, "… +"+strconv.Itoa(extra)+" more", rect.W-5, muted)
 			row++
 		}
 	}

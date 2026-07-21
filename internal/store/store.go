@@ -226,6 +226,12 @@ type Message struct {
 	// ComponentTree preserves Discord's hierarchical Components V2 layout.
 	ComponentTree []ComponentNode
 	Pinned        bool
+	// Reply summarizes the message this one replies to, so rendering can show
+	// who was replied to without a second lookup. Nil for non-replies.
+	Reply *MessageReply
+	// Forwards holds the snapshots of forwarded messages
+	// (message_reference type FORWARD). Usually zero or one entry.
+	Forwards []ForwardedMessage
 
 	// rev is the store revision this version of the message was stamped with.
 	// It is unexported so only the store can issue one, and it is a scalar so
@@ -234,6 +240,28 @@ type Message struct {
 	// and can be patched in place underneath a copy, so comparing Message
 	// values cannot detect a change — comparing revisions can.
 	rev uint64
+}
+
+// MessageReply is the referenced-message summary a reply carries. Deleted
+// marks a reply whose original message no longer exists (Discord sends a null
+// referenced_message for those).
+type MessageReply struct {
+	MessageID MessageID
+	ChannelID ChannelID
+	AuthorID  UserID
+	Author    string
+	Content   string
+	Deleted   bool
+}
+
+// ForwardedMessage is the partial snapshot Discord attaches to a forwarded
+// message. Snapshots carry content and rich media but no author identity.
+type ForwardedMessage struct {
+	Content     string
+	Timestamp   time.Time
+	Attachments []Attachment
+	Embeds      []Embed
+	Stickers    []Sticker
 }
 
 // Rev reports the store revision stamped on this message. It changes on every

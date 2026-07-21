@@ -201,6 +201,11 @@ type Display struct {
 	// RoleGradientAnimations phase-shifts enabled role gradients on visible
 	// chat rows. It has no effect unless RoleGradients is also enabled.
 	RoleGradientAnimations bool `toml:"role_gradient_animations"`
+	// StickyAnchor keeps the scrolled chat viewport anchored to the message at
+	// its top when content above or below changes height (component folds,
+	// async media loads, embed unfurls). Disable to fall back to plain
+	// bottom-distance scrolling.
+	StickyAnchor bool `toml:"sticky_anchor"`
 }
 
 // Auth controls how interactive Discord authentication is presented.
@@ -412,6 +417,7 @@ func Default() Config {
 			ClipboardTimeoutSeconds: 5,
 			PlayVideos:              true,
 		},
+		Display:       Display{StickyAnchor: true},
 		Accessibility: Accessibility{MouseOn: true},
 		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
