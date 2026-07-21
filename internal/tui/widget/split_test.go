@@ -279,3 +279,32 @@ func (w *mouseRecorder) Handle(tui.Event) bool {
 	w.handled++
 	return true
 }
+
+// The composed UI sets row sizing (Basis/Grow) on a split's root node — e.g.
+// the accounts|composer row is pinned to the composer height. A divider drag or
+// collapse triggers rebuild, which must not reset that external sizing (issue:
+// dragging the account picker divider made its row grow to half the screen).
+func TestSplitRebuildPreservesExternalRootSizing(t *testing.T) {
+	split := NewSplit(NewText("accounts"), NewText("composer")).
+		Basis(16).MinFirst(8).MaxFirst(28).CollapsibleFirst()
+	root := split.Layout()
+	root.Basis = 9
+	root.Grow = 0
+
+	op, ok := split.DragStart(16, 0)
+	if !ok {
+		t.Fatal("DragStart did not hit divider")
+	}
+	op.DragMove(4, 0)
+	op.DragEnd(true)
+
+	if root.Basis != 9 || root.Grow != 0 {
+		t.Fatalf("root sizing after drag = basis %d grow %v, want basis 9 grow 0", root.Basis, root.Grow)
+	}
+
+	split.toggleCollapse()
+	split.expand()
+	if root.Basis != 9 || root.Grow != 0 {
+		t.Fatalf("root sizing after collapse cycle = basis %d grow %v, want basis 9 grow 0", root.Basis, root.Grow)
+	}
+}

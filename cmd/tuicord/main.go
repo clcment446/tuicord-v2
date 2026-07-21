@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/signal"
@@ -36,9 +37,15 @@ func main() {
 }
 
 func run() error {
+	clearTokens := flag.Bool("clear", false, "remove saved account tokens from the OS keyring and exit")
+	flag.Parse()
+
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
+	}
+	if *clearTokens {
+		return clearStoredTokens(cfg)
 	}
 
 	// One instance per account. Two clients on one token double the gateway
@@ -140,9 +147,12 @@ func run() error {
 		Build: func(key string) (*ningen.State, error) {
 			t, err := keyring.GetTokenFor(key)
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("read token for account %q: %w", key, err)
 			}
-			if strings.TrimSpace(t) == "" {
+			// Stray whitespace in a stored token yields an opaque gateway 4004;
+			// connect with the trimmed value.
+			t = strings.TrimSpace(t)
+			if t == "" {
 				return nil, fmt.Errorf("no saved token for account %q", key)
 			}
 			return discord.NewNingen(t)
@@ -204,6 +214,13 @@ func (u *uiSurface) Notify(a *accounts.Account, msg store.Message) {
 }
 
 func (u *uiSurface) ShowError(a *accounts.Account, err error) {
+	// A 4004 close never recovers on retry: the stored token is dead. Remove it
+	// so the next launch prompts for a fresh login instead of replaying it.
+	if a != nil && a.Key() != "" && isGatewayAuthFailure(err) {
+		if derr := keyring.DeleteTokenFor(a.Key()); derr != nil && !errors.Is(derr, keyring.ErrNotFound) {
+			fmt.Fprintln(os.Stderr, "tuicord: warning: remove rejected token:", derr)
+		}
+	}
 	title, toast := accountErrorToast(a, err)
 	u.shell.ShowToast(title, toast)
 }
@@ -223,11 +240,42 @@ func accountErrorToast(a *accounts.Account, err error) (string, error) {
 	if a != nil && a.Label() != "" {
 		title = a.Label()
 	}
-	var closeErr *ws.CloseEvent
-	if errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode {
-		return "Authentication failed", errors.New("Discord rejected the session (close 4004). The token is invalid or the account was flagged — re-authenticate to continue.")
+	if isGatewayAuthFailure(err) {
+		return "Authentication failed", errors.New("Discord rejected the session (close 4004). The token is invalid or the account was flagged — the saved token was removed; restart tuicord to log in again.")
 	}
 	return title, err
+}
+
+// isGatewayAuthFailure reports whether err is Discord's gateway 4004 close: a
+// rejected IDENTIFY for an invalid or flagged token.
+func isGatewayAuthFailure(err error) bool {
+	var closeErr *ws.CloseEvent
+	return errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode
+}
+
+// clearStoredTokens removes every registry account's token — plus the legacy
+// single-account token — from the OS keyring, so the next launch starts from
+// an interactive login. Stale entries for accounts pruned from the registry by
+// hand keep their config key here only while listed; the legacy key covers the
+// pre-registry install.
+func clearStoredTokens(cfg config.Config) error {
+	keys := map[string]bool{keyring.LegacyTokenKey: true}
+	for _, a := range cfg.AccountList() {
+		if a.Key != "" {
+			keys[a.Key] = true
+		}
+	}
+	var failed []string
+	for key := range keys {
+		if err := keyring.DeleteTokenFor(key); err != nil && !errors.Is(err, keyring.ErrNotFound) {
+			failed = append(failed, fmt.Sprintf("%s: %v", key, err))
+		}
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("clear tokens: %s", strings.Join(failed, "; "))
+	}
+	fmt.Println("tuicord: cleared stored tokens")
+	return nil
 }
 
 // uiStyles resolves the configured colors into the palette the widgets draw with.

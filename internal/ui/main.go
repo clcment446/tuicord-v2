@@ -216,12 +216,29 @@ func (mv *MainView) compose() tui.Widget {
 	// The bottom row is [Accounts | Composer]: the multi-account selector sits to
 	// the left of the composer. Both share the composerBaseBasis row height, so
 	// staging an image (which grows composerNode below) grows the whole row.
+	accountsPolicy := mv.cfg.Layout.Element("accounts")
+	accountsWidth := accountSelectorWidth
+	if accountsPolicy.Width > 0 {
+		accountsWidth = accountsPolicy.Width
+	}
+	accountsMinWidth := accountSelectorMinWidth
+	if accountsPolicy.MinWidth > 0 {
+		accountsMinWidth = accountsPolicy.MinWidth
+	}
+	accountsMaxWidth := accountSelectorMaxWidth
+	if accountsPolicy.MaxWidth > 0 {
+		accountsMaxWidth = accountsPolicy.MaxWidth
+	}
 	composerRow := widget.NewSplit(mv.accountBorder, mv.composerBorder).
-		Basis(accountSelectorWidth).
-		MinFirst(accountSelectorMinWidth).
-		MaxFirst(accountSelectorMaxWidth).
+		Basis(accountsWidth).
+		MinFirst(accountsMinWidth).
+		MaxFirst(accountsMaxWidth).
 		CollapsibleFirst()
 	composerRow.SetStyle(mv.styles.Cell("panels.border"))
+	accountsPolicy.Apply(mv.accountBorder.Layout(), layout.Row)
+	if accountsPolicy.Visible != nil {
+		composerRow.HideFirst(!*accountsPolicy.Visible)
+	}
 
 	chatColumn := widget.Column(
 		mv.chatBorder,

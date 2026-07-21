@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"awesomeProject/internal/keyring"
 )
 
 const TokenEnv = "TOKEN"
@@ -35,7 +37,13 @@ func ResolveToken(ctx context.Context, opts Options) (string, error) {
 
 	if opts.Store != nil {
 		token, err := opts.Store.GetToken()
-		if err == nil && strings.TrimSpace(token) != "" {
+		if err != nil && !errors.Is(err, keyring.ErrNotFound) && opts.OnStoreError != nil {
+			// A read failure other than "nothing stored" must be surfaced: it means
+			// a saved token may exist but is unreachable, and silently falling
+			// through to a fresh login would mask the broken keyring.
+			opts.OnStoreError(fmt.Errorf("read auth token: %w", err))
+		}
+		if token = strings.TrimSpace(token); err == nil && token != "" {
 			return token, nil
 		}
 	}

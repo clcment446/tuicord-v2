@@ -4,6 +4,11 @@ import "github.com/zalando/go-keyring"
 
 const service = "tuicord"
 
+// ErrNotFound is returned by Get/Delete when no token is stored under the key.
+// It distinguishes the normal first-run/logged-out state from a real keyring
+// failure (locked daemon, missing Secret Service, ...).
+var ErrNotFound = keyring.ErrNotFound
+
 // LegacyTokenKey is the go-keyring "user" under which the original
 // single-account token is stored. It doubles as the keyring key of the first
 // account when the single-account setup is migrated into the registry.

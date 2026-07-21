@@ -24,8 +24,8 @@ const AppName = "tuicord-v2"
 // Layout controls sidebar widths and the members panel.
 type Layout struct {
 	// Elements contains per-surface presentation policies. Keys are semantic UI
-	// names such as "guilds", "channels", "members", "messages", and
-	// "composer".
+	// names such as "guilds", "channels", "members", "messages", "composer",
+	// and "accounts".
 	Elements *ElementPolicies `toml:"elements"`
 	// GuildsWidth is the guild rail width in columns.
 	GuildsWidth int `toml:"guilds_width"`
@@ -631,6 +631,14 @@ members_hide_below = 120
 #
 # [layout.elements.composer]
 # height = 5
+#
+# The account selector left of the composer. Its height follows the composer
+# row, so size it with width bounds; visible = false collapses it entirely.
+# [layout.elements.accounts]
+# visible = true
+# width = 16
+# min_width = 8
+# max_width = 28
 
 [keys]
 quick_switcher = "ctrl+k"

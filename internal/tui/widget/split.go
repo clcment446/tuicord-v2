@@ -39,6 +39,9 @@ type Split struct {
 // NewSplit returns a row split with first on the left and second on the right.
 func NewSplit(first, second tui.Widget) *Split {
 	s := &Split{first: first, second: second, dir: layout.Row, basis: 24, min: 1, minSecond: 1}
+	// The root node grows by default; rebuild leaves the root's own sizing
+	// untouched so callers can override Basis/Grow after construction.
+	s.node.Grow = 1
 	s.rebuild()
 	return s
 }
@@ -393,33 +396,40 @@ func (w *Split) rebuild() {
 	if w.expandedBasis == 0 {
 		w.expandedBasis = w.basis
 	}
-	if w.collapsedFirst {
-		first := &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenFirst}
-		second := &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond}
+	var first, second *layout.Node
+	gap := 1
+	switch {
+	case w.collapsedFirst:
+		first = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenFirst}
+		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond}
 		if w.second != nil {
 			second.Children = []*layout.Node{stretchNode(w.second.Layout())}
 		}
-		w.node = layout.Node{Dir: w.dir, Grow: 1, Gap: 0, Children: []*layout.Node{first, second}}
-		return
-	}
-	if w.collapsedSecond {
-		first := &layout.Node{Grow: 1, Min: 1}
-		second := &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenSecond}
+		gap = 0
+	case w.collapsedSecond:
+		first = &layout.Node{Grow: 1, Min: 1}
+		second = &layout.Node{Basis: 1, Min: 1, Max: 1, Hidden: w.hiddenSecond}
 		if w.first != nil {
 			first.Children = []*layout.Node{stretchNode(w.first.Layout())}
 		}
-		w.node = layout.Node{Dir: w.dir, Grow: 1, Gap: 0, Children: []*layout.Node{first, second}}
-		return
+		gap = 0
+	default:
+		first = &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max, Hidden: w.hiddenFirst}
+		second = &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, Hidden: w.hiddenSecond}
+		if w.first != nil {
+			first.Children = []*layout.Node{stretchNode(w.first.Layout())}
+		}
+		if w.second != nil {
+			second.Children = []*layout.Node{stretchNode(w.second.Layout())}
+		}
 	}
-	first := &layout.Node{Basis: w.clampBasis(w.basis), Min: w.min, Max: w.max, Hidden: w.hiddenFirst}
-	second := &layout.Node{Grow: 1, Min: w.minSecond, Max: w.maxSecond, Hidden: w.hiddenSecond}
-	if w.first != nil {
-		first.Children = []*layout.Node{stretchNode(w.first.Layout())}
-	}
-	if w.second != nil {
-		second.Children = []*layout.Node{stretchNode(w.second.Layout())}
-	}
-	w.node = layout.Node{Dir: w.dir, Grow: 1, Gap: 1, Children: []*layout.Node{first, second}}
+	// The parent tree holds &w.node, and composed views set root sizing on it
+	// (e.g. the composer row's Basis/Grow). Only the interior may be replaced
+	// here — resetting the whole node would wipe that external sizing on every
+	// drag or collapse.
+	w.node.Dir = w.dir
+	w.node.Gap = gap
+	w.node.Children = []*layout.Node{first, second}
 }
 
 func stretchNode(node *layout.Node) *layout.Node {

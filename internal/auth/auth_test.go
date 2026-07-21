@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"awesomeProject/internal/keyring"
 )
 
 type memoryStore struct {
@@ -103,5 +105,49 @@ func TestResolveTokenReturnsTokenWhenStoreIsUnavailable(t *testing.T) {
 	}
 	if reported == nil || !strings.Contains(reported.Error(), storeErr.Error()) {
 		t.Fatalf("reported persistence error = %v, want %q", reported, storeErr)
+	}
+}
+
+func TestResolveTokenTrimsStoredToken(t *testing.T) {
+	got, err := ResolveToken(context.Background(), Options{
+		Store:  &memoryStore{token: " stored \n"},
+		Getenv: func(string) string { return "" },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "stored" {
+		t.Fatalf("got %q, want stored", got)
+	}
+}
+
+func TestResolveTokenReportsUnexpectedStoreReadError(t *testing.T) {
+	readErr := errors.New("keyring daemon is locked")
+	var reported error
+	got, err := ResolveToken(context.Background(), Options{
+		Store:        &memoryStore{err: readErr},
+		Getenv:       func(string) string { return "env-token" },
+		OnStoreError: func(err error) { reported = err },
+	})
+	if err != nil || got != "env-token" {
+		t.Fatalf("got %q, %v; want env-token fallback", got, err)
+	}
+	if reported == nil || !strings.Contains(reported.Error(), readErr.Error()) {
+		t.Fatalf("reported = %v, want wrapped %q", reported, readErr)
+	}
+}
+
+func TestResolveTokenDoesNotReportMissingTokenAsStoreError(t *testing.T) {
+	var reported error
+	got, err := ResolveToken(context.Background(), Options{
+		Store:        &memoryStore{err: keyring.ErrNotFound},
+		Getenv:       func(string) string { return "env-token" },
+		OnStoreError: func(err error) { reported = err },
+	})
+	if err != nil || got != "env-token" {
+		t.Fatalf("got %q, %v; want env-token fallback", got, err)
+	}
+	if reported != nil {
+		t.Fatalf("reported = %v, want nil for a missing token", reported)
 	}
 }
