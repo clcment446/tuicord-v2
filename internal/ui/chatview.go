@@ -681,7 +681,10 @@ func (w *ChatView) ensureMedia(url string, animated bool) *chatMediaState {
 		return state
 	default:
 		// The bounded queue is saturated. Do not create a waiting goroutine or a
-		// permanently loading state; a later render can retry after work drains.
+		// permanently loading state. Record a missing dependency so the body cache
+		// cannot preserve this fallback forever: completion of an in-flight fetch
+		// triggers another render, which can then retry after the queue drains.
+		w.recordMediaDep(url, &chatMediaState{})
 		return nil
 	}
 

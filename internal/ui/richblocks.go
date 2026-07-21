@@ -208,16 +208,20 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 		if r.Me {
 			style = mergeStyle(style, w.styles.Cell("messages.reaction.selected"))
 		}
-		if r.EmojiID != 0 && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
+		emojiURL := reactionEmojiURL(r)
+		if emojiURL != "" && w.mediaCfg.Enabled && w.mediaCfg.EmojiImages {
 			const emojiCols = 2
-			emojiURL := customEmojiURLParts(r.EmojiID, r.EmojiName, r.Animated)
 			state := w.ensureMedia(emojiURL, false)
-			placeholder := "  "
 			if state != nil && state.loading {
-				placeholder = mediaSpinner(w.spinner) + " "
+				placeholder := mediaSpinner(w.spinner) + " "
+				segs = append(segs, chatSegment{text: placeholder, style: style})
+				used += uitext.Width(placeholder)
 				spinner = true
+				count := fmt.Sprintf(" %d", r.Count)
+				segs = append(segs, chatSegment{text: count, style: style})
+				used += uitext.Width(count)
+				continue
 			}
-			segs = append(segs, chatSegment{text: placeholder, style: style})
 			if state != nil && state.err == nil && state.img != nil {
 				variant := w.mediaVariant(state, mediaSpec{
 					maxCols: emojiCols,
@@ -226,6 +230,7 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 					sourceH: 48,
 					square:  true,
 				})
+				segs = append(segs, chatSegment{text: "  ", style: style})
 				inline = append(inline, positionedInlineMedia{
 					col: used,
 					media: &inlineMedia{
@@ -238,18 +243,43 @@ func (w *ChatView) renderReactions(reactions []store.Reaction, placementPrefix s
 						style:        style,
 					},
 				})
+				used += emojiCols
+				count := fmt.Sprintf(" %d", r.Count)
+				segs = append(segs, chatSegment{text: count, style: style})
+				used += uitext.Width(count)
+				continue
 			}
-			used += emojiCols
-			count := fmt.Sprintf(" %d", r.Count)
-			segs = append(segs, chatSegment{text: count, style: style})
-			used += uitext.Width(count)
-			continue
+			// A failed or temporarily unqueued fetch must not leave a permanent
+			// blank where the reaction should be. Fall through to Unicode/name text.
 		}
 		label := reactionLabel(r)
 		segs = append(segs, chatSegment{text: label, style: style})
 		used += uitext.Width(label)
 	}
 	return chatLine{segments: segs, inlineMedia: inline, spinner: spinner}, true
+}
+
+// reactionEmojiURL returns an image URL for both Discord custom emoji and
+// standard Unicode emoji. Unicode assets use Twemoji so reactions remain
+// visible even when the terminal font has no color-emoji glyphs.
+func reactionEmojiURL(r store.Reaction) string {
+	if r.EmojiID != 0 {
+		return customEmojiURLParts(r.EmojiID, r.EmojiName, r.Animated)
+	}
+	var codepoints []string
+	for _, cp := range r.EmojiName {
+		// Twemoji asset names omit the emoji-presentation selector. Joiners,
+		// skin tones, keycap combiners, and regional indicators stay intact.
+		if cp == '\ufe0f' {
+			continue
+		}
+		codepoints = append(codepoints, fmt.Sprintf("%x", cp))
+	}
+	if len(codepoints) == 0 {
+		return ""
+	}
+	return "https://cdn.jsdelivr.net/gh/jdecked/twemoji@16.0.1/assets/72x72/" +
+		strings.Join(codepoints, "-") + ".png"
 }
 
 // reactionLabel formats one reaction as "<emoji> <count>". Custom emoji use

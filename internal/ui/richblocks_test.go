@@ -194,6 +194,37 @@ func TestChatViewRendersReactionsLine(t *testing.T) {
 	}
 }
 
+func TestChatViewEmbedsUnicodeEmojiInReactions(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ChannelID: 1, Author: "bob",
+		Reactions: []store.Reaction{{EmojiName: "👍", Count: 3}},
+	})
+	url := "https://cdn.jsdelivr.net/gh/jdecked/twemoji@16.0.1/assets/72x72/1f44d.png"
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMedia(nil, media.DefaultConfig(), nil)
+	view.media = map[string]*chatMediaState{url: {img: solidTestImage(72, 72)}}
+	buf := screen.NewBuffer(24, 3)
+
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	graphics := buf.Graphics()
+	if len(graphics) != 1 {
+		t.Fatalf("graphics len = %d, want 1 embedded Unicode reaction emoji", len(graphics))
+	}
+	if !bytes.Contains(graphics[0].Data, []byte("c=2")) || !bytes.Contains(graphics[0].Data, []byte("r=1")) {
+		t.Fatalf("Unicode reaction emoji placement = %q, want 2 columns by 1 row", graphics[0].Data)
+	}
+}
+
+func TestReactionEmojiURLNormalizesUnicodeVariationSelector(t *testing.T) {
+	got := reactionEmojiURL(store.Reaction{EmojiName: "❤️"})
+	want := "https://cdn.jsdelivr.net/gh/jdecked/twemoji@16.0.1/assets/72x72/2764.png"
+	if got != want {
+		t.Fatalf("reaction emoji URL = %q, want %q", got, want)
+	}
+}
+
 func TestChatViewEmbedsServerEmojiInReactions(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{
