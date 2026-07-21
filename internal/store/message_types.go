@@ -71,10 +71,18 @@ type Embed struct {
 	FooterText string
 	// ImageURL is the large bottom-image URL.
 	ImageURL string
+	// ImageW/ImageH are the image's source pixel dimensions (0 = unknown).
+	// Renderers reserve the final cell height from these while the image
+	// loads, so the async load cannot grow the message and shift the viewport.
+	ImageW, ImageH int
 	// ThumbURL is the small thumbnail URL (top-right corner).
 	ThumbURL string
+	// ThumbW/ThumbH are the thumbnail's source pixel dimensions (0 = unknown).
+	ThumbW, ThumbH int
 	// VideoURL is the video source URL.
 	VideoURL string
+	// VideoW/VideoH are the video's source pixel dimensions (0 = unknown).
+	VideoW, VideoH int
 	// Provider is the name of the external provider, e.g. "YouTube".
 	Provider string
 }

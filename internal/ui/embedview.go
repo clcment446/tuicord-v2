@@ -288,8 +288,21 @@ func embedMediaSpec(e store.Embed, mediaURL string, width, maxRows int) mediaSpe
 		return stickerMediaSpec(width)
 	}
 	spec := mediaSpec{maxCols: max(width, 1), maxRows: max(maxRows, 1)}
-	if queryW, queryH, ok := mediaQuerySize(mediaURL); ok {
-		spec.sourceW, spec.sourceH = queryW, queryH
+	// Prefer the source dimensions Discord reports for the embed's media: they
+	// let the loading placeholder reserve the final height so the async load
+	// cannot shift the viewport. The URL query is the fallback.
+	switch mediaURL {
+	case e.ImageURL:
+		spec.sourceW, spec.sourceH = e.ImageW, e.ImageH
+	case e.ThumbURL:
+		spec.sourceW, spec.sourceH = e.ThumbW, e.ThumbH
+	case e.VideoURL:
+		spec.sourceW, spec.sourceH = e.VideoW, e.VideoH
+	}
+	if spec.sourceW <= 0 || spec.sourceH <= 0 {
+		if queryW, queryH, ok := mediaQuerySize(mediaURL); ok {
+			spec.sourceW, spec.sourceH = queryW, queryH
+		}
 	}
 	if e.ThumbURL != "" && mediaURL == e.ThumbURL && e.ImageURL == "" {
 		spec.maxCols = min(spec.maxCols, 24)

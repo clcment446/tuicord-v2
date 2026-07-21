@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-07-21 — `fix: pin fold toggles and reserve media heights` (#28)
+
+- Fold/unfold toggles (markdown headers and v2 list controls) pin the toggled
+  line to the screen row it was activated at, so repeated cycles cannot creep
+  the viewport.
+- Embed images, thumbnails, and videos carry their source dimensions into the
+  store, letting loading placeholders reserve the final height; video posters
+  and GIF stills reserve their trailer row too, so media loads no longer
+  expand messages and shift the view.
+
 ## 2026-07-21 — `fix: replies, forwards, viewport anchoring, profile card`
 
 - Show reply references above reply content: who was replied to, a one-line

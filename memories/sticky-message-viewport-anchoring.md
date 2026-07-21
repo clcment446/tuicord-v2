@@ -29,6 +29,23 @@ not fight them), the offset is > 0 (bottom-anchored views follow new
 messages), and the channel is unchanged. `display.sticky_anchor` (default
 true, issue #30) disables it via `SetStickyAnchor`.
 
+## Follow-up (same day)
+
+The message anchor alone did not close #28: it maps lines by index within the
+message, so a fold *inside* the anchor message shifts every index after the
+control, and intra clamping makes repeated cycles creep. Two additions:
+
+1. **Fold pins**: every fold/unfold toggle (header `-`/vim-unfold/mouse click,
+   expandable component controls in `setComponentAction`) records a
+   `pendingAnchor` — the toggled control's key and its current screen row —
+   and the next Draw pins that line back to that row (Discord's behavior).
+   Applies at any offset and takes precedence over the generic anchor.
+2. **Height stability**: embed media never carried source dimensions
+   (`store.Embed` now has ImageW/H, ThumbW/H, VideoW/H from arikawa), so
+   loading placeholders were one spinner line that expanded on load; and video
+   posters / non-animated GIFs append a trailer chip row that the placeholder
+   lacked (`mediaTrailerLine` now shared by both branches).
+
 ## Notes
 
 - `applyVimBoundaryFocus` runs after the restore, so gg-stick still wins.

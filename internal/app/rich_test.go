@@ -24,7 +24,7 @@ func TestConvertMessageMapsRichContent(t *testing.T) {
 		}},
 		Embeds: []discord.Embed{{
 			Type: discord.GIFVEmbed, Title: "t", Description: "d",
-			Video: &discord.EmbedVideo{Proxy: "https://proxy/vid.mp4"},
+			Video: &discord.EmbedVideo{Proxy: "https://proxy/vid.mp4", Width: 640, Height: 360},
 		}},
 		Stickers: []discord.StickerItem{{ID: 9, Name: "wave", FormatType: discord.StickerFormatLottie}},
 		Reactions: []discord.Reaction{{
@@ -53,6 +53,9 @@ func TestConvertMessageMapsRichContent(t *testing.T) {
 	}
 	if len(got.Embeds) != 1 || got.Embeds[0].Kind != store.EmbedGIFV || got.Embeds[0].VideoURL != "https://proxy/vid.mp4" {
 		t.Errorf("embeds = %+v", got.Embeds)
+	}
+	if got.Embeds[0].VideoW != 640 || got.Embeds[0].VideoH != 360 {
+		t.Errorf("embed video dims = %dx%d, want 640x360 (loading placeholders need them)", got.Embeds[0].VideoW, got.Embeds[0].VideoH)
 	}
 	if len(got.Stickers) != 1 || got.Stickers[0].Format != store.StickerLottie {
 		t.Errorf("stickers = %+v", got.Stickers)

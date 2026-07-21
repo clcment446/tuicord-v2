@@ -297,12 +297,15 @@ func convertEmbed(e discord.Embed) store.Embed {
 	}
 	if e.Image != nil {
 		out.ImageURL = proxyOr(string(e.Image.Proxy), string(e.Image.URL))
+		out.ImageW, out.ImageH = int(e.Image.Width), int(e.Image.Height)
 	}
 	if e.Thumbnail != nil {
 		out.ThumbURL = proxyOr(string(e.Thumbnail.Proxy), string(e.Thumbnail.URL))
+		out.ThumbW, out.ThumbH = int(e.Thumbnail.Width), int(e.Thumbnail.Height)
 	}
 	if e.Video != nil {
 		out.VideoURL = proxyOr(string(e.Video.Proxy), string(e.Video.URL))
+		out.VideoW, out.VideoH = int(e.Video.Width), int(e.Video.Height)
 	}
 	if e.Provider != nil {
 		out.Provider = e.Provider.Name

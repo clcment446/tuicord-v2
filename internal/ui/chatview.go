@@ -160,6 +160,11 @@ type ChatView struct {
 	anchorDelta  int
 	anchorOffset int
 	anchorSet    bool
+	// pendingAnchor* pin a just-toggled fold control to its screen row for the
+	// next draw (see chat_anchor.go).
+	pendingAnchorKind uint8
+	pendingAnchorKey  string
+	pendingAnchorRow  int
 
 	// emojiKeyPrefix and emojiSeq assign each inline emoji occurrence of the
 	// message currently being rendered a viewport-unique placement key.
@@ -556,7 +561,11 @@ func (w *ChatView) mediaLinesVideo(url, videoURL, label, placementKey string, ba
 		}
 		return []chatLine{{segments: []chatSegment{{text: label + " (failed)", style: muted}}}}
 	case state.img == nil:
-		return w.loadingPlaceholderLines(label, base, spec)
+		lines := w.loadingPlaceholderLines(label, base, spec)
+		if trailer, ok := w.mediaTrailerLine(url, label, muted); ok {
+			lines = append(lines, trailer)
+		}
+		return lines
 	default:
 		variant := w.mediaVariant(state, spec)
 		if placementKey == "" {
@@ -567,19 +576,28 @@ func (w *ChatView) mediaLinesVideo(url, videoURL, label, placementKey string, ba
 		for i := range lines {
 			lines[i] = chatLine{media: block, mediaRow: i}
 		}
-		// Terminal graphics have no native overlay layer. Keep the GIF state and
-		// video affordance in a compact text row immediately below the image so
-		// users can tell a paused animation from a still and discover videos.
-		switch media.ClassifyURL(url) {
-		case media.ClassGIF:
-			if !w.mediaCfg.Animate {
-				lines = append(lines, chatLine{segments: []chatSegment{{text: "[GIF] " + label, style: muted}}})
-			}
-		case media.ClassVideo:
-			lines = append(lines, chatLine{segments: []chatSegment{{text: label, style: muted}}})
+		if trailer, ok := w.mediaTrailerLine(url, label, muted); ok {
+			lines = append(lines, trailer)
 		}
 		return lines
 	}
+}
+
+// mediaTrailerLine is the compact text row drawn immediately below GIF stills
+// and video posters (terminal graphics have no native overlay layer, so the
+// GIF state and video affordance live in a real row). The loading placeholder
+// appends the same row so the block height cannot change when the image
+// arrives.
+func (w *ChatView) mediaTrailerLine(url, label string, muted screen.Style) (chatLine, bool) {
+	switch media.ClassifyURL(url) {
+	case media.ClassGIF:
+		if !w.mediaCfg.Animate {
+			return chatLine{segments: []chatSegment{{text: "[GIF] " + label, style: muted}}}, true
+		}
+	case media.ClassVideo:
+		return chatLine{segments: []chatSegment{{text: label, style: muted}}}, true
+	}
+	return chatLine{}, false
 }
 
 // loadingPlaceholderLines renders the loading spinner while reserving the exact
@@ -1064,12 +1082,14 @@ func (w *ChatView) Draw(r screen.Region) {
 	} else {
 		w.bottomScroll.Update(len(lines), r.Height())
 	}
-	// Re-anchor a scrolled viewport onto the message that was at its top last
-	// draw. Skipped when the user is at the bottom, scrolled since (the offset
-	// no longer matches the one the anchor was captured under), or switched
-	// channels; and when the anchor message left the transcript, BottomScroll's
-	// own adjustment stands.
-	if w.stickyAnchor && w.anchorSet && preOffset > 0 && preOffset == w.anchorOffset &&
+	// A fold/unfold pins its toggled control line to the row it was activated
+	// at; otherwise re-anchor a scrolled viewport onto the message that was at
+	// its top last draw. The generic restore is skipped when the user is at
+	// the bottom, scrolled since (the offset no longer matches the one the
+	// anchor was captured under), or switched channels; and when the anchor
+	// message left the transcript, BottomScroll's own adjustment stands.
+	if w.applyPendingAnchor(lines, r.Height()) {
+	} else if w.stickyAnchor && w.anchorSet && preOffset > 0 && preOffset == w.anchorOffset &&
 		channel == w.lastMessageChannel {
 		if idx, ok := anchorLineIndex(lines, w.anchorKey, w.anchorIntra); ok {
 			w.bottomScroll.SetOffset(len(lines) - r.Height() - (idx - w.anchorDelta))
@@ -2372,6 +2392,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				if w.collapsedHeaders == nil {
 					w.collapsedHeaders = map[string]bool{}
 				}
+				w.anchorHeaderToggle(hit.key, ev.Y)
 				w.collapsedHeaders[hit.key] = !hit.collapsed
 				w.invalidateBodies()
 				return true
@@ -2543,6 +2564,7 @@ func (w *ChatView) foldFocusedHeader() bool {
 	if w.collapsedHeaders == nil {
 		w.collapsedHeaders = map[string]bool{}
 	}
+	w.anchorHeaderToggle(stop.headerKey, stop.line-w.visibleStart)
 	w.collapsedHeaders[stop.headerKey] = !w.collapsedHeaders[stop.headerKey]
 	w.invalidateBodies()
 	return true
@@ -2562,6 +2584,7 @@ func (w *ChatView) HandleVimFocus(forward bool) bool {
 	if stop.kind != chatFocusHeader || stop.headerKey == "" || !w.collapsedHeaders[stop.headerKey] {
 		return false
 	}
+	w.anchorHeaderToggle(stop.headerKey, stop.line-w.visibleStart)
 	w.collapsedHeaders[stop.headerKey] = false
 	w.invalidateBodies()
 	return true
@@ -2669,6 +2692,7 @@ func (w *ChatView) setComponentAction(action componentAction) bool {
 			w.expandedComponents = map[string]bool{}
 		}
 		key := action.controlKey()
+		w.anchorControlToggle(key)
 		if w.expandedComponents[key] {
 			w.expandedComponents[key] = false
 			return w.submitComponentPicker(action)

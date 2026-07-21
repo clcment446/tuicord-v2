@@ -73,3 +73,74 @@ func chatLineAnchorKey(line chatLine) string {
 	}
 	return messagePlacementPrefix(line.message)
 }
+
+// Fold and unfold toggles pin the toggled control's line to the screen row it
+// occupied when activated, exactly like Discord. The message-level anchor
+// cannot do this: it maps line positions by index within the message, and a
+// fold changes every index after the control, so repeated fold/unfold cycles
+// would creep the viewport.
+const (
+	pendingAnchorNone uint8 = iota
+	pendingAnchorHeader
+	pendingAnchorControl
+)
+
+// anchorHeaderToggle pins a markdown-header fold control (by header key) at
+// the given visible row for the next draw.
+func (w *ChatView) anchorHeaderToggle(key string, row int) {
+	if !w.stickyAnchor || key == "" || row < 0 {
+		return
+	}
+	w.pendingAnchorKind = pendingAnchorHeader
+	w.pendingAnchorKey = key
+	w.pendingAnchorRow = row
+}
+
+// anchorControlToggle pins an expandable component control at the visible row
+// it currently occupies. The control is located by key because component
+// activations arrive without coordinates (shortcuts, keyboard traversal).
+func (w *ChatView) anchorControlToggle(controlKey string) {
+	if !w.stickyAnchor || controlKey == "" {
+		return
+	}
+	for row := range w.visibleLines {
+		if pendingAnchorMatches(w.visibleLines[row], pendingAnchorControl, controlKey) {
+			w.pendingAnchorKind = pendingAnchorControl
+			w.pendingAnchorKey = controlKey
+			w.pendingAnchorRow = row
+			return
+		}
+	}
+}
+
+// applyPendingAnchor consumes a pending fold/unfold pin, scrolling so the
+// toggled control sits at its remembered row. It reports whether it took
+// effect, in which case the generic anchor restore must not also run.
+func (w *ChatView) applyPendingAnchor(lines []chatLine, height int) bool {
+	kind := w.pendingAnchorKind
+	if kind == pendingAnchorNone {
+		return false
+	}
+	w.pendingAnchorKind = pendingAnchorNone
+	for i := range lines {
+		if pendingAnchorMatches(lines[i], kind, w.pendingAnchorKey) {
+			w.bottomScroll.SetOffset(len(lines) - height - (i - w.pendingAnchorRow))
+			return true
+		}
+	}
+	return false
+}
+
+func pendingAnchorMatches(line chatLine, kind uint8, key string) bool {
+	switch kind {
+	case pendingAnchorHeader:
+		return line.header != nil && line.header.key == key
+	case pendingAnchorControl:
+		for _, hit := range line.actions {
+			if hit.action.controlKey() == key {
+				return true
+			}
+		}
+	}
+	return false
+}
