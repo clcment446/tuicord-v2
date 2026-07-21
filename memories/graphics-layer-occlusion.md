@@ -36,9 +36,11 @@ it. (Whole-placement suppression was tried first and was wrong: it grayed out th
   left/right side strips).
 - `Graphic.Reclip func([]Rect) []byte` + `ClearAll []byte` live on the graphic.
   The Image widget (`image.go`) sets `Reclip` to re-emit `kittyPlaceCropped` for
-  each visible sub-rect (placement ids `base, base+1, …`), and `ClearAll =
-  kittyDeleteAllPlacements` (`a=d,d=i,i=<id>` — deletes all placements, keeps
-  payload, so no re-upload). Resolved split graphics set `Clear=ClearAll` and
+  each visible sub-rect (placement ids `base..base+maxReclipStrips-1`, 4). `ClearAll`
+  deletes exactly those placement ids (NOT `d=i,i=<id>` which would wipe *every*
+  placement of the image — fatal when the same avatar/URL appears twice, e.g. a
+  DM author avatar and the profile popup sharing an image id). Resolved split
+  graphics set `Clear=ClearAll` and
   `split=true`; `GraphicDiff` forces `Clear` when `old.split||next.split` and the
   Data changed (the same-payload fast path would otherwise leave stale
   sub-placements). Unchanged occlusion diffs to nothing (placements retained).
