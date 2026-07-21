@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"awesomeProject/internal/markup"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 )
@@ -25,6 +26,32 @@ func TestChatViewRendersReplyReference(t *testing.T) {
 	}
 	if got := rowText(buf, 2); got != "sure!" {
 		t.Errorf("content line = %q, want %q", got, "sure!")
+	}
+}
+
+func TestChatViewReplyPreviewResolvesMention(t *testing.T) {
+	st := store.New(0)
+	st.UpsertMember(1, store.Member{ID: 42, Name: "alice"})
+	st.AppendMessage(store.Message{
+		ID: 2, ChannelID: 1, AuthorID: 7, Author: "bob", Content: "yes",
+		Reply: &store.MessageReply{MessageID: 1, ChannelID: 1, AuthorID: 9, Author: "carol", Content: "ask <@42> about it"},
+	})
+
+	resolver := func() markup.Resolver {
+		return markup.Resolver{
+			Member: func(id uint64) (string, bool) { return st.MemberName(1, store.UserID(id)) },
+		}
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, resolver, Styles{})
+	buf := screen.NewBuffer(48, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	reply := rowText(buf, 1)
+	if !strings.Contains(reply, "ask @alice about it") {
+		t.Errorf("reply line = %q, want resolved mention", reply)
+	}
+	if strings.Contains(reply, "<@42>") {
+		t.Errorf("reply line = %q, raw mention leaked into preview", reply)
 	}
 }
 

@@ -29,6 +29,9 @@ rendered empty (#27): `convertMessage` dropped `Reference`,
 - `handleMessageUpdate` keeps `Reply`/`Forwards` (only overwrites when the
   patch carries them) — same class of bug as the earlier ComponentTree
   omission in [[rich-v2-message-update-tree]].
+- Reply preview content is stored as raw Discord markup. Before collapsing it
+  to one line, `renderReplyLine` must call `ChatView.displayContent`; otherwise
+  mentions in the referenced message leak through as literal `<@user-id>`.
 
 ## Notes
 

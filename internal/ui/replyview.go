@@ -46,7 +46,10 @@ func (w *ChatView) renderReplyLine(reply store.MessageReply, channel store.Chann
 			action: markup.Action{Kind: markup.ActionUserMention, Target: strconv.FormatUint(uint64(reply.AuthorID), 10)},
 		}}
 	}
-	preview := strings.Join(strings.Fields(reply.Content), " ")
+	// Reply previews contain the original Discord markup verbatim. Resolve it
+	// through the same path as normal message bodies before flattening it to one
+	// line, otherwise mentions leak through as raw <@user-id> tokens.
+	preview := strings.Join(strings.Fields(w.displayContent(reply.Content)), " ")
 	if preview != "" {
 		line.segments = append(line.segments, chatSegment{text: "  " + truncateToWidth(preview, width-chatLineWidth(line)-2), style: muted})
 	}
