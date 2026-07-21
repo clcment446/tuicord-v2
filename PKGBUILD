@@ -7,8 +7,13 @@ pkgdesc="A Discord client that runs in your terminal, written in Go"
 arch=('x86_64' 'aarch64')
 url="https://github.com/clcment446/tuicord-v2"
 license=('custom:unknown')
-depends=('glibc')
+depends=('glibc' 'mpv')
 makedepends=('go' 'git')
+optdepends=('xdg-utils: open links in a browser'
+            'wl-clipboard: clipboard support on Wayland'
+            'xclip: clipboard support on X11'
+            'xsel: alternative clipboard support on X11'
+            'firefox: captcha-based login flow')
 provides=('tuicord')
 conflicts=('tuicord')
 source=("git+https://github.com/clcment446/tuicord-v2.git")
