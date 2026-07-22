@@ -182,14 +182,24 @@ func run() error {
 		Seeds:       seeds,
 		Active:      activeIdx,
 		AutoConnect: true,
+		// The Manager binds this sink to whichever account is active, so plugins
+		// observe the active account rather than the launch account.
+		EventSink: luaManager,
 	})
 	surface.manager = accountManager
 	mv.SetAccountSelectHandler(func(i int) { _ = accountManager.Switch(i) })
 
 	// Attach the live Host only after App/MainView/Shell exist. Config keymaps and
 	// commands remain registered in the same manager; ordinary plugins now load
-	// according to the Lua-derived Config.
-	if errs := attachAndLoadPlugins(luaManager, orch, uiApp, shell, cfg, styles, activeTheme); len(errs) > 0 {
+	// according to the Lua-derived Config. Host actions resolve the active account
+	// at call time so a plugin acts through the currently selected account.
+	activeApp := func() *app.App {
+		if acc := accountManager.Active(); acc != nil {
+			return acc.App()
+		}
+		return nil
+	}
+	if errs := attachAndLoadPlugins(luaManager, activeApp, uiApp, shell, cfg, styles, activeTheme); len(errs) > 0 {
 		shell.ShowToast("Plugin load", pluginLoadError(errs))
 	}
 

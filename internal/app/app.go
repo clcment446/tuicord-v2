@@ -531,7 +531,9 @@ func (a *App) OnIncomingMessage(fn func(store.Message)) { a.onIncomingMessage = 
 func (a *App) OnError(fn func(error)) { a.onError = fn }
 
 // SetEventSink registers an optional consumer of client events (the plugin
-// system). Pass nil to detach.
+// system). Pass nil to detach. Call on the UI goroutine: emit runs only inside
+// Post closures, so swapping the sink there (e.g. on an account switch) cannot
+// race an in-flight emit.
 func (a *App) SetEventSink(sink EventSink) { a.events = sink }
 
 // emit forwards an event to the registered sink, if any. Safe to call with a

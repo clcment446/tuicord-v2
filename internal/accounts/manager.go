@@ -137,6 +137,10 @@ type Options struct {
 	// Persist saves the registry after a mutation (active index, discovered
 	// label/id, or a new account). May be nil in tests.
 	Persist func(config.Accounts)
+	// EventSink, if set, receives client events (the Lua plugin system). The
+	// Manager binds it to whichever account is active so plugins observe and act
+	// on the active account rather than the launch account they were wired to.
+	EventSink app.EventSink
 	// Seeds is the ordered set of saved accounts.
 	Seeds []Seed
 	// Active is the initial active index.
@@ -156,6 +160,7 @@ type Manager struct {
 	autoConnect bool
 	accounts    []*Account
 	active      int
+	eventSink   app.EventSink
 }
 
 // New builds a Manager from options. It does not connect anything; call Start.
@@ -168,6 +173,7 @@ func New(opts Options) *Manager {
 		persist:     opts.Persist,
 		autoConnect: opts.AutoConnect,
 		active:      opts.Active,
+		eventSink:   opts.EventSink,
 	}
 	for _, s := range opts.Seeds {
 		m.accounts = append(m.accounts, &Account{
@@ -222,11 +228,31 @@ func (m *Manager) Switch(idx int) error {
 		return err
 	}
 	m.active = idx
+	m.bindEventSink(acc)
 	m.persistRegistry()
 	m.surface.Activate(acc)
 	m.connect(acc)
 	m.pushBadges()
 	return nil
+}
+
+// bindEventSink routes plugin events to the active account and detaches every
+// other built account. Runs on the UI goroutine, as does App.emit, so the sink
+// pointer is swapped without racing an in-flight emit.
+func (m *Manager) bindEventSink(active *Account) {
+	if m.eventSink == nil {
+		return
+	}
+	for _, acc := range m.accounts {
+		if acc.app == nil {
+			continue
+		}
+		if acc == active {
+			acc.app.SetEventSink(m.eventSink)
+		} else {
+			acc.app.SetEventSink(nil)
+		}
+	}
 }
 
 // Add appends a new account to the registry (built lazily on first switch) and
