@@ -290,6 +290,8 @@ func TestChatViewTranscriptReusesLines(t *testing.T) {
 
 func TestChatViewTranscriptIgnoresOtherChannelMessages(t *testing.T) {
 	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "active"})
+	st.UpsertChannel(store.Channel{ID: 2, GuildID: 1, Name: "inactive"})
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "one"})
 	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
 	view.render(40)

@@ -55,6 +55,15 @@ func TestMoveGuildIntoGroup(t *testing.T) {
 	}
 }
 
+func TestMoveGuildToOwnGroupHeaderCommitsPreviewOrder(t *testing.T) {
+	groups := []store.GuildFolder{{ID: 10, GuildIDs: []store.GuildID{1, 2, 3}}}
+	got := moveGuild(groups, 1, store.GuildRow{Folder: true, FolderID: 10}, false)
+	want := [][]store.GuildID{{2, 3, 1}}
+	if !reflect.DeepEqual(groupIDs(got), want) {
+		t.Fatalf("moveGuild = %v, want %v", groupIDs(got), want)
+	}
+}
+
 func TestMoveGuildBeforeGroupMember(t *testing.T) {
 	groups := []store.GuildFolder{
 		{ID: 10, GuildIDs: []store.GuildID{1, 2}},

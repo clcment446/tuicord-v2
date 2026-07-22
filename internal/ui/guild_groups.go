@@ -44,10 +44,6 @@ func moveGuild(groups []store.GuildFolder, guild store.GuildID, target store.Gui
 		return out
 	}
 
-	source := groupIndex(out, guild)
-	if target.Folder && source >= 0 && out[source].ID == target.FolderID {
-		return out
-	}
 	out = pullGuild(out, guild)
 
 	if target.Folder {

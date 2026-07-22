@@ -81,6 +81,24 @@ func TestChannelLastMessageTracksGatewayMessagesAndSurvivesSparseUpdates(t *test
 	if channel.LastMessageID != 20 {
 		t.Fatalf("last message after sparse update = %d, want 20", channel.LastMessageID)
 	}
+
+	s.UpsertChannel(Channel{ID: 7, GuildID: 1, Name: "alice", Kind: ChannelDM, LastMessageID: 15})
+	channel, _ = s.Channel(7)
+	if channel.LastMessageID != 20 {
+		t.Fatalf("last message after stale nonzero update = %d, want 20", channel.LastMessageID)
+	}
+}
+
+func TestChannelHydrationMergesPreHydrationMessageActivity(t *testing.T) {
+	s := New(0)
+	s.AppendMessage(Message{ID: 30, ChannelID: 7, Content: "arrived first"})
+
+	s.UpsertChannel(Channel{ID: 7, GuildID: 1, Name: "alice", Kind: ChannelDM, LastMessageID: 20})
+
+	channel, ok := s.Channel(7)
+	if !ok || channel.LastMessageID != 30 {
+		t.Fatalf("hydrated channel = %+v,%v, want last message 30", channel, ok)
+	}
 }
 
 func TestReplaceMessageByNonce(t *testing.T) {

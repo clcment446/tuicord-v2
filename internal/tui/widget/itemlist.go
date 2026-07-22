@@ -57,6 +57,7 @@ type ItemList struct {
 	contextIndex int
 	contextSet   bool
 	dragItems    []Item
+	activeDrag   *listDrag
 }
 
 // NewItemList returns a list containing items.
@@ -87,6 +88,7 @@ func (w *ItemList) SetItems(items []Item) {
 	if w == nil {
 		return
 	}
+	w.invalidateDrag()
 	w.items = append(w.items[:0], items...)
 	if len(w.items) == 0 {
 		w.selected = 0
@@ -407,10 +409,27 @@ func (w *ItemList) DragStart(x, y int) (tui.DragOp, bool) {
 	if index < 0 || index >= len(w.items) || w.canDrag != nil && !w.canDrag(index) {
 		return nil, false
 	}
-	drag := &listDrag{list: w, from: index, to: index, visual: index, startY: y, offset: w.offset, selected: w.selected}
+	w.invalidateDrag()
+	drag := &listDrag{list: w, from: index, to: index, visual: index, startY: y, offset: w.offset, selected: w.selected, active: true}
 	drag.items = append([]Item(nil), w.items...)
+	w.activeDrag = drag
 	w.dragItems = dragItems(drag.items, index, index)
 	return drag, true
+}
+
+// invalidateDrag cancels the list-owned part of an active pointer capture. The
+// DragManager may still deliver a later release to the old operation, so the
+// operation also marks itself inactive and will ignore that stale event.
+func (w *ItemList) invalidateDrag() {
+	if w == nil {
+		return
+	}
+	if drag := w.activeDrag; drag != nil {
+		w.selected = drag.selected
+		drag.active = false
+		w.activeDrag = nil
+	}
+	w.dragItems = nil
 }
 
 func (w *ItemList) click(index int) {
@@ -430,11 +449,16 @@ type listDrag struct {
 	offset   int
 	selected int
 	moved    bool
+	active   bool
 	items    []Item
 }
 
+func (d *listDrag) valid() bool {
+	return d != nil && d.active && d.list != nil && d.list.activeDrag == d
+}
+
 func (d *listDrag) DragMove(dx, dy int) {
-	if d == nil || d.list == nil || len(d.list.items) == 0 {
+	if !d.valid() || len(d.list.items) == 0 {
 		return
 	}
 	if dx != 0 || dy != 0 {
@@ -444,6 +468,10 @@ func (d *listDrag) DragMove(dx, dy int) {
 	d.visual = d.to
 	if d.list.onDrag != nil {
 		d.visual = d.list.onDrag(d.from, d.to)
+		// A drag callback may rebuild the list synchronously.
+		if !d.valid() || len(d.list.items) == 0 {
+			return
+		}
 	}
 	d.visual = clampInt(d.visual, 0, len(d.list.items)-1)
 	d.list.dragItems = dragItems(d.items, d.from, d.visual)
@@ -451,9 +479,11 @@ func (d *listDrag) DragMove(dx, dy int) {
 }
 
 func (d *listDrag) DragEnd(commit bool) {
-	if d == nil || d.list == nil {
+	if !d.valid() {
 		return
 	}
+	d.active = false
+	d.list.activeDrag = nil
 	d.list.dragItems = nil
 	if !commit {
 		d.list.SetSelectedSilent(d.selected)
