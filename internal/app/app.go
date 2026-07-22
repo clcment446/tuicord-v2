@@ -644,7 +644,17 @@ func (a *App) GuildUnread(guild store.GuildID) UnreadStatus {
 	}
 	a.unreadMu.RLock()
 	status := a.guildUnread[guild]
+	cacheReady := a.unreadChannels != nil
 	a.unreadMu.RUnlock()
+	// Keep a constant-time local fallback for App values constructed without a
+	// ningen handle, and while authoritative state has not announced a local
+	// ping yet. Connected sessions otherwise use only the event-driven cache.
+	if a.store != nil && a.store.GuildPings(guild) > 0 {
+		return Mentioned
+	}
+	if cacheReady || a.handle != nil {
+		return status
+	}
 	return status
 }
 
