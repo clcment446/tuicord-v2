@@ -1069,6 +1069,9 @@ func TestChatViewFocusLatestStopUsesLatestMessage(t *testing.T) {
 	if view.focusedMessage.ID != 2 {
 		t.Fatalf("focused message = %d, want latest message 2", view.focusedMessage.ID)
 	}
+	if allocs := testing.AllocsPerRun(100, func() { view.focusLatestStop() }); allocs != 0 {
+		t.Fatalf("focusLatestStop allocations = %v, want 0", allocs)
+	}
 }
 
 func TestChatViewMultipleEmbedStopsHaveStableDistinctKeys(t *testing.T) {

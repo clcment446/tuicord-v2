@@ -1017,7 +1017,7 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 	}
 	// Esc is a root-level modal transition. Claim it before a focused chat or
 	// list can consume it, while still letting a topmost popup handle it first.
-	if keyMatches(key, s.cfg.Keys.Vim.ExitInput) || key.Key == input.KeyEsc && s.cfg.Keys.Vim.ExitInput == "" {
+	if keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) {
 		if s.overlay != nil {
 			s.closeOverlay()
 			return true
@@ -1171,13 +1171,13 @@ func (s *Shell) Handle(ev tui.Event) bool {
 
 	if isKey {
 		switch {
-		case s.cfg.Accessibility.VimNavigation && keyMatches(key, s.cfg.Keys.Vim.ExitInput) && s.editor.phase == editorInput:
+		case s.cfg.Accessibility.VimNavigation && keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) && s.editor.phase == editorInput:
 			s.leaveInputMode()
 			return true
-		case s.cfg.Accessibility.VimNavigation && keyMatches(key, s.cfg.Keys.Vim.ExitInput) && s.editor.phase == editorFocusPending:
+		case s.cfg.Accessibility.VimNavigation && keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) && s.editor.phase == editorFocusPending:
 			s.exitEditor(nil)
 			return true
-		case s.cfg.Accessibility.VimNavigation && s.editor.phase == editorNormal && keyMatches(key, s.cfg.Keys.Vim.Insert) && s.composerWritable():
+		case s.cfg.Accessibility.VimNavigation && s.editor.phase == editorNormal && vimIns(key, s.cfg.Keys.Vim.Insert) && s.composerWritable():
 			return s.beginComposerInput(false)
 		case key.Key == input.KeyRune && key.Rune == '+' && key.Mods == 0:
 			s.openHotSwitch()
