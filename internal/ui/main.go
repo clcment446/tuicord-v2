@@ -138,6 +138,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.guildList.OnVimFocus(mv.unfoldSelectedGuildFolder)
 	mv.guildList.SetDrag(mv.canDragGuild, mv.dragGuild, mv.dropGuild)
 	mv.guildList.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.guildList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.channelList = widget.NewItemList(nil)
 	mv.channelList.SetStyle(styles.Cell("guilds.channels"))
@@ -147,9 +148,11 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.channelList.OnHover(mv.onChannelHovered)
 	mv.channelList.OnVimFocus(mv.unfoldSelectedChannelCategory)
 	mv.channelList.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.channelList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.memberList = widget.NewItemList(nil)
 	mv.memberList.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.memberList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 	mv.memberList.SetStyle(styles.Cell("guilds.members"))
 
 	// The account selector sits to the left of the composer; switching a row
@@ -160,6 +163,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.accountList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.accountList.OnSelect(mv.onAccountSelected)
 	mv.accountList.SetVimNavigation(cfg.Accessibility.VimNavigation)
+	mv.accountList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)

@@ -15,14 +15,15 @@ import (
 )
 
 func TestShellInputModeIAndComposerSemicolonQ(t *testing.T) {
+	cfg := vimTestConfig()
 	mv := &MainView{
-		cfg:            config.Config{Accessibility: config.Accessibility{VimNavigation: true}},
+		cfg:            cfg,
 		composer:       widget.NewTextInput("Message"),
 		composerStatus: widget.NewText(""),
 		chat:           NewChatView(nil, nil, nil, Styles{}),
 	}
 	mv.composer.SetInputFocusEnabled(false)
-	s := &Shell{mv: mv, cfg: config.Config{Accessibility: config.Accessibility{VimNavigation: true}}}
+	s := &Shell{mv: mv, cfg: cfg}
 	if !s.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {
 		t.Fatal("i did not enter input mode")
 	}
@@ -42,7 +43,7 @@ func TestShellInputModeIAndComposerSemicolonQ(t *testing.T) {
 }
 
 func TestVimITransfersRuntimeFocusToNewlyEnabledComposer(t *testing.T) {
-	cfg := config.Config{Accessibility: config.Accessibility{VimNavigation: true}}
+	cfg := vimTestConfig()
 	st := store.New(0)
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "hello"})
 	chat := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
@@ -86,6 +87,45 @@ func TestVimShiftITransfersFocusToComposer(t *testing.T) {
 	if runtime.Focus.Focused() != mv.composer || shell.editor.phase != editorInput {
 		t.Fatalf("Shift+I focus/phase = %T/%v, want composer/input", runtime.Focus.Focused(), shell.editor.phase)
 	}
+}
+
+func TestShellEmptyVimInsertAndExitBindingsStayDisabled(t *testing.T) {
+	t.Run("insert", func(t *testing.T) {
+		cfg := vimTestConfig()
+		cfg.Keys.Vim.Insert = ""
+		runtime, shell, _, _ := newVimFocusHarness(t, cfg)
+		if runtime.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {
+			t.Fatal("disabled insert binding was handled")
+		}
+		if shell.editor.phase != editorNormal {
+			t.Fatalf("disabled insert changed editor phase to %v", shell.editor.phase)
+		}
+	})
+
+	t.Run("exit input", func(t *testing.T) {
+		cfg := vimTestConfig()
+		cfg.Keys.Vim.ExitInput = ""
+		runtime, shell, _, _ := newVimFocusHarness(t, cfg)
+		enterVimInput(t, runtime, shell)
+		if runtime.Handle(input.KeyEvent{Key: input.KeyEsc}) {
+			t.Fatal("disabled exit-input binding was handled")
+		}
+		if shell.editor.phase != editorInput {
+			t.Fatalf("disabled exit-input changed editor phase to %v", shell.editor.phase)
+		}
+	})
+
+	t.Run("all", func(t *testing.T) {
+		cfg := vimTestConfig()
+		cfg.Keys.Vim = config.VimKeys{}
+		runtime, shell, _, _ := newVimFocusHarness(t, cfg)
+		if runtime.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {
+			t.Fatal("all-disabled Vim config still entered input mode")
+		}
+		if shell.editor.phase != editorNormal {
+			t.Fatalf("all-disabled Vim config changed editor phase to %v", shell.editor.phase)
+		}
+	})
 }
 
 func TestNonVimExplicitFocusCancelsHiddenComposerRequest(t *testing.T) {
@@ -153,13 +193,14 @@ func TestPopupEditFocusPreemptsChatAndTransfersToComposer(t *testing.T) {
 }
 
 func TestShellBackspaceOnEmptyComposerLeavesInputMode(t *testing.T) {
+	cfg := vimTestConfig()
 	mv := &MainView{
-		cfg:            config.Config{Accessibility: config.Accessibility{VimNavigation: true}},
+		cfg:            cfg,
 		composer:       widget.NewTextInput("Message"),
 		composerStatus: widget.NewText(""),
 		chat:           NewChatView(nil, nil, nil, Styles{}),
 	}
-	s := &Shell{mv: mv, cfg: config.Config{Accessibility: config.Accessibility{VimNavigation: true}}}
+	s := &Shell{mv: mv, cfg: cfg}
 	mv.composer.SetInputFocusEnabled(false)
 	mv.composer.OnBackspaceEmpty(s.leaveInputMode)
 	if !s.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {

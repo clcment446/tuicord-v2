@@ -69,6 +69,7 @@ func NewForumView(styles Styles, ascii bool, onOpen func(store.ChannelID), onLoa
 		ascii:          ascii,
 		onOpen:         onOpen,
 		onLoadArchived: onLoadArchived,
+		vimKeys:        config.Default().Keys.Vim,
 		node:           layout.Node{Grow: 1},
 	}
 	fv.header.SetStyle(styles.Cell("forum.header"))
@@ -77,6 +78,7 @@ func NewForumView(styles Styles, ascii bool, onOpen func(store.ChannelID), onLoa
 	fv.list.SetSelectedStyle(styles.Cell("forum.selected"))
 	fv.list.SetBadgeStyle(styles.Cell("forum.badge"))
 	fv.list.OnSelect(fv.onSelect)
+	fv.list.SetVimKeys(fv.vimKeys.ScrollDown, fv.vimKeys.ScrollUp)
 	fv.setBody(nil)
 	return fv
 }
@@ -278,19 +280,14 @@ func (fv *ForumView) VimFocusEnabled() bool { return fv != nil && fv.vimNavigati
 func (fv *ForumView) SetVimNavigation(enabled bool) {
 	if fv != nil {
 		fv.vimNavigation = enabled
-		if fv.vimKeys == (config.VimKeys{}) {
-			fv.vimKeys = config.Default().Keys.Vim
-		}
 		fv.list.SetVimNavigation(enabled)
 	}
 }
 
 func (fv *ForumView) SetVimKeys(keys config.VimKeys) {
 	if fv != nil {
-		if keys == (config.VimKeys{}) {
-			keys = config.Default().Keys.Vim
-		}
 		fv.vimKeys = keys
+		fv.list.SetVimKeys(keys.ScrollDown, keys.ScrollUp)
 	}
 }
 

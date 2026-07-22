@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/tui"
@@ -83,6 +84,34 @@ func TestForumViewNavigatesAdjacentForumsAtListEdges(t *testing.T) {
 	}
 	if delta != 1 {
 		t.Fatalf("down delta = %d, want 1", delta)
+	}
+}
+
+func TestForumViewUsesConfiguredVimMovementWithoutJKFallback(t *testing.T) {
+	forum := store.Channel{ID: 1, Kind: store.ChannelForum}
+	fv := NewForumView(Styles{}, false, nil, nil)
+	fv.SetForum(forum, []store.Channel{post(2, "first", nil, 0, time.Now())}, nil, nil)
+	fv.SetVimNavigation(true)
+	keys := config.Default().Keys.Vim
+	keys.ScrollDown, keys.ScrollUp = "n", "p"
+	fv.SetVimKeys(keys)
+
+	if fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || fv.list.Selected() != 0 {
+		t.Fatal("old j binding still moved a remapped forum list")
+	}
+	if !fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'n'}) || fv.list.Selected() != 1 {
+		t.Fatal("remapped forum down key did not move the list")
+	}
+	if fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) || fv.list.Selected() != 1 {
+		t.Fatal("old k binding still moved a remapped forum list")
+	}
+	if !fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'p'}) || fv.list.Selected() != 0 {
+		t.Fatal("remapped forum up key did not move the list")
+	}
+
+	fv.SetVimKeys(config.VimKeys{})
+	if fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'n'}) {
+		t.Fatal("disabled forum Vim movement was handled")
 	}
 }
 
