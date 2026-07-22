@@ -83,16 +83,19 @@ func TestReadySeedsAndResetsReadStateCache(t *testing.T) {
 	st.UpsertChannel(store.Channel{ID: 99, GuildID: 8, Name: "old"})
 	a := &App{store: st, ui: syncPoster{}, handle: ning}
 
-	// Seed one effective mention and one authoritative read position. These are
-	// already in ningen when App receives READY in production.
-	ning.ReadState.MarkRead(42, 50)
-	ning.ReadState.MarkUnread(42, 60, 1)
-	ning.ReadState.MarkRead(43, 70)
+	// READY carries the connection's read markers: one effective mention and one
+	// authoritative read position. App snapshots these value copies instead of
+	// reading ningen's live pointers.
 	st.IncrementUnread(43)
 	st.IncrementPing(43)
 	a.cacheReadState(99, 8, Mentioned)
 
-	a.handleReady(&gateway.ReadyEvent{})
+	ready := &gateway.ReadyEvent{}
+	ready.ReadStates = []gateway.ReadState{
+		{ChannelID: 42, LastMessageID: 60, MentionCount: 1},
+		{ChannelID: 43, LastMessageID: 70},
+	}
+	a.handleReady(ready)
 
 	if got := a.GuildUnread(7); got != Mentioned {
 		t.Fatalf("READY-seeded guild status = %v, want mentioned", got)
@@ -263,8 +266,10 @@ func TestMarkReadNeverMovesBehindAuthoritativeStateOrLatestChannel(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			ning := appdiscord.WrapSession(session.New(""))
 			ning.ChannelSet(&discord.Channel{ID: 42, GuildID: 7, LastMessageID: tt.latest}, true)
-			ning.ReadState.MarkRead(42, tt.read)
 			a := &App{store: store.New(0), handle: ning}
+			// The read watermark App must not fall behind comes from its own marker
+			// snapshot, fed in production by READY and read.UpdateEvent value copies.
+			a.putReadMark(42, readMark{lastRead: tt.read})
 
 			a.MarkRead(42, 100)
 

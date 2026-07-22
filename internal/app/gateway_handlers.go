@@ -9,41 +9,48 @@ import (
 )
 
 func (a *App) registerGatewayLifecycleHandlers() {
-	a.handle.AddHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
+	// Gateway ingress must be synchronous. Arikawa's ophandler.Loop dispatches
+	// events from the socket in order on a single goroutine, but AddHandler runs
+	// each callback in its own goroutine (`go h.call`), so a CREATE dispatched
+	// before a DELETE could enqueue its ui.Post after the DELETE's, resurrecting
+	// the entity. AddSyncHandler runs inline, preserving dispatch order into the
+	// Post FIFO. The callbacks only convert payloads and enqueue a non-blocking
+	// Post, so they never stall the socket loop for long.
+	a.handle.AddSyncHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
 		a.handleChannelUnreadUpdate(e)
 	})
-	a.handle.AddHandler(func(e *read.UpdateEvent) {
+	a.handle.AddSyncHandler(func(e *read.UpdateEvent) {
 		a.handleReadStateUpdate(e)
 	})
-	a.handle.AddHandler(func(e *gateway.ReadyEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ReadyEvent) {
 		a.handleReady(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildCreateEvent) {
 		a.handleGuildCreate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildUpdateEvent) {
 		a.handleGuildUpdate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildDeleteEvent) {
 		a.handleGuildDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelCreateEvent) {
 		a.handleChannelUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelUpdateEvent) {
 		a.handleChannelUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelDeleteEvent) {
 		a.handleChannelDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildEmojisUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildEmojisUpdateEvent) {
 		guildID := store.GuildID(e.GuildID)
 		emojis := convertGuildEmojis(e.Emojis)
 		a.ui.Post(func() {
@@ -54,7 +61,7 @@ func (a *App) registerGatewayLifecycleHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.UserSettingsUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.UserSettingsUpdateEvent) {
 		folders := convertGuildFolders(e.GuildFolders)
 		a.ui.Post(func() {
 			a.store.SetGuildFolders(folders)
@@ -95,6 +102,12 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	}
 	channel := store.ChannelID(e.ChannelID)
 	guild := store.GuildID(e.GuildID)
+	// The event embeds a value copy of ningen's read state. Record the marker so
+	// localReadState and MarkRead never read ningen's live pointer.
+	a.putReadMark(channel, readMark{
+		lastRead: e.ReadState.LastMessageID,
+		mentions: e.ReadState.MentionCount,
+	})
 	// UpdateEvent already contains ningen's scalar unread result. Applying mute
 	// state locally preserves the useful semantics without its permission-aware
 	// helper performing REST fallback on this callback goroutine.
@@ -116,51 +129,51 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 }
 
 func (a *App) registerGatewayMessageHandlers() {
-	a.handle.AddHandler(func(e *gateway.MessageCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageCreateEvent) {
 		a.handleMessageCreate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageUpdateEvent) {
 		a.handleMessageUpdate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageDeleteEvent) {
 		a.handleMessageDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageDeleteBulkEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageDeleteBulkEvent) {
 		a.handleMessageDeleteBulk(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionAddEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionAddEvent) {
 		a.handleReactionAdd(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveEvent) {
 		a.handleReactionRemove(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
 		a.handleReactionRemoveAll(e)
 	})
 }
 
 func (a *App) registerGatewayMemberHandlers() {
-	a.handle.AddHandler(func(e *gateway.GuildMembersChunkEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMembersChunkEvent) {
 		a.handleMembersChunk(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberAddEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberAddEvent) {
 		a.handleMemberUpsert(e.GuildID, e.Member)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberUpdateEvent) {
 		member := discord.Member{User: e.User}
 		e.UpdateMember(&member)
 		a.handleMemberUpsert(e.GuildID, member)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberRemoveEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberRemoveEvent) {
 		guildID := store.GuildID(e.GuildID)
 		userID := store.UserID(e.User.ID)
 		a.ui.Post(func() {
@@ -171,15 +184,15 @@ func (a *App) registerGatewayMemberHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleCreateEvent) {
 		a.handleRoleUpsert(e.GuildID, e.Role)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleUpdateEvent) {
 		a.handleRoleUpsert(e.GuildID, e.Role)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleDeleteEvent) {
 		guildID := store.GuildID(e.GuildID)
 		roleID := store.RoleID(e.RoleID)
 		a.ui.Post(func() {
@@ -193,23 +206,23 @@ func (a *App) registerGatewayMemberHandlers() {
 }
 
 func (a *App) registerGatewayThreadHandlers() {
-	a.handle.AddHandler(func(e *gateway.ThreadCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadCreateEvent) {
 		a.handleThreadUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadUpdateEvent) {
 		a.handleThreadUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadDeleteEvent) {
 		a.handleThreadDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadListSyncEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadListSyncEvent) {
 		a.handleThreadListSync(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadMemberUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadMemberUpdateEvent) {
 		id := store.ChannelID(e.ThreadMember.ID)
 		a.ui.Post(func() {
 			// A ThreadMemberUpdate for the current user means we joined; leaving
@@ -221,7 +234,7 @@ func (a *App) registerGatewayThreadHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadMembersUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadMembersUpdateEvent) {
 		a.handleThreadMembersUpdate(e)
 	})
 }
