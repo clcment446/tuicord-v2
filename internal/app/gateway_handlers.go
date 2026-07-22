@@ -70,6 +70,27 @@ func (a *App) registerGatewayLifecycleHandlers() {
 			}
 		})
 	})
+
+	a.handle.AddSyncHandler(func(e *gateway.UserGuildSettingsUpdateEvent) {
+		a.handleGuildSettingsUpdate(e)
+	})
+}
+
+// handleGuildSettingsUpdate refreshes derived attention after a mute-setting
+// change. ningen's MutedState (a sync handler registered before this one) has
+// already applied the event, so recomputing the read-state cache picks up the
+// new mute state: a newly muted channel drops its badge, an unmuted one regains
+// it. Without this the cached badges stayed stale until the next read event.
+func (a *App) handleGuildSettingsUpdate(e *gateway.UserGuildSettingsUpdateEvent) {
+	if a == nil || e == nil {
+		return
+	}
+	a.ui.Post(func() {
+		a.resetReadStateCache()
+		if a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
+	})
 }
 
 func (a *App) handleChannelUnreadUpdate(e *gateway.ChannelUnreadUpdateEvent) {
