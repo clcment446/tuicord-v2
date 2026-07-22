@@ -262,11 +262,19 @@ func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 		readStateChanged := a.removeCachedReadState(id, guildID)
 		for _, guild := range a.store.Guilds() {
 			for _, channel := range a.store.Channels(guild.ID) {
-				if channel.ID == id || channel.ParentID == id {
-					a.invalidateChannelLoads(channel.ID)
-					if channel.ParentID == id && a.removeCachedReadState(channel.ID, channel.GuildID) {
-						readStateChanged = true
-					}
+				if channel.ParentID != id {
+					continue
+				}
+				// Only threads are cascade-removed with their parent (see
+				// Store.RemoveChannel). A deleted category's child channels survive,
+				// re-parented to none, so their loads and unread cache must be kept:
+				// clearing them blanked live badges. Act only on thread children.
+				if channel.Thread == nil {
+					continue
+				}
+				a.invalidateChannelLoads(channel.ID)
+				if a.removeCachedReadState(channel.ID, channel.GuildID) {
+					readStateChanged = true
 				}
 			}
 		}

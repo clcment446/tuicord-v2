@@ -225,6 +225,25 @@ func TestReadStateCacheRemovedByDeletionPaths(t *testing.T) {
 		}
 	})
 
+	t.Run("category keeps surviving child channel unread", func(t *testing.T) {
+		a := newTestApp(&fakeSender{})
+		a.store.UpsertGuild(store.Guild{ID: 7})
+		a.store.UpsertChannel(store.Channel{ID: 50, GuildID: 7, Kind: store.ChannelCategory})
+		a.store.UpsertChannel(store.Channel{ID: 51, GuildID: 7, ParentID: 50, Kind: store.ChannelText})
+		a.cacheReadState(51, 7, Mentioned)
+
+		// Deleting a category does not delete its child channels (Discord re-parents
+		// them); their unread badge must survive.
+		a.handleChannelDelete(&gateway.ChannelDeleteEvent{Channel: discord.Channel{ID: 50, GuildID: 7}})
+
+		if _, ok := a.store.Channel(51); !ok {
+			t.Fatal("child channel was removed with its category")
+		}
+		if got := a.GuildUnread(7); got != Mentioned {
+			t.Fatalf("child unread after category delete = %v, want mentioned", got)
+		}
+	})
+
 	t.Run("thread", func(t *testing.T) {
 		a := newTestApp(&fakeSender{})
 		a.store.UpsertGuild(store.Guild{ID: 7})
