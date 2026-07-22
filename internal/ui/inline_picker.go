@@ -87,6 +87,41 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 	return p
 }
 
+// useReactionEntries replaces composer-oriented emoji inserts with values the
+// reaction endpoint accepts. Server emoji remain available in their own guild
+// even when animated; external emoji still require Nitro.
+func (p *InlinePicker) useReactionEntries(st *store.Store, active store.GuildID, nitro bool) {
+	p.entries = inlineReactionEntries(st, active, nitro)
+	p.refilter()
+}
+
+func inlineReactionEntries(st *store.Store, active store.GuildID, nitro bool) []searchEntry {
+	entries := make([]searchEntry, 0)
+	for _, e := range picker.Unicode() {
+		entries = append(entries, searchEntry{
+			key:   strings.ToLower(e.Name + " " + strings.Join(e.Keywords, " ")),
+			entry: pickerEntry{label: e.Char + "  :" + e.Name + ":", insert: e.Char, usable: true, favoriteKey: "u:" + e.Char},
+		})
+	}
+	for _, guild := range st.Guilds() {
+		for _, emoji := range st.GuildEmojis(guild.ID) {
+			usable := guild.ID == active || nitro
+			label := ":" + emoji.Name + ":"
+			if !usable {
+				label += "  (locked)"
+			}
+			entries = append(entries, searchEntry{
+				key: strings.ToLower(emoji.Name),
+				entry: pickerEntry{
+					label: label, insert: emoji.Name + ":" + strconv.FormatUint(emoji.ID, 10), usable: usable,
+					favoriteKey: "e:" + strconv.FormatUint(emoji.ID, 10), mediaURL: customEmojiURLParts(emoji.ID, emoji.Name, emoji.Animated), guildID: guild.ID,
+				},
+			})
+		}
+	}
+	return entries
+}
+
 func inlineEntries(st *store.Store, active store.GuildID, activeChannel store.ChannelID, nitro, fakeNitro bool, trigger rune) []searchEntry {
 	var entries []searchEntry
 	switch trigger {
