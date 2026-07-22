@@ -71,6 +71,14 @@ type MainView struct {
 	composerNode        *layout.Node
 	previewCellW        int
 	previewCellH        int
+	// previewCache holds thumbnails already decoded off the UI thread, keyed by
+	// attachment path; previewPending guards against launching a second decode
+	// for the same path. Both are UI-goroutine-owned.
+	previewCache        map[string]*imagePreview
+	previewPending      map[string]bool
+	// syncPreviewDecode forces inline thumbnail decoding for tests with no event
+	// loop; production leaves it false so decodes run off the UI goroutine.
+	syncPreviewDecode bool
 	composer            *widget.TextInput
 	attachments         []queuedAttachment
 	composerMode        composerMode
@@ -1569,6 +1577,9 @@ func (mv *MainView) clearAttachments() {
 		}
 	}
 	mv.attachments = nil
+	// Drop decoded thumbnails so a re-staged temp path cannot reuse a stale image
+	// and memory is released. In-flight decodes see isStagedImage return false.
+	mv.previewCache = nil
 	mv.updateAttachmentChips()
 }
 
