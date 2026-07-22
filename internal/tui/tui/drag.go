@@ -101,6 +101,31 @@ func (d *DragManager) HandleMouse(ev input.MouseEvent, hits HitIndex) bool {
 	return false
 }
 
+// HandleWidgetMouse starts pointer capture on a transient widget drawn outside
+// the retained hit index. The component decides whether the press hit its drag
+// or resize handle; callers never duplicate that geometry.
+func (d *DragManager) HandleWidgetMouse(ev input.MouseEvent, w Widget) bool {
+	if d == nil || w == nil || d.op != nil || ev.Kind != input.MousePress {
+		return false
+	}
+	var op DragOp
+	var ok bool
+	if draggable, draggableOK := w.(Draggable); draggableOK {
+		op, ok = draggable.DragStart(ev.X, ev.Y)
+	}
+	if !ok {
+		if resizable, resizableOK := w.(Resizable); resizableOK {
+			op, ok = resizable.ResizeStart(ev.X, ev.Y)
+		}
+	}
+	if !ok || op == nil {
+		return false
+	}
+	d.op = op
+	d.active = DragState{Widget: w, StartX: ev.X, StartY: ev.Y, LastX: ev.X, LastY: ev.Y, Button: ev.Btn}
+	return true
+}
+
 // Cancel cancels the active drag, if any.
 func (d *DragManager) Cancel() bool {
 	if !d.Active() {

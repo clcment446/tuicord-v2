@@ -1,9 +1,11 @@
 package plugin
 
 import (
+	"context"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"awesomeProject/internal/config"
 	lua "github.com/yuin/gopher-lua"
@@ -11,22 +13,27 @@ import (
 
 // pluginContext carries everything a single plugin's tuicord API binds against.
 type pluginContext struct {
-	name          string
-	host          *Host
-	events        *eventBus
-	commands      *commandRegistry
-	keys          *keyRegistry
-	themes        *themeRegistry
-	log           func(msg string)
-	grants        map[string]bool
-	fsRoot        *os.Root
-	configTarget  *config.Config
-	configContext bool
-	starting      bool
-	configured    bool
-	startupTheme  string
-	runtimeTheme  string
-	applyTheme    func(string) error
+	name            string
+	host            *Host
+	events          *eventBus
+	commands        *commandRegistry
+	keys            *keyRegistry
+	themes          *themeRegistry
+	log             func(msg string)
+	grants          map[string]bool
+	fsRoot          *os.Root
+	configTarget    *config.Config
+	configContext   bool
+	starting        bool
+	configured      bool
+	startupTheme    string
+	runtimeTheme    string
+	applyTheme      func(string) error
+	every           func(time.Duration, *lua.LFunction, *lua.LState)
+	submit          func(func()) bool
+	context         func() context.Context
+	callbackTimeout time.Duration
+	onCallbackError func(error)
 }
 
 // installAPI builds the global `tuicord` table in L, wiring every binding to
@@ -58,6 +65,18 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		fn := L.CheckFunction(2)
 		pctx.keys.add(spec, handler{L: L, fn: fn, plugin: pctx.name})
 		return 0
+	})
+	reg("every", func(L *lua.LState) int {
+		milliseconds := L.CheckInt(1)
+		fn := L.CheckFunction(2)
+		if pctx.every != nil && milliseconds > 0 {
+			pctx.every(time.Duration(milliseconds)*time.Millisecond, fn, L)
+		}
+		return 0
+	})
+	reg("now_ms", func(L *lua.LState) int {
+		L.Push(lua.LNumber(time.Now().UnixMilli()))
+		return 1
 	})
 
 	// --- actions -------------------------------------------------------------
@@ -92,6 +111,25 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		emoji := L.CheckString(3)
 		if pctx.host.React != nil {
 			pctx.host.React(channel, message, emoji)
+		}
+		return 0
+	})
+	reg("click", func(L *lua.LState) int {
+		channel := parseID(L.Get(1))
+		message := parseID(L.Get(2))
+		customID := L.CheckString(3)
+		if pctx.host.SubmitComponent != nil {
+			pctx.host.SubmitComponent(channel, message, 2, customID, nil)
+		}
+		return 0
+	})
+	reg("select", func(L *lua.LState) int {
+		channel := parseID(L.Get(1))
+		message := parseID(L.Get(2))
+		customID := L.CheckString(3)
+		values := tableToStringSlice(L.CheckTable(4))
+		if pctx.host.SubmitComponent != nil {
+			pctx.host.SubmitComponent(channel, message, 3, customID, values)
 		}
 		return 0
 	})
@@ -141,6 +179,43 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 		lines := tableToStringSlice(L.CheckTable(2))
 		if pctx.host.OpenOverlay != nil {
 			pctx.host.OpenOverlay(title, lines)
+		}
+		return 0
+	})
+	reg("viewport", func(L *lua.LState) int {
+		title := L.CheckString(1)
+		lines := tableToStringSlice(L.CheckTable(2))
+		actionTable := L.CheckTable(3)
+		actions := make([]ViewportAction, 0, actionTable.Len())
+		callbacks := make(map[string]*lua.LFunction, actionTable.Len())
+		actionTable.ForEach(func(_ lua.LValue, value lua.LValue) {
+			action, ok := value.(*lua.LTable)
+			if !ok {
+				L.RaiseError("viewport actions must be tables")
+				return
+			}
+			id := action.RawGetString("id").String()
+			label := action.RawGetString("label").String()
+			callback, ok := action.RawGetString("on_press").(*lua.LFunction)
+			if id == "" || label == "" || !ok || callbacks[id] != nil {
+				L.RaiseError("viewport actions require unique id, label, and on_press")
+				return
+			}
+			actions = append(actions, ViewportAction{ID: id, Label: label})
+			callbacks[id] = callback
+		})
+		if pctx.host.OpenViewport != nil {
+			pctx.host.OpenViewport(title, lines, actions, func(id string) {
+				callback := callbacks[id]
+				if callback == nil || pctx.submit == nil || pctx.context == nil || pctx.onCallbackError == nil {
+					return
+				}
+				pctx.submit(func() {
+					if err := safeCall(pctx.context(), L, callback, pctx.callbackTimeout); err != nil {
+						pctx.onCallbackError(err)
+					}
+				})
+			})
 		}
 		return 0
 	})

@@ -28,14 +28,15 @@ func writePlugin(t *testing.T, name, body string) string {
 // captureHost records side effects on buffered channels so tests can await the
 // asynchronous plugin goroutine without sleeping.
 type captureHost struct {
-	sent    chan string
-	sentTo  chan [2]string
-	react   chan [3]string
-	notify  chan [2]string
-	reply   chan replyCall
-	style   chan styleCall
-	overlay chan overlayCall
-	theme   chan config.Theme
+	sent     chan string
+	sentTo   chan [2]string
+	react    chan [3]string
+	notify   chan [2]string
+	reply    chan replyCall
+	style    chan styleCall
+	overlay  chan overlayCall
+	viewport chan viewportCall
+	theme    chan config.Theme
 }
 
 type replyCall struct {
@@ -55,31 +56,67 @@ type overlayCall struct {
 	lines []string
 }
 
+type viewportCall struct {
+	title    string
+	lines    []string
+	actions  []ViewportAction
+	onAction func(string)
+}
+
 func newCaptureHost() (*captureHost, *Host) {
 	c := &captureHost{
-		sent:    make(chan string, 8),
-		sentTo:  make(chan [2]string, 8),
-		react:   make(chan [3]string, 8),
-		notify:  make(chan [2]string, 8),
-		reply:   make(chan replyCall, 8),
-		style:   make(chan styleCall, 8),
-		overlay: make(chan overlayCall, 8),
-		theme:   make(chan config.Theme, 8),
+		sent:     make(chan string, 8),
+		sentTo:   make(chan [2]string, 8),
+		react:    make(chan [3]string, 8),
+		notify:   make(chan [2]string, 8),
+		reply:    make(chan replyCall, 8),
+		style:    make(chan styleCall, 8),
+		overlay:  make(chan overlayCall, 8),
+		viewport: make(chan viewportCall, 8),
+		theme:    make(chan config.Theme, 8),
 	}
 	h := &Host{
-		Send:          func(content string) { c.sent <- content },
-		SendTo:        func(ch uint64, content string) { c.sentTo <- [2]string{u(ch), content} },
-		React:         func(ch, msg uint64, emoji string) { c.react <- [3]string{u(ch), u(msg), emoji} },
-		Notify:        func(title, body string) { c.notify <- [2]string{title, body} },
-		Reply:         func(ch, msg uint64, content string, mention bool) { c.reply <- replyCall{ch, msg, content, mention} },
-		Style:         func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
-		OpenOverlay:   func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
+		Send:        func(content string) { c.sent <- content },
+		SendTo:      func(ch uint64, content string) { c.sentTo <- [2]string{u(ch), content} },
+		React:       func(ch, msg uint64, emoji string) { c.react <- [3]string{u(ch), u(msg), emoji} },
+		Notify:      func(title, body string) { c.notify <- [2]string{title, body} },
+		Reply:       func(ch, msg uint64, content string, mention bool) { c.reply <- replyCall{ch, msg, content, mention} },
+		Style:       func(selector string, props map[string]string) { c.style <- styleCall{selector, props} },
+		OpenOverlay: func(title string, lines []string) { c.overlay <- overlayCall{title, lines} },
+		OpenViewport: func(title string, lines []string, actions []ViewportAction, onAction func(string)) {
+			c.viewport <- viewportCall{title, lines, actions, onAction}
+		},
 		ApplyTheme:    func(theme config.Theme) { c.theme <- theme },
 		ActiveChannel: func() uint64 { return 111 },
 		ActiveGuild:   func() uint64 { return 222 },
 		SelfID:        func() uint64 { return 333 },
 	}
 	return c, h
+}
+
+func TestViewportBindingDispatchesActionOnPluginRuntime(t *testing.T) {
+	dir := writePlugin(t, "panel", `
+		tuicord.command("show", function()
+			tuicord.viewport("My Panel", {"line one"}, {{id="pause", label="Pause", on_press=function() tuicord.send("paused") end}})
+		end)
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{Dir: dir, Host: h})
+	defer m.Close()
+	m.Load()
+	m.RunCommand("show", nil)
+	select {
+	case got := <-c.viewport:
+		if got.title != "My Panel" || len(got.actions) != 1 || got.actions[0].ID != "pause" {
+			t.Fatalf("viewport = %+v", got)
+		}
+		got.onAction("pause")
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for viewport")
+	}
+	if got := recvStr(t, c.sent); got != "paused" {
+		t.Fatalf("action = %q", got)
+	}
 }
 
 func u(v uint64) string {

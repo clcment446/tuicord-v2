@@ -32,6 +32,4 @@ The displaced local picker override remains recoverable in a named stash.
 
 When resolving a conflict produced by `git stash pop`, Git labels the current
 merged branch as `ours` and the stashed content as `theirs`; inspect the marker
-labels before accepting a side. An ignored local auto-bot test remains
-incompatible with the incoming removal of the auto-bot runtime, so it prevents
-`go test ./internal/app` until its owner updates or removes it.
+labels before accepting a side.

@@ -1158,6 +1158,11 @@ func (w *ChatView) Draw(r screen.Region) {
 	preOffset := w.bottomScroll.Offset()
 	if prepended {
 		w.bottomScroll.UpdatePrepend(len(lines), r.Height())
+	} else if w.focusedExplicit && channel == w.lastMessageChannel && w.renderLineCount > 0 {
+		// An explicitly focused message is a reading anchor, even at the live
+		// edge. Keep its top row stable across incoming messages instead of
+		// letting bottom-relative growth move it downward.
+		w.bottomScroll.UpdateAnchored(len(lines), r.Height(), w.visibleStart)
 	} else {
 		w.bottomScroll.Update(len(lines), r.Height())
 	}
@@ -2451,6 +2456,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 			w.activePickerSet = false
 			w.activePicker = componentAction{}
 			w.expandedComponents = nil
+			w.focusedExplicit = false
 			w.bottomScroll.SetOffset(0)
 			w.invalidateBodies()
 			return true
@@ -2804,6 +2810,7 @@ func (w *ChatView) setComponentAction(action componentAction) bool {
 			return true
 		}
 		if w.expandedComponents != nil {
+			w.anchorControlToggle(action.controlKey())
 			w.expandedComponents[action.controlKey()] = false
 		}
 		return w.submitComponentPicker(action)
@@ -2853,6 +2860,7 @@ func (w *ChatView) submitActiveComponentPicker() bool {
 		return false
 	}
 	if w.expandedComponents != nil {
+		w.anchorControlToggle(action.controlKey())
 		w.expandedComponents[action.controlKey()] = false
 		w.invalidateBodies()
 	}
@@ -2977,6 +2985,11 @@ func (w *ChatView) scrollUp() {
 }
 
 func (w *ChatView) moveFocus(delta int) {
+	if !w.focusedExplicit {
+		w.ensureInitialFocusedMessage()
+		w.focusLatestStop()
+		return
+	}
 	if len(w.focusStops) == 0 {
 		if delta < 0 {
 			w.scrollUp()
@@ -3004,6 +3017,26 @@ func (w *ChatView) moveFocus(delta int) {
 	end := min(start+w.viewportHeight, w.renderLineCount)
 	if stop.line < start || stop.line >= end {
 		w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight-stop.line-1, 0))
+	}
+}
+
+// focusLatestStop exits the passive "at latest" state into the newest
+// message. The first arrow establishes the navigation starting point; a later
+// arrow moves through the transcript.
+func (w *ChatView) focusLatestStop() {
+	if w == nil || len(w.focusStops) == 0 {
+		return
+	}
+	messages := w.store.Messages(w.active())
+	if len(messages) == 0 {
+		return
+	}
+	key := messagePlacementPrefix(messages[len(messages)-1])
+	for i := len(w.focusStops) - 1; i >= 0; i-- {
+		if messagePlacementPrefix(w.focusStops[i].message) == key {
+			w.setFocusStop(i)
+			return
+		}
 	}
 }
 
