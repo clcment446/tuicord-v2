@@ -788,6 +788,15 @@ func (mv *MainView) RefreshChannels() {
 	mv.refreshForum()
 }
 
+// RefreshGuildBadges repaints the server rail from the constant-time unread
+// cache. Read-state updates use this path so chat rendering is not disturbed.
+func (mv *MainView) RefreshGuildBadges() {
+	if mv == nil || mv.app == nil {
+		return
+	}
+	mv.rebuildGuilds()
+}
+
 func (mv *MainView) refreshChannels() {
 	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()

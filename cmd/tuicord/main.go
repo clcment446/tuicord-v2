@@ -216,6 +216,8 @@ func (u *uiSurface) Refresh() { u.mv.Refresh() }
 
 func (u *uiSurface) RefreshChannels() { u.mv.RefreshChannels() }
 
+func (u *uiSurface) RefreshGuildBadges() { u.mv.RefreshGuildBadges() }
+
 func (u *uiSurface) Notify(a *accounts.Account, msg store.Message) {
 	if u.manager != nil && u.manager.Active() == a {
 		u.shell.NotifyIncomingMessage(msg)
