@@ -193,6 +193,12 @@ func (m *Manager) loadOne(f pluginFile) error {
 			every: func(interval time.Duration, fn *lua.LFunction, L *lua.LState) {
 				m.timers.every(interval, L, func() {
 					if !m.rt.submit(func() {
+						// A tick that fired during startup can be queued before the
+						// state is rolled back and closed; never call into a state
+						// that was not committed.
+						if !m.isLive(L) {
+							return
+						}
 						if err := safeCall(m.rt.context(), L, fn, m.opts.CallbackTimeout); err != nil {
 							m.onCallbackError(f.name, err)
 						}
@@ -205,6 +211,7 @@ func (m *Manager) loadOne(f pluginFile) error {
 			context:         m.rt.context,
 			callbackTimeout: m.opts.CallbackTimeout,
 			onCallbackError: func(err error) { m.onCallbackError(f.name, err) },
+			isLive:          m.isLive,
 		}
 		var workingConfig config.Config
 		if f.configContext && m.opts.ConfigTarget != nil {
@@ -336,7 +343,13 @@ func (m *Manager) AttachHost(host *Host) {
 	if m == nil || host == nil {
 		return
 	}
-	*m.host = *host
+	// Copy the host on the runtime goroutine so the field assignment cannot race
+	// a Lua callback that is dereferencing m.host (every callback runs there). If
+	// the runtime is already stopping, no callback can run, so assign directly.
+	hostCopy := *host
+	if !m.rt.do(func() { *m.host = hostCopy }) {
+		*m.host = hostCopy
+	}
 	m.mu.Lock()
 	name := m.startupTheme
 	apply := name != "" && !m.startupThemeConsumed
@@ -428,6 +441,26 @@ func (m *Manager) Close() {
 		}
 	}
 	m.states = nil
+}
+
+// isLive reports whether L belongs to a committed plugin state. Timers and
+// viewport callbacks can outlive a rolled-back startup: a ticker may already
+// have queued a callback, and a viewport's on_press closure is held by the UI
+// outside the registries rollbackRegistrations cleans. Both call safeCall on L,
+// which panics in gopher-lua once L is closed, so those callbacks consult isLive
+// before touching L. A rolled-back state is never appended to m.states.
+func (m *Manager) isLive(L *lua.LState) bool {
+	if m == nil || L == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.states {
+		if s.L == L {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) rollbackRegistrations(L *lua.LState) {

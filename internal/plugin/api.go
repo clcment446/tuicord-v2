@@ -34,6 +34,10 @@ type pluginContext struct {
 	context         func() context.Context
 	callbackTimeout time.Duration
 	onCallbackError func(error)
+	// isLive reports whether L is still a committed plugin state. Callbacks the
+	// UI retains outside the registries (viewport on_press) consult it before
+	// calling into L, which would panic once a rolled-back state is closed.
+	isLive func(*lua.LState) bool
 }
 
 // installAPI builds the global `tuicord` table in L, wiring every binding to
@@ -211,6 +215,12 @@ func installAPI(L *lua.LState, pctx *pluginContext) {
 					return
 				}
 				pctx.submit(func() {
+					// The UI holds this closure outside the registries; if the
+					// plugin's startup was rolled back and its state closed, the
+					// viewport must not call into it.
+					if pctx.isLive != nil && !pctx.isLive(L) {
+						return
+					}
 					if err := safeCall(pctx.context(), L, callback, pctx.callbackTimeout); err != nil {
 						pctx.onCallbackError(err)
 					}

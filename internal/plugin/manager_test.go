@@ -329,6 +329,36 @@ func TestCallbackErrorIsIsolated(t *testing.T) {
 	}
 }
 
+// TestRolledBackTimerDoesNotCallClosedState registers a fast timer, then blocks
+// in startup until the StartupTimeout fires. The timer ticks (queuing callbacks
+// on the busy worker) before the failed state is rolled back and closed. Those
+// queued callbacks must skip the closed state: calling into it is a Go panic
+// (Protect only catches Lua errors) that would crash the worker goroutine.
+func TestRolledBackTimerDoesNotCallClosedState(t *testing.T) {
+	dir := writePlugin(t, "boom", `
+		tuicord.every(10, function() tuicord.send("tick") end)
+		while true do end
+	`)
+	c, h := newCaptureHost()
+	m := NewManager(Options{
+		Dir: dir, Host: h,
+		StartupTimeout:  60 * time.Millisecond,
+		CallbackTimeout: time.Second,
+	})
+	defer m.Close()
+
+	if errs := m.Load(); len(errs) == 0 {
+		t.Fatal("expected startup to fail on the deadline")
+	}
+	// Drain long enough for the queued timer callbacks to run on the worker. A
+	// missing liveness guard panics here; the guard skips them, so nothing sends.
+	select {
+	case <-c.sent:
+		t.Fatal("rolled-back timer callback ran against the closed state")
+	case <-time.After(150 * time.Millisecond):
+	}
+}
+
 func TestFSGrantConfinedToDataDir(t *testing.T) {
 	dir := writePlugin(t, "store", `
 		tuicord.on("ready", function()
