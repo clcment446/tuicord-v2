@@ -359,6 +359,9 @@ type Store struct {
 	// a mention). It stays separate from unread so ordinary traffic never
 	// reorders the sidebar or shows a red notification badge.
 	pings map[ChannelID]int
+	// guildPings keeps the local fallback aggregate constant-time for the
+	// sidebar before authoritative gateway read-state events arrive.
+	guildPings map[GuildID]int
 
 	guildFolders  []GuildFolder
 	guildEmojis   map[GuildID][]GuildEmoji
@@ -416,6 +419,7 @@ func New(historyLimit int) *Store {
 		roles:                map[GuildID]map[RoleID]Role{},
 		unread:               map[ChannelID]int{},
 		pings:                map[ChannelID]int{},
+		guildPings:           map[GuildID]int{},
 		guildEmojis:          map[GuildID][]GuildEmoji{},
 		guildStickers:        map[GuildID][]GuildSticker{},
 	}
@@ -429,7 +433,7 @@ func (s *Store) IncrementUnread(channel ChannelID) {
 // ClearUnread resets a channel's unread counter to zero.
 func (s *Store) ClearUnread(channel ChannelID) {
 	delete(s.unread, channel)
-	delete(s.pings, channel)
+	s.clearPing(channel)
 }
 
 // Unread returns a channel's unread message count.
@@ -439,18 +443,33 @@ func (s *Store) Unread(channel ChannelID) int {
 
 // IncrementPing bumps a channel's attention count. Callers must only use this
 // for an inbound direct message or a message that actually mentions the user.
-func (s *Store) IncrementPing(channel ChannelID) { s.pings[channel]++ }
+func (s *Store) IncrementPing(channel ChannelID) {
+	s.pings[channel]++
+	if c, ok := s.channels[channel]; ok {
+		s.guildPings[c.GuildID]++
+	}
+}
+
+func (s *Store) clearPing(channel ChannelID) {
+	count := s.pings[channel]
+	if count == 0 {
+		return
+	}
+	if c, ok := s.channels[channel]; ok {
+		s.guildPings[c.GuildID] -= count
+		if s.guildPings[c.GuildID] <= 0 {
+			delete(s.guildPings, c.GuildID)
+		}
+	}
+	delete(s.pings, channel)
+}
 
 // Pings returns the unread attention count for one channel.
 func (s *Store) Pings(channel ChannelID) int { return s.pings[channel] }
 
 // GuildPings returns the total attention count across a server's channels.
 func (s *Store) GuildPings(guild GuildID) int {
-	total := 0
-	for _, channel := range s.channelOrder[guild] {
-		total += s.pings[channel]
-	}
-	return total
+	return s.guildPings[guild]
 }
 
 // TotalUnread returns the account-wide unread message count across all
