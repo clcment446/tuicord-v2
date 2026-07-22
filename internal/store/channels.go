@@ -99,7 +99,8 @@ func (s *Store) removeChannel(id ChannelID) bool {
 		return false
 	}
 	s.removeChannelOrder(c.GuildID, id)
-	// clearPing needs the channel's guild before the directory entry disappears.
+	// clearPing needs the channel's guild before the channel is discarded so
+	// the constant-time guild aggregate cannot retain a deleted channel.
 	s.clearPing(id)
 	delete(s.channels, id)
 	delete(s.messages, id)

@@ -16,18 +16,19 @@ import (
 
 // fakeSurface records Manager-driven UI effects for assertions.
 type fakeSurface struct {
-	activated   []*Account
-	refresh     int
-	refreshChan int
-	notifies    []*Account
-	errors      []error
-	lastBadges  []Badge
+	activated    []*Account
+	refresh      int
+	refreshChan  int
+	refreshGuild int
+	notifies     []*Account
+	errors       []error
+	lastBadges   []Badge
 }
 
 func (f *fakeSurface) Activate(a *Account)                { f.activated = append(f.activated, a) }
 func (f *fakeSurface) Refresh()                           { f.refresh++ }
 func (f *fakeSurface) RefreshChannels()                   { f.refreshChan++ }
-func (f *fakeSurface) RefreshGuildBadges()                {}
+func (f *fakeSurface) RefreshGuildBadges()                { f.refreshGuild++ }
 func (f *fakeSurface) Notify(a *Account, _ store.Message) { f.notifies = append(f.notifies, a) }
 func (f *fakeSurface) ShowError(_ *Account, err error)    { f.errors = append(f.errors, err) }
 func (f *fakeSurface) Badges(b []Badge)                   { f.lastBadges = b }
@@ -199,6 +200,36 @@ func TestBadgeReflectsUnreadFromStore(t *testing.T) {
 	}
 	if !surf.lastBadges[0].Unread {
 		t.Fatalf("badge did not reflect store attention message: %+v", surf.lastBadges[0])
+	}
+}
+
+func TestBackgroundReadStateChangePushesAccountBadges(t *testing.T) {
+	surf := &fakeSurface{}
+	seeds := []Seed{
+		{Key: "token", Label: "Alice", Ning: wrapState(t)},
+		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+	}
+	m, _ := newManager(t, surf, seeds, nil)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := m.Switch(1); err != nil {
+		t.Fatalf("Switch(1): %v", err)
+	}
+	if err := m.Switch(0); err != nil {
+		t.Fatalf("Switch(0): %v", err)
+	}
+	background := m.Accounts()[1]
+	background.Store().IncrementPing(5)
+	guildRefreshes := surf.refreshGuild
+
+	m.readStateChanged(background)
+
+	if len(surf.lastBadges) != 2 || !surf.lastBadges[1].Unread {
+		t.Fatalf("background badge was not refreshed: %+v", surf.lastBadges)
+	}
+	if surf.refreshGuild != guildRefreshes {
+		t.Fatalf("background read state refreshed active guild rail: got %d, want %d", surf.refreshGuild, guildRefreshes)
 	}
 }
 

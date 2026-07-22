@@ -296,9 +296,7 @@ func (m *Manager) wire(acc *Account) {
 		m.pushBadges()
 	})
 	acc.app.OnReadStateChange(func() {
-		if m.isActive(acc) {
-			m.surface.RefreshGuildBadges()
-		}
+		m.readStateChanged(acc)
 	})
 	acc.app.OnIncomingMessage(func(msg store.Message) {
 		m.surface.Notify(acc, msg)
@@ -363,6 +361,15 @@ func (m *Manager) hydrate(acc *Account) {
 
 func (m *Manager) isActive(acc *Account) bool {
 	return m.Active() == acc
+}
+
+func (m *Manager) readStateChanged(acc *Account) {
+	if m.isActive(acc) {
+		m.surface.RefreshGuildBadges()
+	}
+	// Background accounts have no visible guild rail, but their selector badge
+	// must still follow authoritative read acknowledgements and mentions.
+	m.pushBadges()
 }
 
 // pushBadges rebuilds the selector badge snapshot from every account.
