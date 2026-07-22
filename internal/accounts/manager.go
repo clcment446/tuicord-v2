@@ -255,6 +255,18 @@ func (m *Manager) bindEventSink(active *Account) {
 	}
 }
 
+// SwitchTo activates the given account by locating it in the registry. It lets
+// callers that hold an *Account (a background-account notification) switch to it
+// without tracking its index.
+func (m *Manager) SwitchTo(a *Account) error {
+	for i, acc := range m.accounts {
+		if acc == a {
+			return m.Switch(i)
+		}
+	}
+	return fmt.Errorf("accounts: switch to unknown account")
+}
+
 // Add appends a new account to the registry (built lazily on first switch) and
 // returns it. The token must already be stored under key before switching.
 func (m *Manager) Add(key, label string) *Account {

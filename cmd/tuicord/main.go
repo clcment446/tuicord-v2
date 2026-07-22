@@ -240,7 +240,14 @@ func (u *uiSurface) Notify(a *accounts.Account, msg store.Message) {
 		u.shell.NotifyIncomingMessage(msg)
 		return
 	}
-	u.shell.NotifyAccountMessage(a.Label(), msg)
+	// Activating a background-account ping must switch to that account first, so
+	// the channel is resolved against the account that received the message.
+	target := a
+	u.shell.NotifyAccountMessage(a.Label(), func() {
+		if u.manager != nil {
+			_ = u.manager.SwitchTo(target)
+		}
+	}, msg)
 }
 
 func (u *uiSurface) ShowError(a *accounts.Account, err error) {

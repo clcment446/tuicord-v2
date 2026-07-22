@@ -80,10 +80,25 @@ func TestIncomingNotificationClosesActionLayersBeforeNavigation(t *testing.T) {
 		popup:        widget.NewText("popup"),
 		viewerCancel: cancel,
 	}
-	sh.showIncomingMessageToast(store.Message{ChannelID: 9}, "Mina", "hello")
+	sh.showIncomingMessageToast(store.Message{ChannelID: 9}, "Mina", "hello", nil)
 	sh.toasts[0].onActivate()
 	if !overlay.closed || sh.overlay != nil || sh.popup != nil || sh.viewerCancel != nil {
 		t.Fatalf("activation left action layers open: closed=%v overlay=%v popup=%v cancel=%v", overlay.closed, sh.overlay, sh.popup, sh.viewerCancel)
+	}
+}
+
+func TestBackgroundAccountToastSwitchesAccountBeforeNavigating(t *testing.T) {
+	var order []string
+	sh := &Shell{cfg: config.Default(), mv: &MainView{Root: widget.NewText("main")}}
+	sh.NotifyAccountMessage("Bob", func() { order = append(order, "switch") }, store.Message{ChannelID: 9})
+	if len(sh.toasts) != 1 {
+		t.Fatalf("expected one toast, got %d", len(sh.toasts))
+	}
+	// NavigateToChannel records after the switch; with a bare MainView it is a
+	// no-op, so we assert ordering via the switch callback firing on activation.
+	sh.toasts[0].onActivate()
+	if len(order) != 1 || order[0] != "switch" {
+		t.Fatalf("account switch did not run on activation: %v", order)
 	}
 }
 

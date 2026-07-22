@@ -2200,7 +2200,7 @@ func (s *Shell) showNotification(title, detail string) {
 	s.toasts = append([]*Toast{toast}, s.toasts...)
 }
 
-func (s *Shell) showIncomingMessageToast(message store.Message, title, body string) {
+func (s *Shell) showIncomingMessageToast(message store.Message, title, body string, beforeNav func()) {
 	toast := newExpiringToast(title, body, s.styles, s.clock())
 	if message.ChannelID != 0 && s.mv != nil {
 		channelID := message.ChannelID
@@ -2209,6 +2209,12 @@ func (s *Shell) showIncomingMessageToast(message store.Message, title, body stri
 			// activated channel. Clear all actionable layers first.
 			s.popup = nil
 			s.closeOverlay()
+			// A background-account ping switches to its account first, so the
+			// channel is resolved against the account that actually received it
+			// rather than the currently active one.
+			if beforeNav != nil {
+				beforeNav()
+			}
 			s.mv.NavigateToChannel(channelID)
 		}
 	}
@@ -2218,6 +2224,14 @@ func (s *Shell) showIncomingMessageToast(message store.Message, title, body stri
 // NotifyIncomingMessage routes an incoming Discord ping to the desktop only
 // while this terminal window is unfocused; otherwise it becomes an in-app toast.
 func (s *Shell) NotifyIncomingMessage(message store.Message) {
+	s.notifyIncoming(message, nil)
+}
+
+// notifyIncoming shows a ping. beforeNav, when set, runs on the UI goroutine just
+// before the toast navigates — background-account pings pass their account switch
+// here so activation lands on the account that received the message rather than
+// the currently active one.
+func (s *Shell) notifyIncoming(message store.Message, beforeNav func()) {
 	if s == nil {
 		return
 	}
@@ -2233,25 +2247,25 @@ func (s *Shell) NotifyIncomingMessage(message store.Message) {
 	if s.unfocused && s.notifier != nil {
 		s.dispatchNotification(func() {
 			if err := s.notifier.Notify(title, body); err != nil {
-				s.postNotification(func() { s.showIncomingMessageToast(message, title, body) })
+				s.postNotification(func() { s.showIncomingMessageToast(message, title, body, beforeNav) })
 			}
 		})
 		return
 	}
-	s.showIncomingMessageToast(message, title, body)
+	s.showIncomingMessageToast(message, title, body, beforeNav)
 }
 
 // NotifyAccountMessage notifies about a message that arrived on a background
 // (non-active) account, prefixing the sender with the account label so the user
 // can tell which account received it.
-func (s *Shell) NotifyAccountMessage(account string, message store.Message) {
+func (s *Shell) NotifyAccountMessage(account string, activate func(), message store.Message) {
 	if s == nil {
 		return
 	}
 	if account != "" {
 		message.Author = account + " · " + strings.TrimSpace(message.Author)
 	}
-	s.NotifyIncomingMessage(message)
+	s.notifyIncoming(message, activate)
 }
 
 func (s *Shell) dispatchNotification(fn func()) {
