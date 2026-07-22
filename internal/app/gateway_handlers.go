@@ -123,12 +123,13 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	}
 	channel := store.ChannelID(e.ChannelID)
 	guild := store.GuildID(e.GuildID)
-	// The event embeds a value copy of ningen's read state. Record the marker so
-	// localReadState and MarkRead never read ningen's live pointer.
-	a.putReadMark(channel, readMark{
+	// The event embeds a value copy of ningen's read state. Snapshot the marker by
+	// value now, but apply it inside the Post below so localReadState and MarkRead
+	// never read ningen's live pointer.
+	mark := readMark{
 		lastRead: e.ReadState.LastMessageID,
 		mentions: e.ReadState.MentionCount,
-	})
+	}
 	// UpdateEvent already contains ningen's scalar unread result. Applying mute
 	// state locally preserves the useful semantics without its permission-aware
 	// helper performing REST fallback on this callback goroutine.
@@ -139,6 +140,13 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 		status = Unread
 	}
 	a.ui.Post(func() {
+		// putReadMark must run here, not synchronously above: replaceReadMarks
+		// (READY) and removeCachedReadState (deletes) both mutate readMarks on the
+		// UI goroutine. A synchronous marker write was race-free but not order-safe,
+		// so an ack landing between READY's dispatch and its drained Post was wiped
+		// (lost ack), and a late ack could resurrect a mark for a deleted channel.
+		// Deferring it into the FIFO Post keeps it ordered with those mutations.
+		a.putReadMark(channel, mark)
 		// DM acknowledgements carry guild id 0. The read-state cache is keyed by
 		// guild, and DMs live under the synthetic DirectMessagesGuildID, so resolve
 		// the guild from the store (UI-owned, safe here) before caching; otherwise
@@ -148,6 +156,14 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 			if entry, ok := a.store.Channel(channel); ok {
 				g = entry.GuildID
 			}
+		}
+		// A read.UpdateEvent with guild id 0 is by definition a DM ack. When the DM
+		// channel is not yet hydrated the lookup above leaves g at 0, so
+		// cacheReadStateBatch would early-return and the DM badge would never clear.
+		// Default to the synthetic DM guild; a guild channel always carries a
+		// non-zero guild id, so this cannot mis-route one.
+		if g == 0 {
+			g = DirectMessagesGuildID
 		}
 		a.cacheReadState(channel, g, status)
 		if status == Read && a.store != nil {
