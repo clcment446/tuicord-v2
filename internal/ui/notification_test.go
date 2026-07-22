@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -84,6 +85,30 @@ func TestIncomingNotificationClosesActionLayersBeforeNavigation(t *testing.T) {
 	sh.toasts[0].onActivate()
 	if !overlay.closed || sh.overlay != nil || sh.popup != nil || sh.viewerCancel != nil {
 		t.Fatalf("activation left action layers open: closed=%v overlay=%v popup=%v cancel=%v", overlay.closed, sh.overlay, sh.popup, sh.viewerCancel)
+	}
+}
+
+func TestBoundedNotificationDispatchCapsConcurrency(t *testing.T) {
+	dispatch := boundedNotificationDispatch()
+	release := make(chan struct{})
+	var started int64
+	// Every accepted job parks on release, so the semaphore never frees: only the
+	// cap's worth of jobs are ever accepted; the rest must be dropped, never
+	// spawned as unbounded goroutines/processes.
+	for i := 0; i < maxConcurrentDesktopNotifications*8; i++ {
+		dispatch(func() {
+			atomic.AddInt64(&started, 1)
+			<-release
+		})
+	}
+	time.Sleep(50 * time.Millisecond)
+	got := atomic.LoadInt64(&started)
+	close(release)
+	if got > int64(maxConcurrentDesktopNotifications) {
+		t.Fatalf("started %d jobs concurrently, want <= %d", got, maxConcurrentDesktopNotifications)
+	}
+	if got == 0 {
+		t.Fatal("no notification work ran")
 	}
 }
 

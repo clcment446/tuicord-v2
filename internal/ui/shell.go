@@ -205,11 +205,36 @@ end run`
 	}
 }
 
+// maxConcurrentDesktopNotifications caps how many desktop-notifier calls run at
+// once. Each call may spawn an OS process (notify-send/osascript), so an
+// unfocused burst of pings must not spawn unbounded goroutines and processes.
+const maxConcurrentDesktopNotifications = 4
+
+// boundedNotificationDispatch runs notification work on a bounded set of
+// goroutines, dropping work once the cap is saturated rather than spawning one
+// goroutine (and OS process) per ping during a burst.
+func boundedNotificationDispatch() func(func()) {
+	sem := make(chan struct{}, maxConcurrentDesktopNotifications)
+	return func(fn func()) {
+		if fn == nil {
+			return
+		}
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				fn()
+			}()
+		default:
+		}
+	}
+}
+
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	mediaCfg := chatMediaConfig(cfg)
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: boundedNotificationDispatch(), post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
 	if mediaCfg.Enabled && mediaCfg.Prefetch {
 		s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	}
