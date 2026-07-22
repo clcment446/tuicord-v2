@@ -3,6 +3,7 @@ package widget
 import (
 	"testing"
 
+	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/tui"
 )
 
@@ -30,14 +31,14 @@ func TestModalCollapseChangesReportedBoundsAndRestoresSize(t *testing.T) {
 	m.SetSize(20, 8)
 	m.SetPosition(3, 2)
 
-	if got := m.Bounds(tui.Size{W: 40, H: 20}); got != (tui.Rect{X: 3, Y: 2, W: 20, H: 8}) {
+	if got := m.Bounds(tui.Size{W: 40, H: 20}); got != (screen.Rect{X: 3, Y: 2, W: 20, H: 8}) {
 		t.Fatalf("expanded bounds = %+v", got)
 	}
 	m.SetCollapsed(true)
 	if got := m.Measure(tui.Size{W: 40, H: 20}); got != (tui.Size{W: 20, H: 1}) {
 		t.Fatalf("collapsed measure = %+v, want 20x1", got)
 	}
-	if got := m.Bounds(tui.Size{W: 40, H: 20}); got != (tui.Rect{X: 3, Y: 2, W: 20, H: 1}) {
+	if got := m.Bounds(tui.Size{W: 40, H: 20}); got != (screen.Rect{X: 3, Y: 2, W: 20, H: 1}) {
 		t.Fatalf("collapsed bounds = %+v, want title bar only", got)
 	}
 

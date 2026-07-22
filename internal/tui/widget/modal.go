@@ -74,6 +74,15 @@ func (w *Modal) SetCollapsed(collapsed bool) {
 // Collapsed reports whether the modal is currently reduced to its title bar.
 func (w *Modal) Collapsed() bool { return w != nil && w.collapsed }
 
+// Size returns the configured expanded size, independent of the current
+// collapsed presentation.
+func (w *Modal) Size() (width, height int) {
+	if w == nil {
+		return 0, 0
+	}
+	return w.w, w.h
+}
+
 // SetPosition sets the modal top-left position in cells.
 func (w *Modal) SetPosition(x, y int) {
 	if w == nil {
@@ -142,7 +151,7 @@ func (w *Modal) Measure(avail tui.Size) tui.Size {
 		Right:  maxInt(avail.W-(rect.X+rect.W)+1, 0),
 		Bottom: maxInt(avail.H-(rect.Y+rect.H)+1, 0),
 	}
-	return tui.Size{W: minInt(w.w, avail.W), H: minInt(w.h, avail.H)}
+	return tui.Size{W: rect.W, H: rect.H}
 }
 
 // Layout returns the modal child layout inset by the frame.
