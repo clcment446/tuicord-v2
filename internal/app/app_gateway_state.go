@@ -116,6 +116,11 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	if e.UserSettings != nil {
 		folders = convertGuildFolders(e.UserSettings.GuildFolders)
 	}
+	// Snapshot READY's read markers synchronously (this handler runs on the
+	// socket loop after ningen's own sync READY handler). Ningen retains pointers
+	// into e.ReadStates and mutates them from later events, so we copy the values
+	// out now rather than reading them back on the UI goroutine.
+	readMarks := readMarksFromReady(e)
 	a.ui.Post(func() {
 		a.selfID = selfID
 		a.publishStateSnapshot()
@@ -139,6 +144,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		// READY is authoritative for the connection's read-state generation.
 		// Rebuild from the directory already in memory so startup is seeded and
 		// a reconnect cannot retain entries from the previous session.
+		a.replaceReadMarks(readMarks)
 		a.resetReadStateCache()
 		if a.onReady != nil {
 			a.onReady()
