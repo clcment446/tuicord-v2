@@ -719,6 +719,18 @@ func (s *Store) AppendMessage(m Message) {
 	s.updateLastMessage(m.ChannelID, m.ID)
 }
 
+// HasMessage reports whether a message with the given id is already stored in
+// the channel. It lets callers detect a redelivered MESSAGE_CREATE before
+// appending a second copy.
+func (s *Store) HasMessage(channel ChannelID, id MessageID) bool {
+	r := s.messages[channel]
+	if r == nil {
+		return false
+	}
+	_, ok := r.indexByID(id)
+	return ok
+}
+
 func (s *Store) updateLastMessage(channel ChannelID, message MessageID) {
 	if message == 0 || message <= s.latestMessage[channel] {
 		return

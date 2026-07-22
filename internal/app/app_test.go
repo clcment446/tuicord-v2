@@ -766,6 +766,27 @@ func TestMessageCreateEventLoadsDiscordMessage(t *testing.T) {
 	}
 }
 
+func TestDuplicateMessageCreateDoesNotDoubleCount(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.SetActive(1, 42) // active channel differs from 43, so pings count
+
+	create := &gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 99, GuildID: 1, ChannelID: 43,
+		Author:  discord.User{ID: 100, Username: "alice"},
+		Content: "hello",
+	}}
+	a.handleMessageCreate(create)
+	// The gateway redelivers the same MESSAGE_CREATE (no nonce match).
+	a.handleMessageCreate(create)
+
+	if msgs := a.store.Messages(43); len(msgs) != 1 {
+		t.Fatalf("messages after duplicate = %d, want 1", len(msgs))
+	}
+	if got := a.store.Unread(43); got != 1 {
+		t.Fatalf("unread after duplicate = %d, want 1", got)
+	}
+}
+
 func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.selfID = 7
