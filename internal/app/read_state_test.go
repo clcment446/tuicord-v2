@@ -136,6 +136,28 @@ func TestChannelUnreadDispatchBatchesBeforeNingenHydration(t *testing.T) {
 	}
 }
 
+func TestReadUpdateToleratesMissingStore(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	a := &App{ui: syncPoster{}, handle: ning}
+
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50},
+		GuildID:   7,
+		Unread:    true,
+	})
+
+	if got := a.GuildUnread(7); got != Unread {
+		t.Fatalf("cached status = %v, want unread", got)
+	}
+}
+
+func TestNewInitializesMissingStore(t *testing.T) {
+	a := New(appdiscord.WrapSession(session.New("")), nil, nil)
+	if a.Store() == nil {
+		t.Fatal("New retained a nil store")
+	}
+}
+
 func TestReadAcknowledgementClearsLocalPing(t *testing.T) {
 	ning := appdiscord.WrapSession(session.New(""))
 	st := store.New(0)

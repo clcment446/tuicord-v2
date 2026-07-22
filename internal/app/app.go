@@ -344,6 +344,9 @@ const (
 // session (ningen does not change the REST surface), while gateway handler
 // registration and Connect go through ningen so its caches stay authoritative.
 func New(n *ningen.State, st *store.Store, ui *tui.App) *App {
+	if st == nil {
+		st = store.New(0)
+	}
 	sess := n.Session
 	a := &App{
 		store:               st,
@@ -664,7 +667,7 @@ func (a *App) localReadState(channel store.ChannelID) (UnreadStatus, bool) {
 }
 
 func (a *App) channelMutedLocal(channel store.ChannelID) bool {
-	if a == nil || a.handle == nil || a.handle.MutedState == nil {
+	if a == nil || a.store == nil || a.handle == nil || a.handle.MutedState == nil {
 		return false
 	}
 	// Discord parent chains are shallow (channel → category). Keep a defensive
