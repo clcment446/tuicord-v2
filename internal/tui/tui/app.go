@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"strings"
 	"sync"
 	"time"
 
@@ -114,38 +113,7 @@ func WithVimKeys(focusPrev, focusNext, panelPrev, panelNext string) Option {
 }
 
 func vimKeyMatches(ev input.KeyEvent, spec string) bool {
-	if ev.Release || spec == "" {
-		return false
-	}
-	original := strings.TrimSpace(spec)
-	spec = strings.ToLower(strings.TrimSpace(spec))
-	want := input.Mod(0)
-	for {
-		var mod input.Mod
-		switch {
-		case strings.HasPrefix(spec, "ctrl+"):
-			mod, spec = input.Ctrl, spec[5:]
-		case strings.HasPrefix(spec, "shift+"):
-			mod, spec = input.Shift, spec[6:]
-		case strings.HasPrefix(spec, "alt+"):
-			mod, spec = input.Alt, spec[4:]
-		default:
-			goto done
-		}
-		want |= mod
-	}
-done:
-	if ev.Mods&(input.Ctrl|input.Shift|input.Alt|input.Super|input.Meta|input.Hyper) != want {
-		return false
-	}
-	if ev.Key != input.KeyRune {
-		return false
-	}
-	key := string(ev.Rune)
-	if len(original) > 0 && original[len(original)-1] >= 'A' && original[len(original)-1] <= 'Z' {
-		return key == string(original[len(original)-1])
-	}
-	return key == spec
+	return input.KeyMatches(ev, spec)
 }
 
 // Post schedules fn to run on the App event loop.

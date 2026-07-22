@@ -196,6 +196,7 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		resolver:        resolver,
 		styles:          styles,
 		keyboardFocused: true,
+		vimKeys:         config.Default().Keys.Vim,
 		focusStopIndex:  -1,
 		mediaCfg:        media.DefaultConfig(),
 		node:            layout.Node{Grow: 1},

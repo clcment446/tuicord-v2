@@ -204,9 +204,6 @@ end run`
 
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
-	if cfg.Keys.Vim == (config.VimKeys{}) {
-		cfg.Keys.Vim = config.Default().Keys.Vim
-	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	mediaCfg := chatMediaConfig(cfg)
 	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
@@ -1026,7 +1023,7 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 	}
 	// Esc is a root-level modal transition. Claim it before a focused chat or
 	// list can consume it, while still letting a topmost popup handle it first.
-	if keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) {
+	if keyMatches(key, s.cfg.Keys.Vim.ExitInput) {
 		if s.overlay != nil {
 			s.closeOverlay()
 			return true
@@ -1183,10 +1180,10 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			s.app.MarkChannelRead(s.app.ActiveChannel())
 		}
 		switch {
-		case s.cfg.Accessibility.VimNavigation && keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) && s.editor.phase == editorInput:
+		case s.cfg.Accessibility.VimNavigation && keyMatches(key, s.cfg.Keys.Vim.ExitInput) && s.editor.phase == editorInput:
 			s.leaveInputMode()
 			return true
-		case s.cfg.Accessibility.VimNavigation && keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) && s.editor.phase == editorFocusPending:
+		case s.cfg.Accessibility.VimNavigation && keyMatches(key, s.cfg.Keys.Vim.ExitInput) && s.editor.phase == editorFocusPending:
 			s.exitEditor(nil)
 			return true
 		case s.cfg.Accessibility.VimNavigation && s.editor.phase == editorNormal && vimIns(key, s.cfg.Keys.Vim.Insert) && s.composerWritable():

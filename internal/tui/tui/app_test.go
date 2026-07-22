@@ -281,14 +281,45 @@ func TestVimUppercaseHLTraverseSections(t *testing.T) {
 	app := New()
 	app.Render(&splitLikeWidget{children: []Widget{first, second}}, Size{W: 10, H: 1})
 
-	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'L'}) || app.Focus.Focused() != second {
-		t.Fatal("L did not switch to the next section")
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'L', Mods: input.Shift}) || app.Focus.Focused() != second {
+		t.Fatal("enhanced-protocol Shift+L did not switch to the next section")
 	}
-	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'H'}) || app.Focus.Focused() != first {
-		t.Fatal("H did not switch to the previous section")
+	if !app.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'H', Mods: input.Shift}) || app.Focus.Focused() != first {
+		t.Fatal("enhanced-protocol Shift+H did not switch to the previous section")
 	}
 	if first.calls != 0 {
 		t.Fatalf("uppercase section navigation called local component traversal %d times", first.calls)
+	}
+}
+
+func TestConfiguredNamedVimKeysTraverseFocus(t *testing.T) {
+	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}, enabled: true}
+	second := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("second", true)}, enabled: true}
+	app := New(WithVimKeys("left", "right", "up", "down"))
+	app.Render(&splitLikeWidget{children: []Widget{first, second}}, Size{W: 10, H: 1})
+
+	if !app.Handle(input.KeyEvent{Key: input.KeyRight}) || app.Focus.Focused() != second {
+		t.Fatal("configured Right key did not traverse local focus")
+	}
+	if !app.Handle(input.KeyEvent{Key: input.KeyDown}) || app.Focus.Focused() != first {
+		t.Fatal("configured Down key did not traverse panel focus")
+	}
+}
+
+func TestEmptyVimTraversalKeysStayDisabled(t *testing.T) {
+	first := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("first", true)}, enabled: true}
+	second := &vimFocusWidget{handlingWidget: handlingWidget{testWidget: *newTestWidget("second", true)}, enabled: true}
+	app := New(WithVimKeys("", "", "", ""))
+	app.Render(&splitLikeWidget{children: []Widget{first, second}}, Size{W: 10, H: 1})
+
+	for _, ev := range []input.KeyEvent{
+		{Key: input.KeyRune, Rune: 'l'},
+		{Key: input.KeyRune, Rune: 'L', Mods: input.Shift},
+	} {
+		app.Handle(ev)
+	}
+	if app.Focus.Focused() != first || first.calls != 0 {
+		t.Fatal("disabled Vim traversal changed or invoked focus")
 	}
 }
 

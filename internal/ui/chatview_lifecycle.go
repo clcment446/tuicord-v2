@@ -138,18 +138,12 @@ func (w *ChatView) SetFocusOwner(focused bool) {
 func (w *ChatView) SetVimNavigation(enabled bool) {
 	if w != nil {
 		w.vimNavigation = enabled
-		if w.vimKeys == (config.VimKeys{}) {
-			w.vimKeys = config.Default().Keys.Vim
-		}
 	}
 }
 
 // SetVimKeys replaces the modal action map used by this view.
 func (w *ChatView) SetVimKeys(keys config.VimKeys) {
 	if w != nil {
-		if keys == (config.VimKeys{}) {
-			keys = config.Default().Keys.Vim
-		}
 		w.vimKeys = keys
 	}
 }

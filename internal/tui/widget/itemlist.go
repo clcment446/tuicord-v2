@@ -49,6 +49,8 @@ type ItemList struct {
 	onDrag        func(int, int) int
 	onDrop        func(int, int)
 	vimNavigation bool
+	vimScrollDown string
+	vimScrollUp   string
 	node          layout.Node
 	viewH         int
 
@@ -62,6 +64,8 @@ func NewItemList(items []Item) *ItemList {
 	w := &ItemList{
 		selectedStyle: screen.Style{Attrs: screen.Reverse},
 		badgeStyle:    screen.Style{Attrs: screen.Bold},
+		vimScrollDown: "j",
+		vimScrollUp:   "k",
 		node:          layout.Node{Grow: 1},
 	}
 	w.SetItems(items)
@@ -187,6 +191,14 @@ func (w *ItemList) SetVimNavigation(enabled bool) {
 	}
 }
 
+// SetVimKeys configures list movement. Empty values disable the corresponding
+// action.
+func (w *ItemList) SetVimKeys(scrollDown, scrollUp string) {
+	if w != nil {
+		w.vimScrollDown, w.vimScrollUp = scrollDown, scrollUp
+	}
+}
+
 func (w *ItemList) VimFocusEnabled() bool { return w != nil && w.vimNavigation }
 
 // HandleVimFocus implements tui.VimFocusTraverser.
@@ -305,17 +317,14 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		}
 		switch ev.Key {
 		case input.KeyRune:
-			if ev.Mods != 0 {
-				return false
-			}
 			if !w.vimNavigation {
 				return false
 			}
-			switch ev.Rune {
-			case 'j':
+			switch {
+			case input.KeyMatches(ev, w.vimScrollDown):
 				w.SetSelectedSilent(w.selected + 1)
 				return true
-			case 'k':
+			case input.KeyMatches(ev, w.vimScrollUp):
 				w.SetSelectedSilent(w.selected - 1)
 				return true
 			}

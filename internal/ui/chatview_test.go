@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
@@ -1182,6 +1183,33 @@ func TestChatViewVimKeysAreOptIn(t *testing.T) {
 	view.SetVimNavigation(true)
 	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) {
 		t.Fatal("j was not handled after enabling Vim navigation")
+	}
+}
+
+func TestChatViewRuntimeVimKeyEmptiesDisableActions(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Content: "one"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetVimNavigation(true)
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(20, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	keys := config.Default().Keys.Vim
+	keys.ScrollDown = ""
+	view.SetVimKeys(keys)
+	if view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) {
+		t.Fatal("individually disabled scroll-down key was handled")
+	}
+	if !view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'k'}) {
+		t.Fatal("unmodified scroll-up default stopped working")
+	}
+
+	view.SetVimKeys(config.VimKeys{})
+	for _, key := range []rune{'j', 'k', 'g', 'G', 'J', 'K', 'V', 'Y', '-', 'u', 'd', 'r', 'e', 'a'} {
+		if view.Handle(input.KeyEvent{Key: input.KeyRune, Rune: key}) {
+			t.Fatalf("all-disabled Vim key %q was handled", key)
+		}
 	}
 }
 

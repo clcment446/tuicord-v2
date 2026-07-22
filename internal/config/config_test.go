@@ -62,6 +62,61 @@ func TestLoadVimKeyOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadVimKeyEmptiesDisableIndividualAndAllActions(t *testing.T) {
+	t.Run("individual", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		if err := os.WriteFile(path, []byte("[keys.vim]\nscroll_down = \"\"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFrom(path)
+		if err != nil {
+			t.Fatalf("loadFrom: %v", err)
+		}
+		if cfg.Keys.Vim.ScrollDown != "" {
+			t.Fatalf("scroll_down = %q, want disabled", cfg.Keys.Vim.ScrollDown)
+		}
+		if cfg.Keys.Vim.ScrollUp != Default().Keys.Vim.ScrollUp {
+			t.Fatalf("unspecified scroll_up = %q, want default", cfg.Keys.Vim.ScrollUp)
+		}
+	})
+
+	t.Run("all", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "config.toml")
+		contents := `[keys.vim]
+insert = ""
+exit_input = ""
+scroll_down = ""
+scroll_up = ""
+jump_oldest = ""
+jump_newest = ""
+next_message = ""
+previous_message = ""
+select = ""
+copy = ""
+fold = ""
+profile = ""
+delete = ""
+reply = ""
+edit = ""
+add_reaction = ""
+focus_previous = ""
+focus_next = ""
+panel_previous = ""
+panel_next = ""
+`
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := loadFrom(path)
+		if err != nil {
+			t.Fatalf("loadFrom: %v", err)
+		}
+		if cfg.Keys.Vim != (VimKeys{}) {
+			t.Fatalf("vim keys = %+v, want all actions disabled", cfg.Keys.Vim)
+		}
+	})
+}
+
 func TestLoadElementLayoutPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	contents := "[layout.elements.guilds]\nvisible = false\nwidth = 8\nmin_width = 3\n"
