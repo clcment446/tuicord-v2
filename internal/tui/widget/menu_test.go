@@ -136,6 +136,36 @@ func TestMenuClickInsideActivatesRow(t *testing.T) {
 	}
 }
 
+func TestMenuClickOnClippedRowDoesNotActivateInvisibleEntry(t *testing.T) {
+	activated := -1
+	items := make([]MenuItem, 10)
+	for i := range items {
+		idx := i
+		items[i] = MenuItem{Label: "item", OnSelect: func() { activated = idx }}
+	}
+	m := NewMenu(items)
+	m.OnDismiss(func() {})
+	m.SetAnchor(0, 0)
+	// A short screen clips the menu: with height 5 the box is border, three inner
+	// rows, border. Items past index 2 are never drawn.
+	buf := screen.NewBuffer(20, 5)
+	m.Measure(sizeOf(buf))
+	m.Draw(buf.Clip(buf.Bounds()))
+
+	rect := m.last
+	// Clicking the bottom border row must not activate the (undrawn) item that its
+	// naive row index would map to.
+	m.Handle(press(rect.X+1, rect.Y+rect.H-1))
+	if activated != -1 {
+		t.Fatalf("clicking the clipped bottom border activated invisible item %d", activated)
+	}
+	// A visible inner row still activates normally.
+	m.Handle(press(rect.X+1, rect.Y+1))
+	if activated != 0 {
+		t.Fatalf("visible row activation = %d, want 0", activated)
+	}
+}
+
 func TestMenuClickOutsideDismisses(t *testing.T) {
 	dismissed := false
 	activated := false

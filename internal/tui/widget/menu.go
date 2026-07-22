@@ -383,7 +383,11 @@ func (m *Menu) itemAt(rect screen.Rect, x, y int) (idx int, inside bool) {
 		return -1, false
 	}
 	row := y - rect.Y - 1
-	if row < 0 || row >= len(m.items) || !m.items[row].selectable() {
+	// Only rows that Draw actually rendered are selectable. Draw stops before the
+	// bottom border (rows with index >= rect.H-2 are not drawn), so when the menu
+	// is clipped to the screen a click on the bottom border — or on an item past
+	// the visible area — must not activate the entry that would sit there.
+	if row < 0 || row >= rect.H-2 || row >= len(m.items) || !m.items[row].selectable() {
 		return -1, true
 	}
 	return row, true
