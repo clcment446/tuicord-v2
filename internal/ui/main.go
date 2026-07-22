@@ -664,7 +664,7 @@ func (mv *MainView) rebuildGuilds() {
 	if i := mv.guildList.Selected(); i >= 0 && i < len(mv.guildRows) {
 		selectedGuild = mv.guildRows[i].GuildID
 	}
-	mv.guildRows = store.OrderGuilds(mv.currentGroups(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
+	mv.guildRows = store.OrderGuilds(mv.currentGroups(), st.Guilds(), mv.pinnedGuildIDs(), mv.collapsedFolderSet())
 	mv.guildRows = moveDMFirst(mv.guildRows)
 	items := make([]widget.Item, len(mv.guildRows))
 	for i, row := range mv.guildRows {
@@ -747,7 +747,7 @@ func (mv *MainView) onGuildSelected(index int) {
 	}
 	row := mv.guildRows[index]
 	if row.Folder {
-		mv.state.ToggleCollapsedFolder(row.FolderID)
+		mv.toggleCollapsedFolder(row.FolderID)
 		mv.persist()
 		mv.rebuildGuilds()
 		return
@@ -778,7 +778,7 @@ func (mv *MainView) unfoldSelectedGuildFolder(_ bool) bool {
 	if !row.Folder || !row.Collapsed {
 		return false
 	}
-	mv.state.ToggleCollapsedFolder(row.FolderID)
+	mv.toggleCollapsedFolder(row.FolderID)
 	mv.persist()
 	mv.rebuildGuilds()
 	return true
@@ -1292,7 +1292,7 @@ func (mv *MainView) TogglePinChannel(id store.ChannelID) {
 
 // ToggleCollapseFolder flips a folder's collapsed state and rebuilds the rail.
 func (mv *MainView) ToggleCollapseFolder(id int64) {
-	mv.state.ToggleCollapsedFolder(id)
+	mv.toggleCollapsedFolder(id)
 	mv.persist()
 	mv.rebuildGuilds()
 }
