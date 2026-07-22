@@ -651,6 +651,24 @@ func (a *App) handleReactionRemove(e *gateway.MessageReactionRemoveEvent) {
 	})
 }
 
+func (a *App) handleReactionRemoveEmoji(e *gateway.MessageReactionRemoveEmojiEvent) {
+	channel := store.ChannelID(e.ChannelID)
+	id := store.MessageID(e.MessageID)
+	name := e.Emoji.Name
+	emojiID := uint64(e.Emoji.ID)
+	a.ui.Post(func() {
+		a.store.RemoveReactionEmoji(channel, id, name, emojiID)
+		if a.onChange != nil {
+			a.onChange()
+		}
+		a.emit("reaction.remove_emoji", map[string]any{
+			"channel_id": uint64(channel),
+			"message_id": uint64(id),
+			"emoji":      name,
+		})
+	})
+}
+
 func (a *App) handleReactionRemoveAll(e *gateway.MessageReactionRemoveAllEvent) {
 	channel := store.ChannelID(e.ChannelID)
 	id := store.MessageID(e.MessageID)

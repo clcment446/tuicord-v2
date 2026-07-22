@@ -156,6 +156,10 @@ func (a *App) registerGatewayMessageHandlers() {
 	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
 		a.handleReactionRemoveAll(e)
 	})
+
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveEmojiEvent) {
+		a.handleReactionRemoveEmoji(e)
+	})
 }
 
 func (a *App) registerGatewayMemberHandlers() {
