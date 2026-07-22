@@ -109,6 +109,15 @@ func TestForumViewUsesConfiguredVimMovementWithoutJKFallback(t *testing.T) {
 		t.Fatal("remapped forum up key did not move the list")
 	}
 
+	keys.ScrollDown, keys.ScrollUp = "right", "left"
+	fv.SetVimKeys(keys)
+	if !fv.Handle(input.KeyEvent{Key: input.KeyRight}) || fv.list.Selected() != 1 {
+		t.Fatal("named forum down key did not move the list")
+	}
+	if !fv.Handle(input.KeyEvent{Key: input.KeyLeft}) || fv.list.Selected() != 0 {
+		t.Fatal("named forum up key did not move the list")
+	}
+
 	fv.SetVimKeys(config.VimKeys{})
 	if fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'j'}) || fv.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'n'}) {
 		t.Fatal("disabled forum Vim movement was handled")

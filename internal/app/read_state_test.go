@@ -104,6 +104,31 @@ func TestReadySeedsAndResetsReadStateCache(t *testing.T) {
 	}
 }
 
+func TestChannelUnreadDispatchCachesBeforeNingenHydration(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
+	changes := 0
+	a := &App{store: st, ui: syncPoster{}, onReadStateChange: func() { changes++ }}
+	event := &gateway.ChannelUnreadUpdateEvent{GuildID: 7}
+	event.ChannelUnreadUpdates = []struct {
+		ID            discord.ChannelID `json:"id"`
+		LastMessageID discord.MessageID `json:"last_message_id"`
+	}{{ID: 42, LastMessageID: 99}}
+
+	a.handleChannelUnreadUpdate(event)
+
+	if got := a.ChannelUnread(42); got != Unread {
+		t.Fatalf("channel status = %v, want unread", got)
+	}
+	if got := a.GuildUnread(7); got != Unread {
+		t.Fatalf("guild status = %v, want unread", got)
+	}
+	if changes != 1 {
+		t.Fatalf("read-state callbacks = %d, want 1", changes)
+	}
+}
+
 func TestReadUpdateUsesEffectiveStateAndClearsLocalPing(t *testing.T) {
 	ning := appdiscord.WrapSession(session.New(""))
 	st := store.New(0)

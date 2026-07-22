@@ -36,6 +36,19 @@ func TestItemListMousePressSelectsRow(t *testing.T) {
 	}
 }
 
+func TestItemListConfiguredNamedVimKeys(t *testing.T) {
+	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}})
+	list.SetVimNavigation(true)
+	list.SetVimKeys("right", "left")
+
+	if !list.Handle(input.KeyEvent{Key: input.KeyRight}) || list.Selected() != 1 {
+		t.Fatal("named right binding did not move selection down")
+	}
+	if !list.Handle(input.KeyEvent{Key: input.KeyLeft}) || list.Selected() != 0 {
+		t.Fatal("named left binding did not move selection up")
+	}
+}
+
 func TestItemListRightClickCapturesContext(t *testing.T) {
 	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}, {Label: "c"}})
 	var selected []int

@@ -10,16 +10,7 @@ import (
 
 func (a *App) registerGatewayLifecycleHandlers() {
 	a.handle.AddHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
-		if a.handle.ReadState != nil {
-			for _, update := range e.ChannelUnreadUpdates {
-				a.handle.ReadState.MarkUnread(update.ID, update.LastMessageID, 0)
-			}
-		}
-		a.ui.Post(func() {
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
+		a.handleChannelUnreadUpdate(e)
 	})
 	a.handle.AddHandler(func(e *read.UpdateEvent) {
 		a.handleReadStateUpdate(e)
@@ -71,6 +62,31 @@ func (a *App) registerGatewayLifecycleHandlers() {
 				a.onChange()
 			}
 		})
+	})
+}
+
+func (a *App) handleChannelUnreadUpdate(e *gateway.ChannelUnreadUpdateEvent) {
+	if a == nil || e == nil {
+		return
+	}
+	guild := store.GuildID(e.GuildID)
+	for _, update := range e.ChannelUnreadUpdates {
+		if a.handle != nil && a.handle.ReadState != nil {
+			a.handle.ReadState.MarkUnread(update.ID, update.LastMessageID, 0)
+		}
+		channel := store.ChannelID(update.ID)
+		status, authoritative := a.authoritativeChannelUnread(channel)
+		if !authoritative {
+			// This dispatch can precede ningen cabinet hydration. Keep the
+			// event-derived state so guild/channel badges still update.
+			status = Unread
+		}
+		a.cacheReadState(channel, guild, status)
+	}
+	a.ui.Post(func() {
+		if a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 	})
 }
 

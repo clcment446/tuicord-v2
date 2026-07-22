@@ -389,6 +389,11 @@ func (a *App) handleMouse(ev input.MouseEvent) bool {
 		a.Invalidate()
 		return true
 	}
+	// Event overlays are drawn last (for example, toasts above floating plugin
+	// viewports), so give them first refusal before component-owned hit targets.
+	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
+		return true
+	}
 	if overlays, ok := root.(OverlayHitTester); ok {
 		if target := overlays.OverlayAt(ev.X, ev.Y); target != nil {
 			if a.Drag.HandleWidgetMouse(ev, target) {
@@ -399,9 +404,6 @@ func (a *App) handleMouse(ev input.MouseEvent) bool {
 				return true
 			}
 		}
-	}
-	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
-		return true
 	}
 
 	if ev.Kind == input.MousePress {

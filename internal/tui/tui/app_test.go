@@ -524,6 +524,23 @@ func TestEventOverlayPreemptsFocusedChild(t *testing.T) {
 	}
 }
 
+func TestEventOverlayPreemptsFloatingHitTarget(t *testing.T) {
+	target := &handlingWidget{testWidget: *newTestWidget("floating", false)}
+	root := &layeredOverlayRoot{
+		eventOverlayWidget: eventOverlayWidget{overlayWidget: overlayWidget{drawWidget: drawWidget{testWidget: *newTestWidget("root", false)}}},
+		target:             target,
+	}
+	app := New()
+	app.Render(root, Size{W: 10, H: 2})
+
+	if !app.Handle(input.MouseEvent{X: 1, Y: 1, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("event overlay did not consume pointer")
+	}
+	if root.events != 1 || target.handled != 0 {
+		t.Fatalf("overlay/target events = %d/%d, want 1/0", root.events, target.handled)
+	}
+}
+
 func TestCanceledContextSwallowsWriteError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -703,6 +720,13 @@ func (w *eventOverlayWidget) HandleOverlay(Event) bool {
 	w.events++
 	return true
 }
+
+type layeredOverlayRoot struct {
+	eventOverlayWidget
+	target Widget
+}
+
+func (w *layeredOverlayRoot) OverlayAt(int, int) Widget { return w.target }
 
 func (w *overlayWidget) DrawOverlay(r screen.Region) {
 	r.Set(0, 0, screen.Cell{Content: w.overlay})
