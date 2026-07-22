@@ -38,7 +38,8 @@ type Surface interface {
 	Refresh()
 	// RefreshChannels redraws the channel panel for the active account.
 	RefreshChannels()
-	// RefreshGuildBadges redraws only the server rail's cached attention dots.
+	// RefreshGuildBadges redraws guild/channel attention rows without rebuilding
+	// member or chat chrome.
 	RefreshGuildBadges()
 	// Notify surfaces an incoming message from any connected account.
 	Notify(a *Account, msg store.Message)
@@ -365,7 +366,8 @@ func (m *Manager) isActive(acc *Account) bool {
 
 func (m *Manager) readStateChanged(acc *Account) {
 	if m.isActive(acc) {
-		m.surface.RefreshChannels()
+		// This path refreshes both guild and channel attention rows without
+		// rebuilding members/channel chrome.
 		m.surface.RefreshGuildBadges()
 	}
 	// Background accounts have no visible guild/channel rails, but their
