@@ -318,6 +318,7 @@ type App struct {
 
 	onReady           func()
 	onChange          func()
+	onReadStateChange func()
 	onGuildChange     func()
 	onError           func(error)
 	onIncomingMessage func(store.Message)
@@ -330,6 +331,10 @@ type App struct {
 	// other goroutines (notably synchronous Lua accessors) without posting back
 	// to the UI loop, which may not be running during startup or shutdown.
 	stateSnapshot atomic.Pointer[StateSnapshot]
+	// unreadMu protects derived read-state data updated by gateway goroutines.
+	unreadMu       sync.RWMutex
+	unreadChannels map[store.GuildID]map[store.ChannelID]UnreadStatus
+	guildUnread    map[store.GuildID]UnreadStatus
 	// sessionID is the gateway session identifier from READY; Discord requires
 	// it on user-originated interaction payloads.
 	sessionID string
@@ -630,6 +635,10 @@ func (a *App) OnReady(fn func()) { a.onReady = fn }
 // OnChange registers a callback run on the UI goroutine after channel-scoped
 // state changes, so the UI can refresh channel rows and unread badges.
 func (a *App) OnChange(fn func()) { a.onChange = fn }
+
+// OnReadStateChange registers a callback for read-state-only changes. Keeping
+// it separate avoids rebuilding the active channel when only a guild dot moves.
+func (a *App) OnReadStateChange(fn func()) { a.onReadStateChange = fn }
 
 // OnGuildChange registers a callback run on the UI goroutine after the guild
 // directory changes. Guild lifecycle events also invoke OnChange.
@@ -2243,16 +2252,50 @@ func (a *App) ChannelUnread(channel store.ChannelID) UnreadStatus {
 
 // GuildUnread returns the strongest read state among a guild's channels.
 func (a *App) GuildUnread(guild store.GuildID) UnreadStatus {
-	if a == nil || a.store == nil || guild == 0 {
+	if a == nil || guild == 0 {
 		return Read
 	}
-	status := Read
-	for _, channel := range a.store.Channels(guild) {
-		if next := a.ChannelUnread(channel.ID); next > status {
-			status = next
+	a.unreadMu.RLock()
+	status := a.guildUnread[guild]
+	a.unreadMu.RUnlock()
+	return status
+}
+
+// cacheReadState records one channel's latest authoritative attention state
+// and updates its guild aggregate without scanning the guild's channels.
+func (a *App) cacheReadState(channel store.ChannelID, guild store.GuildID, status UnreadStatus) {
+	if a == nil || channel == 0 || guild == 0 {
+		return
+	}
+	a.unreadMu.Lock()
+	defer a.unreadMu.Unlock()
+	if a.unreadChannels == nil {
+		a.unreadChannels = make(map[store.GuildID]map[store.ChannelID]UnreadStatus)
+	}
+	if a.guildUnread == nil {
+		a.guildUnread = make(map[store.GuildID]UnreadStatus)
+	}
+	channels := a.unreadChannels[guild]
+	if channels == nil {
+		channels = make(map[store.ChannelID]UnreadStatus)
+		a.unreadChannels[guild] = channels
+	}
+	if status == Read {
+		delete(channels, channel)
+	} else {
+		channels[channel] = status
+	}
+	aggregate := Read
+	for _, next := range channels {
+		if next > aggregate {
+			aggregate = next
 		}
 	}
-	return status
+	if aggregate == Read {
+		delete(a.guildUnread, guild)
+	} else {
+		a.guildUnread[guild] = aggregate
+	}
 }
 
 // MarkRead acknowledges a message with Discord and clears the local fallback.
