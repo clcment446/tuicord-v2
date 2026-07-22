@@ -249,12 +249,12 @@ func (w *ChatView) Draw(r screen.Region) {
 	preOffset := w.bottomScroll.Offset()
 	if prepended {
 		w.bottomScroll.UpdatePrepend(len(lines), r.Height())
-	} else if w.focusedExplicit && channel == w.lastMessageChannel && w.renderLineCount > 0 {
-		// An explicitly focused message is a reading anchor, even at the live
-		// edge. Keep its top row stable across incoming messages instead of
-		// letting bottom-relative growth move it downward.
-		w.bottomScroll.UpdateAnchored(len(lines), r.Height(), w.visibleStart)
 	} else {
+		// BottomScroll already distinguishes the two append states we need:
+		// offset zero follows the live edge, while a non-zero offset grows with
+		// appended lines to preserve the visible top. Do not derive the offset
+		// from the previous visibleStart merely because a message is focused;
+		// that would undo G/j/k changes and re-anchor unchanged draws.
 		w.bottomScroll.Update(len(lines), r.Height())
 	}
 	// A fold/unfold pins its toggled control line to the row it was activated

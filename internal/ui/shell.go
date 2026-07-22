@@ -259,6 +259,8 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 		if s.app != nil && msg.AuthorID != 0 && msg.AuthorID == s.app.SelfID() {
 			s.app.DeleteMessage(msg.ChannelID, msg.ID)
 		}
+	case 'a':
+		s.openReactionPicker(msg)
 	}
 }
 
@@ -1512,6 +1514,26 @@ func (s *Shell) openHotSwitch() {
 			s.app.LoadHistory(channel, 50)
 		}
 	})
+	s.setIndependentOverlay(p)
+}
+
+// openReactionPicker reuses emoji autocomplete for a focused message. Fake-
+// Nitro substitutions are intentionally disabled: reactions require either a
+// Unicode emoji or Discord's name:id custom-emoji form, not message markup.
+func (s *Shell) openReactionPicker(msg store.Message) {
+	if s == nil || s.app == nil || msg.ChannelID == 0 || msg.ID == 0 {
+		return
+	}
+	st := s.app.Store()
+	p := NewInlinePicker(st, s.styles, s.app.ActiveGuild(), s.app.ActiveChannel(), st.HasNitro(), false,
+		':', "", func(emoji string) {
+			s.app.AddReaction(msg.ChannelID, msg.ID, emoji)
+		}, nil, s.closeOverlay)
+	p.useReactionEntries(st, s.app.ActiveGuild(), st.HasNitro())
+	if s.mv != nil && s.mv.state != nil {
+		p.SetFavorites(s.mv.favoriteEmojis(), nil)
+	}
+	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
 	s.setIndependentOverlay(p)
 }
 
