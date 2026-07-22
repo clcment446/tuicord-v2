@@ -66,6 +66,23 @@ func TestAppendMessageEvictsOldest(t *testing.T) {
 	}
 }
 
+func TestChannelLastMessageTracksGatewayMessagesAndSurvivesSparseUpdates(t *testing.T) {
+	s := New(0)
+	s.UpsertChannel(Channel{ID: 7, GuildID: 1, Name: "alice", Kind: ChannelDM, LastMessageID: 10})
+	s.AppendMessage(Message{ID: 20, ChannelID: 7, Content: "new"})
+
+	channel, ok := s.Channel(7)
+	if !ok || channel.LastMessageID != 20 {
+		t.Fatalf("channel after message = %+v,%v, want last message 20", channel, ok)
+	}
+
+	s.UpsertChannel(Channel{ID: 7, GuildID: 1, Name: "alice", Kind: ChannelDM})
+	channel, _ = s.Channel(7)
+	if channel.LastMessageID != 20 {
+		t.Fatalf("last message after sparse update = %d, want 20", channel.LastMessageID)
+	}
+}
+
 func TestReplaceMessageByNonce(t *testing.T) {
 	s := New(0)
 	s.AppendMessage(Message{ChannelID: 7, Content: "hi", Nonce: "abc", Pending: true})

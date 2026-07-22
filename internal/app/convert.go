@@ -53,14 +53,15 @@ func convertChannel(c discord.Channel) store.Channel {
 		recipients[i] = store.UserID(recipient.ID)
 	}
 	out := store.Channel{
-		ID:           store.ChannelID(c.ID),
-		GuildID:      store.GuildID(c.GuildID),
-		Name:         name,
-		Kind:         convertChannelKind(c.Type),
-		Position:     c.Position,
-		ParentID:     store.ChannelID(c.ParentID),
-		Overwrites:   convertOverwrites(c.Overwrites),
-		RecipientIDs: recipients,
+		ID:            store.ChannelID(c.ID),
+		GuildID:       store.GuildID(c.GuildID),
+		Name:          name,
+		Kind:          convertChannelKind(c.Type),
+		LastMessageID: store.MessageID(c.LastMessageID),
+		Position:      c.Position,
+		ParentID:      store.ChannelID(c.ParentID),
+		Overwrites:    convertOverwrites(c.Overwrites),
+		RecipientIDs:  recipients,
 	}
 	if out.Kind == store.ChannelDM {
 		out.Recipients = make([]store.Member, 0, len(c.DMRecipients))

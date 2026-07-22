@@ -102,7 +102,7 @@ func folderName(f GuildFolder) string {
 	if f.Name != "" {
 		return f.Name
 	}
-	return "Folder"
+	return "Group"
 }
 
 // ChannelRow is one rendered line in the channel sidebar: a category header
