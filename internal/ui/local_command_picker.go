@@ -36,7 +36,7 @@ func NewLocalCommandPicker(commands []localCommandSpec, styles Styles, query str
 	list.SetSelectedStyle(styles.Cell("picker.selected"))
 	p.search = newQueryList(list, p.filter)
 	p.search.SetQuery(query)
-	p.body = widget.Column(titled("Local commands", list))
+	p.body = widget.Column(titled(styles, "Local commands", list))
 	p.body.Children()[0].Layout().Grow = 1
 	return p
 }

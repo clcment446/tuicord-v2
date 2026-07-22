@@ -152,9 +152,7 @@ func (s *Shell) OpenPluginOverlay(title string, lines []string) {
 		empty.SetStyle(textStyle)
 		rows = append(rows, empty)
 	}
-	border := titled(title, widget.Column(rows...))
-	border.SetStyle(s.styles.Cell("panels.border"))
-	border.SetFocusStyle(s.styles.Cell("panels.focus"))
+	border := titled(s.styles, title, widget.Column(rows...))
 	s.setIndependentOverlay(border)
 }
 
@@ -1291,7 +1289,7 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			s.pasteImage()
 			return true
 		case keyMatches(key, s.cfg.Keys.Help):
-			s.setIndependentOverlay(NewHelpOverlay(s.cfg))
+			s.setIndependentOverlay(NewHelpOverlay(s.cfg, s.styles))
 			return true
 		}
 	}

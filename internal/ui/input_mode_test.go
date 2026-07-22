@@ -263,7 +263,7 @@ func TestVimInputFocusMovementExitsWithoutOverridingDestination(t *testing.T) {
 			move: func(runtime *tui.App, shell *Shell, _ *MainView, _ tui.Widget) {
 				// Bypass the overlay helper to verify the runtime focus notification
 				// itself enforces the invariant on retained-tree replacement.
-				shell.overlay = NewHelpOverlay(shell.cfg)
+				shell.overlay = NewHelpOverlay(shell.cfg, shell.styles)
 				runtime.Render(shell, tui.Size{W: 40, H: 9})
 			},
 			want: func(_ *MainView, _ tui.Widget) tui.Widget { return nil },
@@ -303,7 +303,7 @@ func TestVimIRejectsReadOnlyAndCanceledPendingRequestsNeverFire(t *testing.T) {
 		cancel func(*Shell, *MainView)
 	}{
 		{name: "read-only", cancel: func(_ *Shell, mv *MainView) { mv.composer.SetReadOnly(true) }},
-		{name: "independent overlay", cancel: func(shell *Shell, _ *MainView) { shell.setIndependentOverlay(NewHelpOverlay(shell.cfg)) }},
+		{name: "independent overlay", cancel: func(shell *Shell, _ *MainView) { shell.setIndependentOverlay(NewHelpOverlay(shell.cfg, shell.styles)) }},
 		{name: "channel", cancel: func(shell *Shell, _ *MainView) { shell.channelChanged(1, 2) }},
 	}
 	for _, tt := range tests {
@@ -393,7 +393,7 @@ func TestComposerOwnedPickerRestoresInputIndependentOverlayDoesNot(t *testing.T)
 	t.Run("independent overlay", func(t *testing.T) {
 		runtime, shell, mv, _ := newVimFocusHarness(t, vimTestConfig())
 		enterVimInput(t, runtime, shell)
-		shell.setIndependentOverlay(NewHelpOverlay(shell.cfg))
+		shell.setIndependentOverlay(NewHelpOverlay(shell.cfg, shell.styles))
 		runtime.Render(shell, tui.Size{W: 40, H: 9})
 		if shell.editor.phase != editorNormal || mv.composer.CanFocus() {
 			t.Fatal("independent overlay retained input mode")
@@ -424,7 +424,7 @@ func TestConfiguredNextPanelAndFocusComposerBindingsClaimRuntimeKeys(t *testing.
 	if runtime.Focus.Focused() != other || shell.editor.phase != editorNormal || mv.composer.CanFocus() {
 		t.Fatalf("configured next_panel focus/phase = %T/%v", runtime.Focus.Focused(), shell.editor.phase)
 	}
-	buf := tui.New().Render(NewHelpOverlay(cfg), tui.Size{W: 60, H: 24})
+	buf := tui.New().Render(NewHelpOverlay(cfg, Styles{}), tui.Size{W: 60, H: 24})
 	if !bufferContains(buf, "n") || !bufferContains(buf, "i / g") {
 		t.Fatal("help does not expose configured panel/composer bindings")
 	}

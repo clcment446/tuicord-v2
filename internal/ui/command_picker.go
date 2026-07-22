@@ -34,7 +34,7 @@ func NewCommandPicker(commands []app.ApplicationCommand, styles Styles, query st
 	p.list.SetStyle(styles.Cell("picker"))
 	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
 	p.search = newQueryList(p.list, p.filter)
-	p.body = widget.Column(titled("Slash commands", p.list))
+	p.body = widget.Column(titled(styles, "Slash commands", p.list))
 	p.body.Children()[0].Layout().Grow = 1
 	p.refilter()
 	return p
