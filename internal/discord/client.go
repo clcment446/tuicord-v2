@@ -27,7 +27,7 @@ const (
 	clientBrowserUA    = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 	clientSecCHUA      = `"Not_A Brand";v="99", "Google Chrome";v="150", "Chromium";v="150"`
 	clientLocale       = discord.EnglishUS
-	clientCapabilities = 16381
+	clientCapabilities = gateway.Capabilities(16381) &^ gateway.UserSettingsProto
 )
 
 // BrowserUserAgent returns the browser identity shared by REST and remote-auth

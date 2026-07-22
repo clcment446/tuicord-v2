@@ -90,10 +90,11 @@ type Guild struct {
 
 // Channel is a channel within a guild.
 type Channel struct {
-	ID      ChannelID
-	GuildID GuildID
-	Name    string
-	Kind    ChannelKind
+	ID            ChannelID
+	GuildID       GuildID
+	Name          string
+	Kind          ChannelKind
+	LastMessageID MessageID
 	// Position is the channel's sort key within the guild (or within its
 	// category). ParentID is the category channel this one is nested under, or
 	// zero for top-level channels; it drives category grouping in the sidebar.
@@ -610,6 +611,9 @@ func (s *Store) Guild(id GuildID) (Guild, bool) {
 // Channels sorted by Position then ID, so insertion order does not matter.
 func (s *Store) UpsertChannel(c Channel) {
 	if existing, ok := s.channels[c.ID]; ok {
+		if c.LastMessageID == 0 {
+			c.LastMessageID = existing.LastMessageID
+		}
 		if existing.GuildID != c.GuildID {
 			s.removeChannelOrder(existing.GuildID, c.ID)
 			s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
@@ -666,6 +670,20 @@ func (s *Store) AppendMessage(m Message) {
 	m.rev = s.nextRevision()
 	r.push(m)
 	s.clearMessageTombstone(m.ChannelID, m.ID)
+	s.updateLastMessage(m.ChannelID, m.ID)
+}
+
+func (s *Store) updateLastMessage(channel ChannelID, message MessageID) {
+	if message == 0 {
+		return
+	}
+	c, ok := s.channels[channel]
+	if !ok || message <= c.LastMessageID {
+		return
+	}
+	c.LastMessageID = message
+	s.channels[channel] = c
+	s.touchMeta()
 }
 
 // SetMessages replaces a channel's history with messages in oldest-first order.
@@ -862,6 +880,7 @@ func (s *Store) ReplaceMessage(nonce string, confirmed Message) bool {
 		return false
 	}
 	s.clearMessageTombstone(confirmed.ChannelID, confirmed.ID)
+	s.updateLastMessage(confirmed.ChannelID, confirmed.ID)
 	return true
 }
 

@@ -64,6 +64,61 @@ func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
 	}
 }
 
+func TestDirectMessagesServerIsFirst(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Alpha"})
+	st.UpsertGuild(store.Guild{ID: 2, Name: "Beta"})
+	st.UpsertGuild(store.Guild{ID: app.DirectMessagesGuildID, Name: "Direct Messages"})
+	st.SetGuildFolders([]store.GuildFolder{{ID: 50, GuildIDs: []store.GuildID{1, 2}}})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 0)
+	mv := &MainView{app: a, state: &uistate.State{}, guildList: widget.NewItemList(nil)}
+
+	mv.rebuildGuilds()
+
+	if len(mv.guildRows) == 0 || mv.guildRows[0].GuildID != app.DirectMessagesGuildID {
+		t.Fatalf("first server row = %+v, want Direct Messages", mv.guildRows)
+	}
+	if len(mv.guildRows) < 2 || !mv.guildRows[1].Folder || mv.guildRows[1].Name != "Group" {
+		t.Fatalf("row after Direct Messages = %+v, want unnamed Group", mv.guildRows)
+	}
+}
+
+func TestDirectMessageListTitleAndLatestActivityOrder(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: app.DirectMessagesGuildID, Name: "Direct Messages"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: app.DirectMessagesGuildID, Name: "old", Kind: store.ChannelDM, LastMessageID: 100})
+	st.UpsertChannel(store.Channel{ID: 20, GuildID: app.DirectMessagesGuildID, Name: "new", Kind: store.ChannelDM, LastMessageID: 300})
+	st.UpsertChannel(store.Channel{ID: 30, GuildID: app.DirectMessagesGuildID, Name: "middle", Kind: store.ChannelDM, LastMessageID: 200})
+	st.IncrementPing(10)
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(app.DirectMessagesGuildID, 10)
+	mv := &MainView{
+		app:           a,
+		state:         &uistate.State{},
+		channelList:   widget.NewItemList(nil),
+		channelBorder: widget.NewBorder(widget.NewText("")),
+	}
+
+	mv.refreshChannels()
+
+	if got := mv.channelBorder.Title(); got != "Direct Messages" {
+		t.Fatalf("channel panel title = %q, want Direct Messages", got)
+	}
+	want := []store.ChannelID{20, 30, 10}
+	for i, id := range want {
+		if mv.channelRows[i].ChannelID != id {
+			t.Fatalf("DM row %d = %d, want %d (all rows: %+v)", i, mv.channelRows[i].ChannelID, id, mv.channelRows)
+		}
+	}
+
+	st.AppendMessage(store.Message{ID: 400, ChannelID: 10, Content: "latest"})
+	mv.refreshChannels()
+	if mv.channelRows[0].ChannelID != 10 {
+		t.Fatalf("first DM after new message = %d, want 10", mv.channelRows[0].ChannelID)
+	}
+}
+
 func TestRefreshChannelsPreservesBrowsedSelection(t *testing.T) {
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})

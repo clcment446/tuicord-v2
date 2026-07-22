@@ -11,6 +11,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ type MainView struct {
 	memberList          *widget.ItemList
 	accountList         *widget.ItemList
 	accountBorder       *widget.Border
+	channelBorder       *widget.Border
 	themedBorders       []*widget.Border
 	themedSplits        []*widget.Split
 	onAccountSelect     func(int)
@@ -261,7 +263,8 @@ func (mv *MainView) SetStyles(styles Styles) {
 
 func (mv *MainView) compose() tui.Widget {
 	guildRail := mv.titled("Servers", mv.guildList)
-	channels := mv.titled("Channels", mv.channelList)
+	mv.channelBorder = mv.titled("Channels", mv.channelList)
+	channels := mv.channelBorder
 	members := mv.titled("Members", mv.memberList)
 
 	// Order: status, image thumbnails, filename chips, then the input — so a
@@ -656,6 +659,7 @@ func (mv *MainView) rebuildGuilds() {
 		selectedGuild = mv.guildRows[i].GuildID
 	}
 	mv.guildRows = store.OrderGuilds(st.GuildFolders(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
+	mv.guildRows = moveDMFirst(mv.guildRows)
 	items := make([]widget.Item, len(mv.guildRows))
 	for i, row := range mv.guildRows {
 		items[i] = mv.guildItem(row)
@@ -666,6 +670,18 @@ func (mv *MainView) rebuildGuilds() {
 	} else if i := mv.guildRowIndex(mv.app.ActiveGuild()); i >= 0 {
 		mv.guildList.SetSelectedSilent(i)
 	}
+}
+
+func moveDMFirst(rows []store.GuildRow) []store.GuildRow {
+	for i, row := range rows {
+		if row.Folder || row.GuildID != app.DirectMessagesGuildID {
+			continue
+		}
+		copy(rows[1:i+1], rows[:i])
+		rows[0] = row
+		break
+	}
+	return rows
 }
 
 func (mv *MainView) guildItem(row store.GuildRow) widget.Item {
@@ -770,7 +786,26 @@ func (mv *MainView) refreshChannels() {
 		selectedChannel = mv.channelRows[i].ChannelID
 	}
 	channels := st.Channels(guild)
-	mv.channelRows = store.GroupChannelsWithPriority(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet(), st.PingedChannels())
+	if guild == app.DirectMessagesGuildID {
+		sort.SliceStable(channels, func(i, j int) bool {
+			if channels[i].LastMessageID != channels[j].LastMessageID {
+				return channels[i].LastMessageID > channels[j].LastMessageID
+			}
+			return channels[i].ID > channels[j].ID
+		})
+	}
+	if mv.channelBorder != nil {
+		title := "Channels"
+		if guild == app.DirectMessagesGuildID {
+			title = "Direct Messages"
+		}
+		mv.channelBorder.SetTitle(title)
+	}
+	priority := st.PingedChannels()
+	if guild == app.DirectMessagesGuildID {
+		priority = nil
+	}
+	mv.channelRows = store.GroupChannelsWithPriority(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet(), priority)
 	items := make([]widget.Item, len(mv.channelRows))
 	for i, row := range mv.channelRows {
 		items[i] = mv.channelItem(row)

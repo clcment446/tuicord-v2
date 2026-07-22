@@ -10,7 +10,19 @@ import (
 	"testing"
 
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 )
+
+func TestClientCapabilitiesRequestDecodableUserSettings(t *testing.T) {
+	if clientCapabilities&gateway.UserSettingsProto != 0 {
+		t.Fatal("client capabilities opt into protobuf user settings, but this client only decodes legacy user settings")
+	}
+
+	want := gateway.Capabilities(16381) &^ gateway.UserSettingsProto
+	if clientCapabilities != want {
+		t.Fatalf("client capabilities = %d, want browser capabilities without UserSettingsProto (%d)", clientCapabilities, want)
+	}
+}
 
 func TestNewSessionDoesNotPanic(t *testing.T) {
 	withCachedBuildNumber(t, 123456)

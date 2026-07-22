@@ -130,8 +130,8 @@ func TestOrderGuildsUnnamedRealFolderFallbackName(t *testing.T) {
 	// A real folder (id set, two guilds) with no name renders a fallback label.
 	folders := []GuildFolder{{ID: 5, Name: "", GuildIDs: []GuildID{1, 2}}}
 	rows := OrderGuilds(folders, guilds, nil, nil)
-	if !rows[0].Folder || rows[0].Name != "Folder" {
-		t.Fatalf("row[0] = %+v, want folder header named 'Folder'", rows[0])
+	if !rows[0].Folder || rows[0].Name != "Group" {
+		t.Fatalf("row[0] = %+v, want folder header named 'Group'", rows[0])
 	}
 }
 

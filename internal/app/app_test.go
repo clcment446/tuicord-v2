@@ -565,13 +565,40 @@ func TestReadyEventLoadsDiscordGuildData(t *testing.T) {
 	}
 }
 
+func TestReadyEventLoadsGuildFolders(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+
+	a.handleReady(&gateway.ReadyEvent{
+		Guilds: []gateway.GuildCreateEvent{
+			{Guild: discord.Guild{ID: 1, Name: "alpha"}},
+			{Guild: discord.Guild{ID: 2, Name: "beta"}},
+		},
+		ReadyEventExtras: gateway.ReadyEventExtras{UserSettings: &gateway.UserSettings{
+			GuildFolders: []gateway.GuildFolder{{
+				ID:       77,
+				Name:     "Work",
+				GuildIDs: []discord.GuildID{1, 2},
+			}},
+		}},
+	})
+
+	folders := a.store.GuildFolders()
+	if len(folders) != 1 || folders[0].ID != 77 || folders[0].Name != "Work" {
+		t.Fatalf("loaded folders = %+v, want Work folder (77)", folders)
+	}
+	if !slices.Equal(folders[0].GuildIDs, []store.GuildID{1, 2}) {
+		t.Fatalf("loaded folder guilds = %v, want [1 2]", folders[0].GuildIDs)
+	}
+}
+
 func TestReadyEventLoadsDMUserNames(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 
 	a.handleReady(&gateway.ReadyEvent{PrivateChannels: []discord.Channel{
 		{
-			ID:   91,
-			Type: discord.DirectMessage,
+			ID:            91,
+			Type:          discord.DirectMessage,
+			LastMessageID: 9001,
 			DMRecipients: []discord.User{{
 				ID:          100,
 				Username:    "alice",
@@ -600,6 +627,9 @@ func TestReadyEventLoadsDMUserNames(t *testing.T) {
 	dms := a.store.Channels(DirectMessagesGuildID)
 	if len(dms) != 2 || dms[0].Kind != store.ChannelDM || dms[1].Kind != store.ChannelDM {
 		t.Fatalf("DM channels = %+v, want two ChannelDM entries under synthetic DM guild", dms)
+	}
+	if dms[0].LastMessageID != 9001 {
+		t.Fatalf("DM last message id = %d, want 9001", dms[0].LastMessageID)
 	}
 }
 
