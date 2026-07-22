@@ -2,6 +2,7 @@
 .env
 *.test
 coverage.out
+__pycache__/
 
 # Built binaries
 /tuicord
