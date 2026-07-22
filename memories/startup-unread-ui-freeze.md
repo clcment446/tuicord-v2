@@ -37,11 +37,16 @@ full guild and generic refresh callbacks.
 ## Follow-up crash
 
 The local mute helper added by this fix initially checked `App` and ningen state
-but dereferenced `a.store` without a nil guard. A read update delivered to a
-partially initialized App panicked in `Store.Channel`. `channelMutedLocal` now
-treats a missing store as unmuted, and `app.New` establishes the stronger
-invariant that its store is always non-nil (`259a3f8`). Regression tests cover
-both the callback and constructor paths.
+but dereferenced `a.store` without a nil guard. A defensive guard and constructor
+invariant landed in `259a3f8`, but the crash persisted: the obscured panic header
+hid that the actual live failure was a concurrent map read/write, not only a nil
+receiver. Arikawa invokes read handlers on its own goroutine while `App.store` is
+UI-owned, so traversing channel parents through `Store.Channel` raced UI writes.
+
+`5f10dd9` removes all App-store access from the handler-safe mute helper. It now
+uses ningen's synchronized local mute/cabinet state (`ChannelIsMuted`), which does
+not perform REST. A race regression test mutates the UI store concurrently with
+mute lookup.
 
 ## Invariant
 
