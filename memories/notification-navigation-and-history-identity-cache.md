@@ -23,4 +23,4 @@ Route both focused and failed-desktop notifications through `showIncomingMessage
 
 ## Notes
 
-System desktop notifications themselves still depend on platform notifier capabilities; the in-app fallback is the reliable click-to-channel route. Focused verification passed with `go test ./internal/store ./internal/config ./internal/ui -count=1`; `go build ./internal/app ./cmd/tuicord` also passed. The full app test package remains blocked by pre-existing `autobot_local_test.go` references to removed APIs.
+System desktop notifications themselves still depend on platform notifier capabilities; the in-app fallback is the reliable click-to-channel route. Focused verification passed with `go test ./internal/store ./internal/config ./internal/ui -count=1`; `go build ./internal/app ./cmd/tuicord` also passed.

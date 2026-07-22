@@ -83,7 +83,7 @@ func componentTestMessage() store.Message {
 				Kind:     store.ComponentSelect,
 				RawType:  3,
 				CustomID: "sell_items",
-			}},
+			}, {Kind: store.ComponentButton, RawType: 2, CustomID: "confirm"}},
 		}},
 	}
 }
@@ -270,6 +270,22 @@ func TestSubmitComponentIgnoresIncompleteActions(t *testing.T) {
 	select {
 	case <-fi.done:
 		t.Fatal("incomplete action should not post an interaction")
+	default:
+	}
+}
+
+func TestSubmitComponentRejectsUnknownAndMismatchedControls(t *testing.T) {
+	fi := &fakeInteractionPoster{done: make(chan struct{})}
+	a := &App{store: store.New(0), ui: syncPoster{}, interact: fi}
+	msg := componentTestMessage()
+
+	// A plugin can only activate the component Discord actually supplied. It
+	// cannot turn a select into a button or invent an arbitrary custom ID.
+	a.SubmitComponent(ComponentSubmit{Message: msg, ComponentType: 2, CustomID: "sell_items"})
+	a.SubmitComponent(ComponentSubmit{Message: msg, ComponentType: 3, CustomID: "unknown", Values: []string{"101"}})
+	select {
+	case <-fi.done:
+		t.Fatal("invalid component submission should not post an interaction")
 	default:
 	}
 }

@@ -1035,15 +1035,7 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		if a.onChange != nil {
 			a.onChange()
 		}
-		a.emit("message.create", map[string]any{
-			"id":         uint64(msg.ID),
-			"channel_id": uint64(msg.ChannelID),
-			"guild_id":   uint64(e.GuildID),
-			"author_id":  uint64(msg.AuthorID),
-			"author":     msg.Author,
-			"content":    msg.Content,
-			"bot":        e.Author.Bot,
-		})
+		a.emit("message.create", pluginMessagePayload(e.Message, uint64(e.GuildID), e.Author.Bot))
 	})
 }
 
@@ -1136,13 +1128,7 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 		if a.onChange != nil {
 			a.onChange()
 		}
-		a.emit("message.update", map[string]any{
-			"id":         uint64(id),
-			"channel_id": uint64(channel),
-			"guild_id":   guildID,
-			"author_id":  uint64(patch.AuthorID),
-			"content":    patch.Content,
-		})
+		a.emit("message.update", pluginMessagePayload(e.Message, guildID, e.Author.Bot))
 	})
 }
 
@@ -1384,6 +1370,9 @@ func (a *App) SubmitComponent(sub ComponentSubmit) {
 	if componentType == 0 {
 		componentType = 2
 	}
+	if !hasSubmittedComponent(msg.ComponentTree, componentType, sub.CustomID) {
+		return
+	}
 	payload := componentInteraction{
 		Type:          messageComponentInteractionType,
 		Nonce:         newNonce(),
@@ -1421,6 +1410,34 @@ func (a *App) SubmitComponent(sub ComponentSubmit) {
 			}
 		})
 	}()
+}
+
+// hasSubmittedComponent prevents callers (including plugins) from inventing a
+// component interaction or changing a select into a button. Component trees
+// are recursive because Components V2 controls may live inside containers or
+// section accessories.
+func hasSubmittedComponent(nodes []store.ComponentNode, componentType int, customID string) bool {
+	for _, node := range nodes {
+		nodeType := node.RawType
+		if nodeType == 0 {
+			switch node.Kind {
+			case store.ComponentButton:
+				nodeType = 2
+			case store.ComponentSelect:
+				nodeType = 3
+			}
+		}
+		if nodeType == componentType && node.CustomID == customID && !node.Disabled {
+			return true
+		}
+		if hasSubmittedComponent(node.Children, componentType, customID) {
+			return true
+		}
+		if node.Accessory != nil && hasSubmittedComponent([]store.ComponentNode{*node.Accessory}, componentType, customID) {
+			return true
+		}
+	}
+	return false
 }
 
 // SendToChannel posts content to an explicit channel with an optimistic local
@@ -1492,36 +1509,24 @@ func (a *App) SetPinned(channel store.ChannelID, id store.MessageID, pinned bool
 	if channel == 0 || id == 0 {
 		return
 	}
-	go func() {
+	a.runMutation(func() error {
 		var err error
 		if pinned {
 			err = a.send.PinMessage(discord.ChannelID(channel), discord.MessageID(id), "")
 		} else {
 			err = a.send.UnpinMessage(discord.ChannelID(channel), discord.MessageID(id), "")
 		}
-		if err != nil {
-			a.reportError(err)
-			return
+		return err
+	}, func() {
+		a.store.SetMessagePinned(channel, id, pinned)
+		if a.onChange != nil {
+			a.onChange()
 		}
-		a.ui.Post(func() {
-			a.store.SetMessagePinned(channel, id, pinned)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	}()
+	})
 }
 
 func (a *App) reportError(err error) {
-	if err == nil {
-		return
-	}
-	a.ui.Post(func() {
-		if a.onError != nil {
-			a.onError(err)
-		}
-		a.emit("error", map[string]any{"message": err.Error()})
-	})
+	a.reportAsyncError(err)
 }
 
 type historyRequestSnapshot struct {
@@ -1986,21 +1991,17 @@ func (a *App) loadChannels(guild store.GuildID) {
 func (a *App) loadChannelsFrom(guild store.GuildID, generation, version uint64) {
 	channels, err := a.chans.Channels(discord.GuildID(guild))
 	if err != nil {
-		a.ui.Post(func() {
-			if a.store.GuildGeneration(guild) != generation || !a.channelLoadCurrent(guild, version) {
-				return
-			}
+		a.postIfCurrent(func() bool {
+			return a.store.GuildGeneration(guild) == generation && a.channelLoadCurrent(guild, version)
+		}, func() {
 			a.finishChannelLoad(guild, false)
-			if a.onError != nil {
-				a.onError(err)
-			}
+			a.reportErrorOnUI(err)
 		})
 		return
 	}
-	a.ui.Post(func() {
-		if a.store.GuildGeneration(guild) != generation || !a.channelLoadCurrent(guild, version) {
-			return
-		}
+	a.postIfCurrent(func() bool {
+		return a.store.GuildGeneration(guild) == generation && a.channelLoadCurrent(guild, version)
+	}, func() {
 		for _, channel := range channels {
 			channel.GuildID = discord.GuildID(guild)
 			a.store.UpsertChannel(convertChannel(channel))
@@ -2019,21 +2020,17 @@ func (a *App) loadRoles(guild store.GuildID) {
 func (a *App) loadRolesFrom(guild store.GuildID, generation, version uint64) {
 	roles, err := a.roles.Roles(discord.GuildID(guild))
 	if err != nil {
-		a.ui.Post(func() {
-			if a.store.GuildGeneration(guild) != generation || !a.roleLoadCurrent(guild, version) {
-				return
-			}
+		a.postIfCurrent(func() bool {
+			return a.store.GuildGeneration(guild) == generation && a.roleLoadCurrent(guild, version)
+		}, func() {
 			a.finishRoleLoad(guild, false)
-			if a.onError != nil {
-				a.onError(err)
-			}
+			a.reportErrorOnUI(err)
 		})
 		return
 	}
-	a.ui.Post(func() {
-		if a.store.GuildGeneration(guild) != generation || !a.roleLoadCurrent(guild, version) {
-			return
-		}
+	a.postIfCurrent(func() bool {
+		return a.store.GuildGeneration(guild) == generation && a.roleLoadCurrent(guild, version)
+	}, func() {
 		for _, role := range roles {
 			a.store.UpsertRole(guild, convertRole(role))
 		}

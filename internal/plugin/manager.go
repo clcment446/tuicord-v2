@@ -53,6 +53,7 @@ type Manager struct {
 	commands *commandRegistry
 	keys     *keyRegistry
 	themes   *themeRegistry
+	timers   *timerRegistry
 	host     *Host
 
 	mu                   sync.Mutex
@@ -90,6 +91,7 @@ func NewManager(opts Options) *Manager {
 		commands: newCommandRegistry(),
 		keys:     newKeyRegistry(),
 		themes:   newThemeRegistry(),
+		timers:   &timerRegistry{},
 		host:     opts.Host,
 	}
 	m.rt.start()
@@ -188,6 +190,21 @@ func (m *Manager) loadOne(f pluginFile) error {
 			configContext: f.configContext,
 			starting:      true,
 			applyTheme:    m.applyTheme,
+			every: func(interval time.Duration, fn *lua.LFunction, L *lua.LState) {
+				m.timers.every(interval, L, func() {
+					if !m.rt.submit(func() {
+						if err := safeCall(m.rt.context(), L, fn, m.opts.CallbackTimeout); err != nil {
+							m.onCallbackError(f.name, err)
+						}
+					}) {
+						m.logf("dropped timer for plugin %q", f.name)
+					}
+				})
+			},
+			submit:          m.rt.submit,
+			context:         m.rt.context,
+			callbackTimeout: m.opts.CallbackTimeout,
+			onCallbackError: func(err error) { m.onCallbackError(f.name, err) },
 		}
 		var workingConfig config.Config
 		if f.configContext && m.opts.ConfigTarget != nil {
@@ -401,6 +418,7 @@ func (m *Manager) Close() {
 		return
 	}
 	m.rt.stop()
+	m.timers.close()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, state := range m.states {
@@ -417,6 +435,7 @@ func (m *Manager) rollbackRegistrations(L *lua.LState) {
 	m.commands.rollbackOwner(L)
 	m.keys.rollbackOwner(L)
 	m.themes.rollbackOwner(L)
+	m.timers.rollbackOwner(L)
 }
 
 func (m *Manager) onCallbackError(plugin string, err error) {

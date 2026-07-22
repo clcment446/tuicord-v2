@@ -19,6 +19,7 @@ type CommandPicker struct {
 	filtered []app.ApplicationCommand
 	query    string
 	list     *widget.ItemList
+	search   *queryList[app.ApplicationCommand]
 	body     *widget.Node
 	node     layout.Node
 	onPick   func(app.ApplicationCommand)
@@ -32,6 +33,7 @@ func NewCommandPicker(commands []app.ApplicationCommand, styles Styles, query st
 	}
 	p.list.SetStyle(styles.Cell("picker"))
 	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
+	p.search = newQueryList(p.list, p.filter)
 	p.body = widget.Column(titled("Slash commands", p.list))
 	p.body.Children()[0].Layout().Grow = 1
 	p.refilter()
@@ -39,24 +41,27 @@ func NewCommandPicker(commands []app.ApplicationCommand, styles Styles, query st
 }
 
 func (p *CommandPicker) refilter() {
-	selected := p.list.Selected()
-	p.filtered = p.filtered[:0]
+	p.search.SetQuery(p.query)
+	p.filtered = p.search.filtered
+}
+
+func (p *CommandPicker) filter(query string) ([]app.ApplicationCommand, []widget.Item) {
+	filtered := make([]app.ApplicationCommand, 0, len(p.commands))
 	items := make([]widget.Item, 0, len(p.commands))
-	query := strings.ToLower(strings.TrimSpace(p.query))
+	query = strings.ToLower(strings.TrimSpace(query))
 	for _, command := range p.commands {
 		key := strings.ToLower(command.Name + " " + command.Description)
 		if _, ok := fuzzyScore(key, query); !ok {
 			continue
 		}
-		p.filtered = append(p.filtered, command)
+		filtered = append(filtered, command)
 		label := "/" + command.Name
 		if command.Description != "" {
 			label += " — " + command.Description
 		}
 		items = append(items, widget.Item{Label: label})
 	}
-	p.list.SetItems(items)
-	p.list.SetSelectedSilent(selected)
+	return filtered, items
 }
 
 func (p *CommandPicker) Children() []tui.Widget          { return []tui.Widget{p.body} }

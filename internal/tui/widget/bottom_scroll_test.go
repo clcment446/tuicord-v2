@@ -36,6 +36,18 @@ func TestBottomScrollKeepsNewestPositionWhenContentGrows(t *testing.T) {
 	}
 }
 
+func TestBottomScrollUpdateAnchoredKeepsTopRow(t *testing.T) {
+	var scroll BottomScroll
+	scroll.Update(20, 4)
+
+	// An incoming message adds an author row and a body row below the view.
+	scroll.UpdateAnchored(22, 4, 16)
+
+	if got, want := scroll.Offset(), 2; got != want {
+		t.Fatalf("anchored offset = %d, want %d", got, want)
+	}
+}
+
 func TestBottomScrollClampsAfterContentShrinks(t *testing.T) {
 	var scroll BottomScroll
 	scroll.Update(20, 4)
