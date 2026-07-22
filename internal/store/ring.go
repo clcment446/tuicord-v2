@@ -4,6 +4,7 @@ package store
 // the oldest message. It keeps message history bounded per channel.
 type ring struct {
 	buf   []Message
+	rev   uint64
 	start int // index of the oldest element
 	size  int
 }
@@ -16,6 +17,7 @@ func newRing(capacity int) *ring {
 }
 
 func (r *ring) push(m Message) {
+	r.rev = max(r.rev, m.rev)
 	if r.size < len(r.buf) {
 		r.buf[(r.start+r.size)%len(r.buf)] = m
 		r.size++
@@ -29,15 +31,25 @@ func (r *ring) push(m Message) {
 // slice returns the messages oldest-first as a fresh copy.
 func (r *ring) slice() []Message {
 	out := make([]Message, r.size)
-	for i := 0; i < r.size; i++ {
-		out[i] = r.buf[(r.start+i)%len(r.buf)]
+	return r.copy(out[:0])
+}
+
+func (r *ring) copy(dst []Message) []Message {
+	if cap(dst) < r.size {
+		dst = make([]Message, r.size)
+	} else {
+		dst = dst[:r.size]
 	}
-	return out
+	for i := 0; i < r.size; i++ {
+		dst[i] = r.buf[(r.start+i)%len(r.buf)]
+	}
+	return dst
 }
 
 func (r *ring) replaceByNonce(nonce string, confirmed Message) bool {
 	if i, ok := r.indexByNonce(nonce); ok {
 		r.buf[i] = confirmed
+		r.rev = confirmed.rev
 		return true
 	}
 	return false
@@ -48,6 +60,7 @@ func (r *ring) markFailed(nonce string, rev uint64) bool {
 		r.buf[i].Failed = true
 		r.buf[i].Pending = false
 		r.buf[i].rev = rev
+		r.rev = rev
 		return true
 	}
 	return false
@@ -81,12 +94,13 @@ func (r *ring) updateByID(id MessageID, patch func(*Message), rev uint64) bool {
 	if i, ok := r.indexByID(id); ok {
 		patch(&r.buf[i])
 		r.buf[i].rev = rev
+		r.rev = rev
 		return true
 	}
 	return false
 }
 
-func (r *ring) removeByID(id MessageID) bool {
+func (r *ring) removeByID(id MessageID, rev uint64) bool {
 	i, ok := r.indexByID(id)
 	if !ok {
 		return false
@@ -99,6 +113,7 @@ func (r *ring) removeByID(id MessageID) bool {
 	last := (r.start + r.size - 1) % len(r.buf)
 	r.buf[last] = Message{}
 	r.size--
+	r.rev = rev
 	if r.size == 0 {
 		r.start = 0
 	}
@@ -115,6 +130,7 @@ func (r *ring) addReaction(id MessageID, react Reaction, rev uint64) bool {
 	}
 	msg := &r.buf[i]
 	msg.rev = rev
+	r.rev = rev
 	for j := range msg.Reactions {
 		rx := &msg.Reactions[j]
 		if rx.EmojiName == react.EmojiName && rx.EmojiID == react.EmojiID {
@@ -150,6 +166,7 @@ func (r *ring) removeReaction(id MessageID, emojiName string, emojiID uint64, me
 			msg.Reactions = append(msg.Reactions[:j], msg.Reactions[j+1:]...)
 		}
 		msg.rev = rev
+		r.rev = rev
 		return true
 	}
 	return false

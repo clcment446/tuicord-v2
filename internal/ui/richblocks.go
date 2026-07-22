@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"awesomeProject/internal/media"
@@ -159,11 +160,16 @@ func messageMediaPlacementKey(m store.Message, kind string, index int, mediaURL 
 }
 
 func messagePlacementPrefix(m store.Message) string {
-	id := fmt.Sprintf("pending:%s", m.Nonce)
+	var buf [64]byte
+	out := strconv.AppendUint(buf[:0], uint64(m.ChannelID), 10)
+	out = append(out, ':')
 	if m.ID != 0 {
-		id = fmt.Sprintf("%d", m.ID)
+		out = strconv.AppendUint(out, uint64(m.ID), 10)
+	} else {
+		out = append(out, "pending:"...)
+		out = append(out, m.Nonce...)
 	}
-	return fmt.Sprintf("%d:%s", m.ChannelID, id)
+	return string(out)
 }
 
 // attachmentChip returns the one-line label for an attachment. Videos get a play

@@ -272,3 +272,45 @@ func TestChatViewCacheSeparatesChannels(t *testing.T) {
 		t.Errorf("channel 2 render = %q, want only its own message", got)
 	}
 }
+
+func TestChatViewTranscriptReusesLines(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "hello"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	first := view.render(40)
+	gen := view.transcript.gen
+	second := view.render(40)
+	if len(first) == 0 || len(second) == 0 || &first[0] != &second[0] {
+		t.Fatal("unchanged render rebuilt the transcript")
+	}
+	if view.transcript.gen != gen {
+		t.Fatal("unchanged render advanced the transcript generation")
+	}
+}
+
+func TestChatViewTranscriptIgnoresOtherChannelMessages(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "one"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.render(40)
+	gen := view.transcript.gen
+	st.AppendMessage(store.Message{ID: 2, ChannelID: 2, Author: "bob", Content: "two"})
+	view.render(40)
+	if view.transcript.gen != gen {
+		t.Fatal("inactive channel message invalidated the active transcript")
+	}
+}
+
+func TestChatViewSetSourceDropsTranscript(t *testing.T) {
+	first := store.New(0)
+	first.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "first account"})
+	second := store.New(0)
+	second.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bob", Content: "second account"})
+	view := NewChatView(first, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.render(40)
+	view.SetSource(second, func() store.ChannelID { return 1 })
+	got := renderText(view.render(40))
+	if !strings.Contains(got, "second account") || strings.Contains(got, "first account") {
+		t.Fatalf("render after SetSource = %q", got)
+	}
+}

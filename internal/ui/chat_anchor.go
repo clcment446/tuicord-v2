@@ -23,15 +23,19 @@ func (w *ChatView) captureAnchor(lines []chatLine, start int) {
 		return
 	}
 	for i := start; i < len(lines); i++ {
-		key := chatLineAnchorKey(lines[i])
-		if key == "" {
+		msg := lines[i].msg
+		if msg == 0 {
+			continue
+		}
+		message := w.msgAt(msg)
+		if message.ID == 0 && message.Nonce == "" {
 			continue
 		}
 		first := i
-		for first > 0 && chatLineAnchorKey(lines[first-1]) == key {
+		for first > 0 && lines[first-1].msg == msg {
 			first--
 		}
-		w.anchorKey = key
+		w.anchorKey = messagePlacementPrefix(message)
 		w.anchorIntra = i - first
 		w.anchorDelta = i - start
 		w.anchorOffset = w.bottomScroll.Offset()
@@ -44,34 +48,24 @@ func (w *ChatView) captureAnchor(lines []chatLine, start int) {
 // rendered transcript: the anchor message's block start plus the remembered
 // intra-message row, clamped to the block so a message that shrank still
 // anchors inside itself.
-func anchorLineIndex(lines []chatLine, key string, intra int) (int, bool) {
-	first := -1
-	last := -1
-	for i := range lines {
-		if chatLineAnchorKey(lines[i]) != key {
-			if first >= 0 {
-				break
-			}
+func (w *ChatView) anchorLineIndex(lines []chatLine, key string, intra int) (int, bool) {
+	for i := 0; i < len(lines); {
+		msg := lines[i].msg
+		if msg == 0 {
+			i++
 			continue
 		}
-		if first < 0 {
-			first = i
+		end := i + 1
+		for end < len(lines) && lines[end].msg == msg {
+			end++
 		}
-		last = i
+		message := w.msgAt(msg)
+		if (message.ID != 0 || message.Nonce != "") && messagePlacementPrefix(message) == key {
+			return i + min(intra, end-i-1), true
+		}
+		i = end
 	}
-	if first < 0 {
-		return 0, false
-	}
-	return first + min(intra, last-first), true
-}
-
-// chatLineAnchorKey identifies the message a rendered line belongs to, or ""
-// for lines that carry no message.
-func chatLineAnchorKey(line chatLine) string {
-	if line.message.ID == 0 && line.message.Nonce == "" {
-		return ""
-	}
-	return messagePlacementPrefix(line.message)
+	return 0, false
 }
 
 // Fold and unfold toggles pin the toggled control's line to the screen row it

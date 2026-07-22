@@ -902,6 +902,41 @@ func (s *Store) Messages(channel ChannelID) []Message {
 	return r.slice()
 }
 
+func (s *Store) MsgsInto(channel ChannelID, dst []Message) []Message {
+	r := s.messages[channel]
+	if r == nil {
+		return dst[:0]
+	}
+	return r.copy(dst[:0])
+}
+
+func (s *Store) MsgRev(channel ChannelID) uint64 {
+	r := s.messages[channel]
+	if r == nil {
+		return 0
+	}
+	return r.rev
+}
+
+func (s *Store) LastMsg(channel ChannelID) (Message, bool) {
+	r := s.messages[channel]
+	if r == nil || r.size == 0 {
+		return Message{}, false
+	}
+	i := (r.start + r.size - 1) % len(r.buf)
+	return r.buf[i], true
+}
+
+func (s *Store) MsgEdges(channel ChannelID) (MessageID, MessageID) {
+	r := s.messages[channel]
+	if r == nil || r.size == 0 {
+		return 0, 0
+	}
+	first := r.buf[r.start].ID
+	last := r.buf[(r.start+r.size-1)%len(r.buf)].ID
+	return first, last
+}
+
 // Revision returns the latest message mutation revision. Async history callers
 // use it to distinguish their request baseline from in-flight gateway changes.
 func (s *Store) Revision() uint64 { return s.rev }

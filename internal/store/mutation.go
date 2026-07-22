@@ -26,7 +26,8 @@ func (s *Store) RemoveMessage(channel ChannelID, id MessageID) bool {
 		deleted = make(map[MessageID]uint64)
 		s.deletedMessages[channel] = deleted
 	}
-	deleted[id] = s.nextRevision()
+	rev := s.nextRevision()
+	deleted[id] = rev
 	if len(deleted) > s.historyLimit {
 		var oldestID MessageID
 		var oldestRevision uint64
@@ -45,7 +46,7 @@ func (s *Store) RemoveMessage(channel ChannelID, id MessageID) bool {
 	if r == nil {
 		return false
 	}
-	return r.removeByID(id)
+	return r.removeByID(id, rev)
 }
 
 // SetMessagePinned patches a message's cached pin state. Discord's

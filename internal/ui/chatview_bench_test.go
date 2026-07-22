@@ -6,6 +6,7 @@ import (
 
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/screen"
 )
 
 // benchWidth is a realistic chat column width: wide enough that markup wrapping
@@ -120,5 +121,32 @@ func BenchmarkChatViewRenderOneNewMessage(b *testing.B) {
 		if len(lines) == 0 {
 			b.Fatal("render produced no lines")
 		}
+	}
+}
+
+func BenchmarkChatViewDrawCached(b *testing.B) {
+	st := benchStore(b, store.DefaultHistoryLimit)
+	view := benchView(st)
+	buf := screen.NewBuffer(benchWidth, 40)
+	r := buf.Clip(buf.Bounds())
+	view.Draw(r)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		view.Draw(r)
+	}
+}
+
+func BenchmarkChatViewDrawOneNewMessage(b *testing.B) {
+	st := benchStore(b, store.DefaultHistoryLimit)
+	view := benchView(st)
+	buf := screen.NewBuffer(benchWidth, 40)
+	r := buf.Clip(buf.Bounds())
+	view.Draw(r)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		st.AppendMessage(benchMessage(store.DefaultHistoryLimit + i))
+		view.Draw(r)
 	}
 }

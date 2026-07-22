@@ -55,8 +55,6 @@ type ChatView struct {
 	mouseBreakpointTracking bool
 	highlightFocusBlock     bool
 	focusKey                string
-	focusOrder              []string
-	focusMessages           map[string]store.Message
 	focusRanges             map[string]messageRange
 	focusStops              []chatFocusStop
 	focusStopKey            string
@@ -78,7 +76,8 @@ type ChatView struct {
 	// on the next loop turn instead of waiting for the ~500ms idle tick.
 	requestRedraw func()
 	// videoHits are the video blocks drawn last frame, for click/key activation.
-	videoHits []videoHit
+	videoHits  []videoHit
+	drawnMedia []*inlineMedia
 	// chatOriginX/Y are the last Draw region's absolute top-left, used to turn a
 	// chat-local video rect into absolute terminal cells for the player.
 	chatOriginX int
@@ -137,6 +136,10 @@ type ChatView struct {
 	// bodyDeps collects the media a body touched while collectDeps is set.
 	bodyDeps    []mediaDep
 	collectDeps bool
+	msgs        []store.Message
+	transcript  chatTranscript
+	focusGen    uint64
+	mediaEpoch  uint64
 
 	// bottomScroll owns the viewport offset and preserves the reading position
 	// when newly rendered lines are appended below it.
@@ -300,6 +303,12 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		mediaCfg:        media.DefaultConfig(),
 		node:            layout.Node{Grow: 1},
 		stickyAnchor:    true,
+		msgs:            make([]store.Message, 0, store.DefaultHistoryLimit),
+		bodyCache:       make(map[string]*chatCacheEntry, store.DefaultHistoryLimit),
+		visibleLines:    make([]chatLine, 0, 64),
+		drawnMedia:      make([]*inlineMedia, 0, 8),
+		focusRanges:     make(map[string]messageRange, store.DefaultHistoryLimit),
+		focusStops:      make([]chatFocusStop, 0, store.DefaultHistoryLimit*3),
 	}
 }
 
@@ -316,6 +325,7 @@ func (w *ChatView) OnReachTop(fn func()) {
 func (w *ChatView) SetStyles(styles Styles) {
 	if w != nil {
 		w.styles = styles
+		w.invalidateBodies()
 	}
 }
 
@@ -330,6 +340,7 @@ func (w *ChatView) SetSource(st *store.Store, active func() store.ChannelID) {
 	}
 	w.store = st
 	w.active = active
+	w.invalidateBodies()
 	w.bottomScroll.SetOffset(0)
 	w.focusedMessageSet = false
 	w.focusedExplicit = false
@@ -358,6 +369,8 @@ func (w *ChatView) SetMedia(fetcher *media.Fetcher, cfg media.Config, post func(
 	w.mediaFetcher = fetcher
 	w.mediaCfg = cfg
 	w.post = post
+	w.mediaEpoch++
+	w.invalidateBodies()
 	if w.media == nil {
 		w.media = map[string]*chatMediaState{}
 	}
@@ -430,7 +443,9 @@ func (w *ChatView) SetFocusOwner(focused bool) {
 		return
 	}
 	w.keyboardFocused = focused
-	w.invalidateBodies()
+	if w.focusedMessageSet {
+		w.invalidateMsgs(w.focusedMessage)
+	}
 }
 
 // SetVimNavigation enables modal hjkl/message actions for this chat view.
@@ -842,6 +857,7 @@ func (w *ChatView) fetchMedia(ctx context.Context, url string, animated bool) {
 		state.err = err
 		state.variants = nil
 		state.rev++
+		w.mediaEpoch++
 		w.invalidate()
 	})
 }
@@ -869,6 +885,7 @@ func (w *ChatView) deliverFrames(url string, frames []media.Frame) {
 	state.lastTick = time.Time{}
 	state.variants = nil
 	state.rev++
+	w.mediaEpoch++
 }
 
 // downscaleFrames shrinks each frame to the fetcher's pixel budget. FetchGIF, unlike
@@ -1131,13 +1148,7 @@ func (w *ChatView) Draw(r screen.Region) {
 	w.ensureInitialFocusedMessage()
 	lines := w.render(r.Width())
 	channel := w.active()
-	messages := w.store.Messages(channel)
-	firstMessage := store.MessageID(0)
-	lastMessage := store.MessageID(0)
-	if len(messages) > 0 {
-		firstMessage = messages[0].ID
-		lastMessage = messages[len(messages)-1].ID
-	}
+	firstMessage, lastMessage := w.store.MsgEdges(channel)
 	prepended := channel == w.lastMessageChannel &&
 		w.lastFirstMessage != 0 && firstMessage != 0 &&
 		firstMessage != w.lastFirstMessage && lastMessage == w.lastLastMessage
@@ -1156,11 +1167,17 @@ func (w *ChatView) Draw(r screen.Region) {
 	if w.applyPendingAnchor(lines, r.Height()) {
 	} else if w.stickyAnchor && w.anchorSet && preOffset > 0 && preOffset == w.anchorOffset &&
 		channel == w.lastMessageChannel {
-		if idx, ok := anchorLineIndex(lines, w.anchorKey, w.anchorIntra); ok {
+		if idx, ok := w.anchorLineIndex(lines, w.anchorKey, w.anchorIntra); ok {
 			w.bottomScroll.SetOffset(len(lines) - r.Height() - (idx - w.anchorDelta))
 		}
 	}
-	w.buildFocusIndex(lines, r.Height())
+	if w.focusGen != w.transcript.gen {
+		w.buildFocusIndex(lines, r.Height())
+		w.focusGen = w.transcript.gen
+	} else {
+		w.renderLineCount = len(lines)
+		w.viewportHeight = r.Height()
+	}
 	if w.lastMessageChannel != 0 && channel != w.lastMessageChannel {
 		w.vimPendingG = false
 		w.vimStickOldest = false
@@ -1173,24 +1190,29 @@ func (w *ChatView) Draw(r screen.Region) {
 	start := max(len(lines)-r.Height()-w.bottomScroll.Offset(), 0)
 	w.captureAnchor(lines, start)
 	end := min(start+r.Height(), len(lines))
-	displayLines := lines[start:end]
+	w.visibleLines = append(w.visibleLines[:0], lines[start:end]...)
+	displayLines := w.visibleLines
 	stickyPinned := false
-	if len(displayLines) > 1 && !displayLines[0].author && displayLines[0].message.Author != "" {
+	firstVisible := store.Message{}
+	if len(displayLines) > 0 {
+		firstVisible = w.msgAt(displayLines[0].msg)
+	}
+	if len(displayLines) > 1 && !displayLines[0].author && firstVisible.Author != "" {
 		// Keep the sender visible when the viewport begins inside a long message.
 		// Replace the oldest visible content row so pinning the author does not
 		// discard the newest row at the bottom of the viewport.
-		pinned := w.authorLine(displayLines[0].message, w.guildOf(w.active()))
-		displayLines = append([]chatLine{pinned}, displayLines[1:]...)
+		pinned := w.authorLine(firstVisible, w.guildOf(w.active()))
+		pinned.msg = displayLines[0].msg
+		displayLines[0] = pinned
 		stickyPinned = true
 	}
-	w.visibleLines = append(w.visibleLines[:0], displayLines...)
 	w.visibleStart = start
 	y := 0
 	w.spinnerVisible = false
 	w.animatedVisible = false
 	w.roleGradientVisible = false
 	w.videoHits = w.videoHits[:0]
-	drawnMedia := map[*inlineMedia]struct{}{}
+	w.drawnMedia = w.drawnMedia[:0]
 	for i, line := range displayLines {
 		if line.roleGradient {
 			w.roleGradientVisible = true
@@ -1220,8 +1242,15 @@ func (w *ChatView) Draw(r screen.Region) {
 			} else {
 				drawChatLine(r, 0, y, line)
 			}
-			if _, ok := drawnMedia[line.media]; !ok {
-				drawnMedia[line.media] = struct{}{}
+			seen := false
+			for _, drawn := range w.drawnMedia {
+				if drawn == line.media {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				w.drawnMedia = append(w.drawnMedia, line.media)
 				mr := r
 				if stickyPinned {
 					// A media block whose top has scrolled above the viewport anchors
@@ -1251,62 +1280,49 @@ func (w *ChatView) ensureInitialFocusedMessage() {
 	if w == nil || !w.keyboardFocused {
 		return
 	}
-	messages := w.store.Messages(w.active())
-	if len(messages) == 0 {
+	latest, ok := w.store.LastMsg(w.active())
+	if !ok {
 		return
 	}
-	latest := messages[len(messages)-1]
 	if w.focusedMessageSet && (w.focusedExplicit || messagePlacementPrefix(w.focusedMessage) == messagePlacementPrefix(latest)) {
 		return
 	}
-	if w.focusedMessageSet {
-		w.invalidateBodies()
-	}
+	previous := w.focusedMessage
 	w.focusedMessage = latest
 	w.focusedMessageSet = true
 	w.focusKey = messagePlacementPrefix(w.focusedMessage)
 	w.focusStopKey = ""
+	w.invalidateMsgs(previous, latest)
 }
 
 func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
-	w.focusOrder = w.focusOrder[:0]
-	if w.focusMessages == nil {
-		w.focusMessages = map[string]store.Message{}
-	}
-	for key := range w.focusMessages {
-		delete(w.focusMessages, key)
-	}
-	w.focusRanges = make(map[string]messageRange)
-	firstBody := map[string]int{}
-	for i, line := range lines {
-		if line.message.ID == 0 && line.message.Nonce == "" {
-			continue
-		}
-		key := messagePlacementPrefix(line.message)
-		if !line.author {
-			if _, ok := firstBody[key]; !ok {
-				firstBody[key] = i
-			}
-		}
-		if _, ok := w.focusMessages[key]; !ok {
-			w.focusOrder = append(w.focusOrder, key)
-			w.focusMessages[key] = line.message
-			w.focusRanges[key] = messageRange{start: i, end: i + 1}
-			continue
-		}
-		range_ := w.focusRanges[key]
-		range_.end = i + 1
-		w.focusRanges[key] = range_
+	for key := range w.focusRanges {
+		delete(w.focusRanges, key)
 	}
 	w.focusStops = w.focusStops[:0]
+	messageKey := ""
+	var previous uint32
+	bodySet := false
 	for i, line := range lines {
-		if line.message.ID == 0 && line.message.Nonce == "" {
+		if line.msg == 0 {
 			continue
 		}
-		messageKey := messagePlacementPrefix(line.message)
-		first, hasBody := firstBody[messageKey]
-		if hasBody && (i == first || line.embedStart) {
-			stop := chatFocusStop{kind: chatFocusMessage, key: messageKey + ":first", message: line.message, line: i}
+		if previous != line.msg {
+			messageKey = messagePlacementPrefix(w.msgAt(line.msg))
+			w.focusRanges[messageKey] = messageRange{start: i, end: i + 1}
+			previous = line.msg
+			bodySet = false
+		} else {
+			range_ := w.focusRanges[messageKey]
+			range_.end = i + 1
+			w.focusRanges[messageKey] = range_
+		}
+		firstBody := !line.author && !bodySet
+		if firstBody {
+			bodySet = true
+		}
+		if firstBody || line.embedStart {
+			stop := chatFocusStop{kind: chatFocusMessage, key: messageKey + ":first", messageKey: messageKey, line: i, msg: line.msg}
 			if line.embedKey != "" {
 				stop.key = line.embedKey
 			}
@@ -1318,21 +1334,21 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 			w.focusStops = append(w.focusStops, stop)
 		} else if line.header != nil {
 			w.focusStops = append(w.focusStops, chatFocusStop{
-				kind: chatFocusHeader, key: line.header.key, message: line.message,
-				line: i, headerKey: line.header.key,
+				kind: chatFocusHeader, key: line.header.key, messageKey: messageKey,
+				line: i, headerKey: line.header.key, msg: line.msg,
 			})
 		}
 		for _, hit := range line.actions {
 			w.focusStops = append(w.focusStops, chatFocusStop{
-				kind: chatFocusControl, key: hit.action.key(), message: line.message,
+				kind: chatFocusControl, key: hit.key, messageKey: messageKey,
 				action: hit.action,
-				line:   i, start: hit.start, end: hit.end,
+				line:   i, start: hit.start, end: hit.end, msg: line.msg,
 			})
 		}
 	}
 	w.renderLineCount = len(lines)
 	w.viewportHeight = height
-	if len(w.focusOrder) == 0 || len(w.focusStops) == 0 {
+	if len(w.focusStops) == 0 {
 		w.focusKey = ""
 		w.focusedMessageSet = false
 		w.focusStopKey = ""
@@ -1349,7 +1365,7 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 	if selected < 0 && w.focusedMessageSet {
 		messageKey := messagePlacementPrefix(w.focusedMessage)
 		for i := range w.focusStops {
-			if messagePlacementPrefix(w.focusStops[i].message) == messageKey {
+			if w.focusStops[i].messageKey == messageKey {
 				selected = i
 				break
 			}
@@ -1360,27 +1376,37 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 	}
 	w.focusStopIndex = selected
 	w.focusStopKey = w.focusStops[selected].key
-	w.focusedMessage = w.focusStops[selected].message
+	w.focusedMessage = w.msgAt(w.focusStops[selected].msg)
 	w.focusKey = messagePlacementPrefix(w.focusedMessage)
 	w.focusedMessageSet = true
 }
 
+func (w *ChatView) msgAt(msg uint32) store.Message {
+	i := int(msg) - 1
+	if i < 0 || i >= len(w.msgs) {
+		return store.Message{}
+	}
+	return w.msgs[i]
+}
+
 type chatLine struct {
-	text         string
-	style        screen.Style
-	segments     []chatSegment
-	message      store.Message
-	author       bool
-	roleGradient bool
-	embedStart   bool
-	embedKey     string
-	media        *inlineMedia
-	mediaRow     int
-	mediaX       int
-	inlineMedia  []positionedInlineMedia
-	actions      []componentHit
-	entities     []entityHit
-	header       *headerHit
+	segments       []chatSegment
+	inlineMedia    []positionedInlineMedia
+	actions        []componentHit
+	entities       []entityHit
+	style          screen.Style
+	text           string
+	embedKey       string
+	media          *inlineMedia
+	header         *headerHit
+	mediaRow       int
+	mediaX         int
+	highlightStart int
+	highlightEnd   int
+	msg            uint32
+	author         bool
+	roleGradient   bool
+	embedStart     bool
 	// spinner marks a line that drew a media-loading spinner. Only spinners on
 	// screen need the tick to animate them, so Draw tracks whether any visible
 	// line carries this flag.
@@ -1388,8 +1414,6 @@ type chatLine struct {
 	// restrictHighlight keeps a focus or visual-selection highlight inside a
 	// framed embed's content cells, leaving its box-drawing border intact.
 	restrictHighlight bool
-	highlightStart    int
-	highlightEnd      int
 }
 
 type headerHit struct {
@@ -1407,14 +1431,15 @@ const (
 )
 
 type chatFocusStop struct {
-	kind      chatFocusKind
-	key       string
-	message   store.Message
-	action    componentAction
-	line      int
-	start     int
-	end       int
-	headerKey string
+	action     componentAction
+	key        string
+	messageKey string
+	headerKey  string
+	line       int
+	start      int
+	end        int
+	msg        uint32
+	kind       chatFocusKind
 }
 
 type messageRange struct {
@@ -1432,22 +1457,22 @@ type chatSegment struct {
 }
 
 type inlineMedia struct {
+	style        screen.Style
+	img          image.Image
 	url          string
 	label        string
 	placementKey string
+	videoURL     string
+	linkURL      string
 	cols         int
 	rows         int
-	img          image.Image
-	style        screen.Style
 	// animated marks a multi-frame GIF so Draw flags it for the animation tick.
 	animated bool
 	// videoURL, when set, marks the block as a playable video. img (if any) is
 	// the poster frame; a ▶ overlay invites activation. video without img draws a
 	// placeholder box that still reserves the play region.
-	videoURL string
 	// linkURL makes an embed thumbnail open in the browser instead of the media
 	// viewer. It is mutually exclusive with videoURL.
-	linkURL string
 }
 
 // video reports whether this block is a playable video target.
@@ -1455,11 +1480,11 @@ func (m *inlineMedia) video() bool { return m != nil && m.videoURL != "" }
 
 // videoHit records an on-screen video block for activation, in chat-local cells.
 type videoHit struct {
+	url          string
+	placementKey string
 	x, y         int
 	cols         int
 	rows         int
-	url          string
-	placementKey string
 }
 
 type positionedInlineMedia struct {
@@ -1468,26 +1493,23 @@ type positionedInlineMedia struct {
 }
 
 type chatMediaState struct {
-	loading  bool
+	frames   []media.Frame
+	lastTick time.Time
 	img      image.Image
 	err      error
 	variants map[string]chatMediaVariant
-	// rev increments whenever loading, img, or err changes. Cached message
-	// bodies record the rev of every media state they read so they can be
-	// invalidated when an image arrives or a state is evicted and refetched.
-	rev uint32
 	// touched is the render generation that last read this state, for sweeping.
 	touched uint64
 	// frames holds the decoded frames of an animated GIF. When it has more than
 	// one frame the media is animated: the tick advances frameIdx and repoints
 	// img at the current frame. nil (or a single frame) means a static image.
-	frames []media.Frame
 	// frameIdx is the frame img currently points at. frameElapsed accumulates
 	// wall-clock time spent on it; lastTick timestamps the previous advance so
 	// playback speed follows the real clock rather than the tick cadence.
-	frameIdx     int
 	frameElapsed time.Duration
-	lastTick     time.Time
+	frameIdx     int
+	rev          uint32
+	loading      bool
 }
 
 // animated reports whether the state holds a multi-frame animation.
@@ -1504,21 +1526,30 @@ type mediaDep struct {
 // cheap enough to recompute.
 type chatCacheEntry struct {
 	lines []chatLine
+	deps  []mediaDep
 	// rev is the store revision of the message these lines were rendered from.
 	// Comparing Message values instead would be silently wrong: the store hands
 	// out shallow copies whose slices it patches in place.
-	rev     uint64
-	width   int
-	channel store.ChannelID
-	// metaRev and componentEpoch version the state a body reads but does not
-	// own: resolved mentions and roles (store), and component presentation
-	// (this widget).
+	rev             uint64
+	width           int
+	channel         store.ChannelID
 	metaRev         uint64
-	componentEpoch  uint64
 	styleGeneration uint64
-	deps            []mediaDep
 	// gen is the render generation that last used this entry, for sweeping.
 	gen uint64
+}
+
+type chatTranscript struct {
+	lines          []chatLine
+	channel        store.ChannelID
+	msgRev         uint64
+	metaRev        uint64
+	componentEpoch uint64
+	styleGen       uint64
+	mediaEpoch     uint64
+	gen            uint64
+	width          int
+	stable         bool
 }
 
 type chatMediaVariant struct {
@@ -1604,32 +1635,64 @@ func minFloat(a, b float64) float64 {
 // then any rich blocks: media chips, embeds, and a reactions line.
 func (w *ChatView) render(width int) []chatLine {
 	channel := w.active()
-	guild := w.guildOf(channel)
-	msgs := w.store.Messages(channel)
+	msgRev := w.store.MsgRev(channel)
+	metaRev := w.store.MetaRev()
+	styleGen := w.styles.Version()
 	w.renderGen++
-	var lines []chatLine
+	c := &w.transcript
+	if c.stable && c.channel == channel && c.msgRev == msgRev && c.metaRev == metaRev &&
+		c.componentEpoch == w.componentEpoch && c.styleGen == styleGen &&
+		c.mediaEpoch == w.mediaEpoch && c.width == width {
+		return c.lines
+	}
+	guild := w.guildOf(channel)
+	w.msgs = w.store.MsgsInto(channel, w.msgs[:0])
+	oldLen := len(c.lines)
+	lines := c.lines[:0]
+	stable := true
 	var previous store.Message
 	previousSet := false
-	for _, m := range msgs {
+	for i, m := range w.msgs {
+		msg := uint32(i + 1)
 		// The author line depends on the preceding message, so it is not a pure
 		// function of m and stays outside the cache. It is one concat and a
 		// color lookup, so recomputing it is cheaper than tracking it.
 		showAuthor := !previousSet || !sameMessageAuthor(previous, m) ||
 			previous.Failed != m.Failed || previous.Pending != m.Pending
 		if showAuthor {
-			lines = append(lines, w.authorLine(m, guild))
+			line := w.authorLine(m, guild)
+			line.msg = msg
+			lines = append(lines, line)
 		}
 		body, ok := w.cachedBody(m, channel, width)
 		if !ok {
-			body = w.renderBody(m, channel, width)
+			body, ok = w.renderBody(m, channel, width)
 		}
+		stable = stable && ok
+		start := len(lines)
 		lines = append(lines, body...)
+		for i := start; i < len(lines); i++ {
+			lines[i].msg = msg
+		}
 		previous = m
 		previousSet = true
 	}
+	if oldLen > len(lines) {
+		clear(c.lines[len(lines):oldLen])
+	}
+	c.lines = lines
+	c.channel = channel
+	c.msgRev = msgRev
+	c.metaRev = metaRev
+	c.componentEpoch = w.componentEpoch
+	c.styleGen = styleGen
+	c.mediaEpoch = w.mediaEpoch
+	c.width = width
+	c.stable = stable && !(w.roleGradientAnimations && hasRoleGradient(lines))
+	c.gen++
 	w.sweepBodyCache()
 	w.sweepMedia()
-	return lines
+	return c.lines
 }
 
 // renderBody renders and caches everything a message contributes below its
@@ -1640,7 +1703,7 @@ func (w *ChatView) render(width int) []chatLine {
 // that message's own prefix and numbered from zero, so a body's keys depend
 // only on the message — never on which neighbours were cache hits. That is what
 // makes skipping a message safe.
-func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width int) []chatLine {
+func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width int) ([]chatLine, bool) {
 	w.emojiKeyPrefix = messagePlacementPrefix(m)
 	w.emojiSeq = 0
 	w.headerMessageKey = messagePlacementPrefix(m)
@@ -1658,17 +1721,16 @@ func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width in
 
 	var body []chatLine
 	if m.Reply != nil {
-		body = append(body, stampMessage([]chatLine{w.renderReplyLine(*m.Reply, channel, width)}, m)...)
+		body = append(body, w.renderReplyLine(*m.Reply, channel, width))
 	}
 	if m.Content != "" && !suppressContent(m) {
-		body = append(body, stampMessage(w.renderContent(m.Content, width, style), m)...)
+		body = append(body, w.renderContent(m.Content, width, style)...)
 	}
-	body = append(body, stampMessage(w.renderForwards(m, width, style), m)...)
-	body = append(body, stampMessage(w.renderMedia(m, width, style), m)...)
-	body = append(body, stampMessage(w.renderEmbeds(m, width, style), m)...)
-	body = append(body, stampMessage(w.renderComponentTree(m, width, style), m)...)
+	body = append(body, w.renderForwards(m, width, style)...)
+	body = append(body, w.renderMedia(m, width, style)...)
+	body = append(body, w.renderEmbeds(m, width, style)...)
+	body = append(body, w.renderComponentTree(m, width, style)...)
 	if line, ok := w.renderReactions(m.Reactions, messagePlacementPrefix(m)); ok {
-		line.message = m
 		body = append(body, line)
 	}
 	if line, ok := w.renderThreadStarter(m, channel); ok {
@@ -1676,8 +1738,7 @@ func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width in
 	}
 
 	w.collectDeps = false
-	w.storeBody(m, channel, width, body)
-	return body
+	return body, w.storeBody(m, channel, width, body)
 }
 
 // cachedBody returns a previously rendered body when every input it depended on
@@ -1688,7 +1749,7 @@ func (w *ChatView) cachedBody(m store.Message, channel store.ChannelID, width in
 		return nil, false
 	}
 	if e.rev != m.Rev() || e.width != width || e.channel != channel ||
-		e.metaRev != w.store.MetaRev() || e.componentEpoch != w.componentEpoch ||
+		e.metaRev != w.store.MetaRev() ||
 		e.styleGeneration != w.styles.Version() {
 		return nil, false
 	}
@@ -1713,12 +1774,12 @@ func (w *ChatView) cachedBody(m store.Message, channel store.ChannelID, width in
 // including it would invalidate every entry twice a second and defeat the
 // cache. Not caching the few loading bodies costs little and keeps the spinner
 // moving.
-func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int, body []chatLine) {
+func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int, body []chatLine) bool {
 	for _, d := range w.bodyDeps {
 		// Loading bodies animate a spinner; animated bodies swap frames each tick.
 		// Caching either would freeze that motion, so leave them uncached.
 		if state := w.media[d.url]; state != nil && (state.loading || state.animated()) {
-			return
+			return false
 		}
 	}
 	if w.bodyCache == nil {
@@ -1731,11 +1792,11 @@ func (w *ChatView) storeBody(m store.Message, channel store.ChannelID, width int
 		width:           width,
 		channel:         channel,
 		metaRev:         w.store.MetaRev(),
-		componentEpoch:  w.componentEpoch,
 		styleGeneration: w.styles.Version(),
 		deps:            deps,
 		gen:             w.renderGen,
 	}
+	return true
 }
 
 // maxBodyCache bounds the memoized bodies. It is comfortably above one
@@ -1781,14 +1842,34 @@ func (w *ChatView) sweepMedia() {
 	for url, state := range w.media {
 		if state.touched != w.renderGen && !state.loading {
 			delete(w.media, url)
+			w.mediaEpoch++
 		}
 	}
+}
+
+func hasRoleGradient(lines []chatLine) bool {
+	for i := range lines {
+		if lines[i].roleGradient {
+			return true
+		}
+	}
+	return false
 }
 
 // invalidateBodies drops every memoized body. Used when presentation state
 // changes in a way that is not worth versioning precisely.
 func (w *ChatView) invalidateBodies() {
 	w.componentEpoch++
+	clear(w.bodyCache)
+}
+
+func (w *ChatView) invalidateMsgs(messages ...store.Message) {
+	w.componentEpoch++
+	for _, message := range messages {
+		if message.ID != 0 || message.Nonce != "" {
+			delete(w.bodyCache, messagePlacementPrefix(message))
+		}
+	}
 }
 
 func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
@@ -1814,7 +1895,7 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 		avatarURL = member.AvatarURL
 	}
 	if !gradient && (avatarURL == "" || !w.mediaCfg.Enabled) {
-		return chatLine{text: header, style: authorStyle, message: m, author: true}
+		return chatLine{text: header, style: authorStyle, author: true}
 	}
 	segments := []chatSegment(nil)
 	if gradient {
@@ -1833,7 +1914,6 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 	}
 	line := chatLine{
 		segments:     segments,
-		message:      m,
 		author:       true,
 		roleGradient: gradient,
 	}
@@ -1874,14 +1954,7 @@ func (w *ChatView) renderThreadStarter(m store.Message, channel store.ChannelID)
 	if c.Thread != nil && c.Thread.MessageCount > 0 {
 		text += " (" + strconv.Itoa(c.Thread.MessageCount) + " messages)"
 	}
-	return chatLine{text: text, style: w.styles.Cell("messages.thread"), message: m}, true
-}
-
-func stampMessage(lines []chatLine, m store.Message) []chatLine {
-	for i := range lines {
-		lines[i].message = m
-	}
-	return lines
+	return chatLine{text: text, style: w.styles.Cell("messages.thread")}, true
 }
 
 // guildOf reports the guild that owns a channel, or 0 when unknown.
@@ -2260,7 +2333,7 @@ func (w *ChatView) selectionContainsLine(line int) bool {
 		start, end = end, start
 	}
 	for i := start; i <= end && i < len(w.focusStops); i++ {
-		range_, ok := w.focusRanges[messagePlacementPrefix(w.focusStops[i].message)]
+		range_, ok := w.focusRanges[w.focusStops[i].messageKey]
 		if ok && line >= range_.start && line < range_.end {
 			return true
 		}
@@ -2285,11 +2358,10 @@ func (w *ChatView) focusedHighlightAt(line int) (chatFocusStop, bool, bool) {
 	if line < stop.line {
 		return chatFocusStop{}, false, false
 	}
-	messageKey := messagePlacementPrefix(stop.message)
-	end := w.focusRanges[messageKey].end
+	end := w.focusRanges[stop.messageKey].end
 	for i := w.focusStopIndex + 1; i < len(w.focusStops); i++ {
 		next := w.focusStops[i]
-		if messagePlacementPrefix(next.message) != messageKey {
+		if next.messageKey != stop.messageKey {
 			break
 		}
 		if next.line > stop.line {
@@ -2471,7 +2543,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 		if ev.Kind == input.MousePress && ev.Btn == input.ButtonRight {
 			if ev.Y >= 0 && ev.Y < len(w.visibleLines) {
-				msg := w.visibleLines[ev.Y].message
+				msg := w.msgAt(w.visibleLines[ev.Y].msg)
 				if msg.ID != 0 {
 					w.focusAtVisible(ev.X, ev.Y)
 					w.contextMessage = msg
@@ -2512,8 +2584,8 @@ func (w *ChatView) selectedMessages() []store.Message {
 	seen := make(map[string]struct{}, end-start+1)
 	messages := make([]store.Message, 0, end-start+1)
 	for i := start; i <= end && i < len(w.focusStops); i++ {
-		message := w.focusStops[i].message
-		key := messagePlacementPrefix(message)
+		message := w.msgAt(w.focusStops[i].msg)
+		key := w.focusStops[i].messageKey
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -2530,7 +2602,7 @@ func (w *ChatView) focusAtVisible(x, y int) {
 	if w.visibleLines[y].author {
 		return
 	}
-	msg := w.visibleLines[y].message
+	msg := w.msgAt(w.visibleLines[y].msg)
 	if msg.ID == 0 && msg.Nonce == "" {
 		return
 	}
@@ -2552,7 +2624,7 @@ func (w *ChatView) focusAtVisible(x, y int) {
 	if selected < 0 {
 		key := messagePlacementPrefix(msg)
 		for i := range w.focusStops {
-			if messagePlacementPrefix(w.focusStops[i].message) == key {
+			if w.focusStops[i].messageKey == key {
 				selected = i
 				break
 			}
@@ -2562,17 +2634,19 @@ func (w *ChatView) focusAtVisible(x, y int) {
 		return
 	}
 	previous := messagePlacementPrefix(w.focusedMessage)
+	previousMessage := w.focusedMessage
 	stop := w.focusStops[selected]
+	nextMessage := w.msgAt(stop.msg)
 	w.focusStopIndex = selected
 	w.focusStopKey = stop.key
-	w.focusedMessage = stop.message
+	w.focusedMessage = nextMessage
 	w.focusedMessageSet = true
 	w.focusedExplicit = true
-	w.focusKey = messagePlacementPrefix(stop.message)
+	w.focusKey = stop.messageKey
 	if previous != w.focusKey {
 		w.activePickerSet = false
 		w.activePicker = componentAction{}
-		w.invalidateBodies()
+		w.invalidateMsgs(previousMessage, nextMessage)
 	}
 }
 
@@ -2984,18 +3058,20 @@ func (w *ChatView) setFocusStop(index int) {
 	if w == nil || index < 0 || index >= len(w.focusStops) {
 		return
 	}
-	previousMessage := messagePlacementPrefix(w.focusedMessage)
+	previous := w.focusedMessage
+	previousMessage := messagePlacementPrefix(previous)
 	stop := w.focusStops[index]
+	nextMessage := w.msgAt(stop.msg)
 	w.focusStopIndex = index
 	w.focusStopKey = stop.key
-	w.focusedMessage = stop.message
-	w.focusKey = messagePlacementPrefix(stop.message)
+	w.focusedMessage = nextMessage
+	w.focusKey = stop.messageKey
 	w.focusedMessageSet = true
 	w.focusedExplicit = true
 	if previousMessage != w.focusKey {
 		w.activePickerSet = false
 		w.activePicker = componentAction{}
-		w.invalidateBodies()
+		w.invalidateMsgs(previous, nextMessage)
 	}
 }
 
@@ -3004,10 +3080,9 @@ func (w *ChatView) moveComponent(delta int) bool {
 		return false
 	}
 	current := w.focusStops[w.focusStopIndex]
-	messageKey := messagePlacementPrefix(current.message)
 	for index := w.focusStopIndex + delta; index >= 0 && index < len(w.focusStops); index += delta {
 		candidate := w.focusStops[index]
-		if candidate.line != current.line || messagePlacementPrefix(candidate.message) != messageKey {
+		if candidate.line != current.line || candidate.messageKey != current.messageKey {
 			return false
 		}
 		if candidate.kind == chatFocusControl {
