@@ -166,6 +166,55 @@ func TestMenuClickOnClippedRowDoesNotActivateInvisibleEntry(t *testing.T) {
 	}
 }
 
+func TestMenuKeyboardNavigationDoesNotActivateClippedEntry(t *testing.T) {
+	activated := -1
+	items := make([]MenuItem, 10)
+	for i := range items {
+		idx := i
+		items[i] = MenuItem{Label: "item", OnSelect: func() { activated = idx }}
+	}
+	m := NewMenu(items)
+	m.OnDismiss(func() {})
+	m.SetAnchor(0, 0)
+	// A short screen clips the menu: with height 5 the box is border, three inner
+	// rows, border. Only items 0..2 are ever drawn (index < rect.H-2 == 3).
+	buf := screen.NewBuffer(20, 5)
+	m.Measure(sizeOf(buf))
+	m.Draw(buf.Clip(buf.Bounds()))
+
+	const lastDrawn = 2 // matches the itemAt cap of rect.H-2 == 3
+
+	// Arrow-down past the drawn cap must clamp to the last drawn item, never onto
+	// an undrawn entry.
+	for i := 0; i < len(items); i++ {
+		m.Handle(key(input.KeyDown))
+	}
+	if got := m.Selected(); got != lastDrawn {
+		t.Fatalf("after repeated Down selection = %d, want %d (last drawn row)", got, lastDrawn)
+	}
+
+	// End must also land on the last drawn item, not the last item in the list.
+	m.Handle(key(input.KeyEnd))
+	if got := m.Selected(); got != lastDrawn {
+		t.Fatalf("after End selection = %d, want %d (last drawn row)", got, lastDrawn)
+	}
+
+	// Enter on the last drawn item activates it.
+	m.Handle(key(input.KeyEnter))
+	if activated != lastDrawn {
+		t.Fatalf("Enter on last drawn row activated %d, want %d", activated, lastDrawn)
+	}
+
+	// An item beyond the drawn cap can never be reached or activated by the
+	// keyboard: force the selection there and confirm Enter is a no-op.
+	activated = -1
+	m.selected = len(items) - 1
+	m.Handle(key(input.KeyEnter))
+	if activated != -1 {
+		t.Fatalf("Enter activated clipped item %d, want no activation", activated)
+	}
+}
+
 func TestMenuClickOutsideDismisses(t *testing.T) {
 	dismissed := false
 	activated := false

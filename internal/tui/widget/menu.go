@@ -393,8 +393,31 @@ func (m *Menu) itemAt(rect screen.Rect, x, y int) (idx int, inside bool) {
 	return row, true
 }
 
+// drawnLen reports how many leading items Draw can actually render given the
+// last measured screen size. Draw stops before the bottom border, so an item at
+// index i is drawn iff i < rect.H-2 — the same cap itemAt applies to the mouse.
+// Keyboard selection must respect it too, or arrow-down / End could land on (and
+// Enter activate) an entry that was never painted. When the menu has not been
+// measured yet the whole list is treated as drawable, preserving the common
+// unclipped behavior.
+func (m *Menu) drawnLen() int {
+	n := len(m.items)
+	if m.screenW <= 0 || m.screenH <= 0 {
+		return n
+	}
+	rect := m.box(m.screenW, m.screenH)
+	visible := rect.H - 2
+	if visible < 0 {
+		visible = 0
+	}
+	if visible < n {
+		return visible
+	}
+	return n
+}
+
 func (m *Menu) activate(index int) {
-	if index < 0 || index >= len(m.items) {
+	if index < 0 || index >= len(m.items) || index >= m.drawnLen() {
 		return
 	}
 	it := m.items[index]
@@ -420,7 +443,8 @@ func (m *Menu) step(dir int) {
 		m.selected = m.firstSelectable()
 		return
 	}
-	for i := m.selected + dir; i >= 0 && i < len(m.items); i += dir {
+	limit := m.drawnLen()
+	for i := m.selected + dir; i >= 0 && i < limit; i += dir {
 		if m.items[i].selectable() {
 			m.selected = i
 			return
@@ -429,7 +453,8 @@ func (m *Menu) step(dir int) {
 }
 
 func (m *Menu) firstSelectable() int {
-	for i := range m.items {
+	limit := m.drawnLen()
+	for i := 0; i < limit; i++ {
 		if m.items[i].selectable() {
 			return i
 		}
@@ -438,7 +463,7 @@ func (m *Menu) firstSelectable() int {
 }
 
 func (m *Menu) lastSelectable() int {
-	for i := len(m.items) - 1; i >= 0; i-- {
+	for i := m.drawnLen() - 1; i >= 0; i-- {
 		if m.items[i].selectable() {
 			return i
 		}
