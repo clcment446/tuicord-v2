@@ -136,6 +136,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.guildList.SetBadgeStyle(styles.Cell("guilds.badge"))
 	mv.guildList.OnSelect(mv.onGuildSelected)
 	mv.guildList.OnVimFocus(mv.unfoldSelectedGuildFolder)
+	mv.guildList.SetDrag(mv.canDragGuild, mv.dragGuild, mv.dropGuild)
 	mv.guildList.SetVimNavigation(cfg.Accessibility.VimNavigation)
 
 	mv.channelList = widget.NewItemList(nil)
@@ -658,7 +659,7 @@ func (mv *MainView) rebuildGuilds() {
 	if i := mv.guildList.Selected(); i >= 0 && i < len(mv.guildRows) {
 		selectedGuild = mv.guildRows[i].GuildID
 	}
-	mv.guildRows = store.OrderGuilds(st.GuildFolders(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
+	mv.guildRows = store.OrderGuilds(mv.currentGroups(), st.Guilds(), mv.pinnedGuildIDs(), mv.state.CollapsedFolderSet())
 	mv.guildRows = moveDMFirst(mv.guildRows)
 	items := make([]widget.Item, len(mv.guildRows))
 	for i, row := range mv.guildRows {

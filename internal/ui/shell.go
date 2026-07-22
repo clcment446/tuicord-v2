@@ -1770,6 +1770,12 @@ func (s *Shell) openGuildMenu(row store.GuildRow, x, y int) {
 		}
 		items = []widget.MenuItem{
 			{Label: "Server settings…", OnSelect: func() { s.closePopup(); s.openServerSettings(row.GuildID) }},
+			{Label: "Create group…", Disabled: row.GuildID == app.DirectMessagesGuildID, OnSelect: func() {
+				s.closePopup()
+				s.setIndependentOverlay(NewPrompt("Create group", "Group name…", s.styles, func(name string) {
+					s.mv.CreateGroup(row.GuildID, name)
+				}, s.closeOverlay))
+			}},
 			{Separator: true},
 			{Label: pinLabel, OnSelect: func() {
 				s.closePopup()

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"awesomeProject/internal/tui/input"
+	"awesomeProject/internal/tui/screen"
 )
 
 func TestItemListMousePressSelectsRow(t *testing.T) {
@@ -62,6 +63,73 @@ func TestItemListRightClickOutOfRangeNoContext(t *testing.T) {
 	list.Handle(input.MouseEvent{Y: 5, Btn: input.ButtonRight, Kind: input.MousePress})
 	if _, ok := list.TakeContext(); ok {
 		t.Fatal("out-of-range right-click should not record a context row")
+	}
+}
+
+func TestItemListDragDropsRows(t *testing.T) {
+	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}, {Label: "c"}})
+	var from, to int
+	list.SetDrag(func(index int) bool { return index != 1 }, nil, func(start, end int) {
+		from = start
+		to = end
+	})
+
+	op, ok := list.DragStart(0, 0)
+	if !ok {
+		t.Fatal("first row did not start drag")
+	}
+	op.DragMove(0, 2)
+	op.DragEnd(true)
+	if from != 0 || to != 2 || list.Selected() != 2 {
+		t.Fatalf("drop = %d,%d selected=%d", from, to, list.Selected())
+	}
+	if _, ok := list.DragStart(0, 1); ok {
+		t.Fatal("blocked row started drag")
+	}
+}
+
+func TestItemListDragWithoutMotionClicks(t *testing.T) {
+	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}})
+	selected := -1
+	list.OnSelect(func(index int) { selected = index })
+	list.SetDrag(nil, nil, func(int, int) {})
+
+	op, ok := list.DragStart(0, 1)
+	if !ok {
+		t.Fatal("row did not start drag")
+	}
+	op.DragEnd(true)
+	if selected != 1 || list.Selected() != 1 {
+		t.Fatalf("click selected=%d row=%d", selected, list.Selected())
+	}
+}
+
+func TestItemListDrawsDragSpace(t *testing.T) {
+	list := NewItemList([]Item{{Label: "alpha"}, {Label: "beta"}, {Label: "gamma"}})
+	list.SetDrag(nil, nil, func(int, int) {})
+	op, ok := list.DragStart(0, 0)
+	if !ok {
+		t.Fatal("row did not start drag")
+	}
+	op.DragMove(0, 2)
+
+	buf := screen.NewBuffer(8, 3)
+	list.Draw(buf.Clip(buf.Bounds()))
+	if got := bufferRow(buf, 0); got != "beta    " {
+		t.Fatalf("shifted row = %q", got)
+	}
+	if got := bufferRow(buf, 1); got != "gamma   " {
+		t.Fatalf("shifted row = %q", got)
+	}
+	if got := bufferRow(buf, 2); got != "> alpha " {
+		t.Fatalf("drag row = %q", got)
+	}
+
+	op.DragEnd(false)
+	buf = screen.NewBuffer(8, 3)
+	list.Draw(buf.Clip(buf.Bounds()))
+	if got := bufferRow(buf, 0); got != "alpha   " {
+		t.Fatalf("restored row = %q", got)
 	}
 }
 

@@ -65,6 +65,21 @@ func TestDragCancelEndsWithoutCommit(t *testing.T) {
 	}
 }
 
+func TestDragIgnoresRightButton(t *testing.T) {
+	op := &recordDragOp{}
+	var drag DragManager
+	var hits HitIndex
+	w := &dragWidget{testWidget: *newTestWidget("drag", false), op: op}
+	hits.Add(w, Rect{W: 5, H: 5}, 0)
+
+	if drag.HandleMouse(input.MouseEvent{X: 1, Y: 1, Btn: input.ButtonRight, Kind: input.MousePress}, hits) {
+		t.Fatal("right button started a drag")
+	}
+	if drag.Active() {
+		t.Fatal("drag is active after right button")
+	}
+}
+
 type dragWidget struct {
 	testWidget
 	op *recordDragOp

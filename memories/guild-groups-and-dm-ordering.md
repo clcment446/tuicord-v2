@@ -43,3 +43,19 @@ fell back to ascending channel ID, which approximated oldest-created first.
 Focused app, Discord, store, and UI tests pass. The command binary builds. The
 full suite requires localhost sockets for unrelated captcha and plugin tests,
 which the restricted sandbox blocks.
+
+## Local layout editing
+
+Server order and custom groups are local, per-account UI state. Each account's
+full normalized group layout is stored under `guild_layouts`; new guilds missing
+from an older override are appended automatically, and stale guild IDs are
+filtered. Locally created groups use negative IDs so they cannot collide with
+Discord folder IDs.
+
+The Servers list supports left-button row dragging. A motion opens a live
+insertion slot: intervening rows shift immediately and the dragged row carries a
+`>` marker. Release persists the layout, Escape restores the previous view, and
+a press/release without motion remains an ordinary click. Right-click is never
+captured as a drag and offers `Create group…` for non-DM server rows. Dropping
+on Direct Messages moves the server to the first movable position; dropping on
+a group appends it and expands a collapsed target.

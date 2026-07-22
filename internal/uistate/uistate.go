@@ -45,15 +45,28 @@ type Accounts struct {
 // of machine-managed startup churn. Guild/channel/user IDs are Discord
 // snowflakes. The zero value is a valid, empty state.
 type State struct {
-	PinnedGuilds        []uint64  `toml:"pinned_guilds"`
-	PinnedChannels      []uint64  `toml:"pinned_channels"`
-	CollapsedFolders    []int64   `toml:"collapsed_folders"`
-	CollapsedCategories []uint64  `toml:"collapsed_categories"`
-	RecentStickers      []uint64  `toml:"recent_stickers"`
-	FavoriteEmojis      []string  `toml:"favorite_emojis"`
-	FavoriteStickers    []uint64  `toml:"favorite_stickers"`
-	Accounts            *Accounts `toml:"accounts"`
-	AuthPreferredMode   string    `toml:"auth_preferred_mode"`
+	PinnedGuilds        []uint64      `toml:"pinned_guilds"`
+	PinnedChannels      []uint64      `toml:"pinned_channels"`
+	CollapsedFolders    []int64       `toml:"collapsed_folders"`
+	CollapsedCategories []uint64      `toml:"collapsed_categories"`
+	GuildLayouts        []GuildLayout `toml:"guild_layouts"`
+	RecentStickers      []uint64      `toml:"recent_stickers"`
+	FavoriteEmojis      []string      `toml:"favorite_emojis"`
+	FavoriteStickers    []uint64      `toml:"favorite_stickers"`
+	Accounts            *Accounts     `toml:"accounts"`
+	AuthPreferredMode   string        `toml:"auth_preferred_mode"`
+}
+
+type GuildGroup struct {
+	ID       int64    `toml:"id"`
+	Name     string   `toml:"name"`
+	Color    uint32   `toml:"color"`
+	GuildIDs []uint64 `toml:"guild_ids"`
+}
+
+type GuildLayout struct {
+	AccountID uint64       `toml:"account_id"`
+	Groups    []GuildGroup `toml:"groups"`
 }
 
 // AccountList returns a copy of the registry list, or nil when it has not been
@@ -226,6 +239,40 @@ func (s *State) CollapsedFolderSet() map[int64]bool {
 	out := make(map[int64]bool, len(s.CollapsedFolders))
 	for _, id := range s.CollapsedFolders {
 		out[id] = true
+	}
+	return out
+}
+
+func (s *State) GuildLayout(accountID uint64) ([]GuildGroup, bool) {
+	if s == nil {
+		return nil, false
+	}
+	for _, layout := range s.GuildLayouts {
+		if layout.AccountID == accountID {
+			return copyGroups(layout.Groups), true
+		}
+	}
+	return nil, false
+}
+
+func (s *State) SetGuildLayout(accountID uint64, groups []GuildGroup) {
+	if s == nil {
+		return
+	}
+	for i := range s.GuildLayouts {
+		if s.GuildLayouts[i].AccountID == accountID {
+			s.GuildLayouts[i].Groups = copyGroups(groups)
+			return
+		}
+	}
+	s.GuildLayouts = append(s.GuildLayouts, GuildLayout{AccountID: accountID, Groups: copyGroups(groups)})
+}
+
+func copyGroups(groups []GuildGroup) []GuildGroup {
+	out := make([]GuildGroup, len(groups))
+	for i, group := range groups {
+		out[i] = group
+		out[i].GuildIDs = append([]uint64(nil), group.GuildIDs...)
 	}
 	return out
 }
