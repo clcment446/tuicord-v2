@@ -3107,7 +3107,7 @@ func (w *ChatView) focusLatestStop() {
 	}
 	key := messagePlacementPrefix(messages[len(messages)-1])
 	for i := len(w.focusStops) - 1; i >= 0; i-- {
-		if messagePlacementPrefix(w.focusStops[i].message) == key {
+		if messagePlacementPrefix(w.msgAt(w.focusStops[i].msg)) == key {
 			w.setFocusStop(i)
 			return
 		}
