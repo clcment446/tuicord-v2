@@ -38,6 +38,8 @@ type Surface interface {
 	Refresh()
 	// RefreshChannels redraws the channel panel for the active account.
 	RefreshChannels()
+	// RefreshGuildBadges redraws only the server rail's cached attention dots.
+	RefreshGuildBadges()
 	// Notify surfaces an incoming message from any connected account.
 	Notify(a *Account, msg store.Message)
 	// ShowError surfaces an error from any account.
@@ -292,6 +294,11 @@ func (m *Manager) wire(acc *Account) {
 			m.surface.RefreshChannels()
 		}
 		m.pushBadges()
+	})
+	acc.app.OnReadStateChange(func() {
+		if m.isActive(acc) {
+			m.surface.RefreshGuildBadges()
+		}
 	})
 	acc.app.OnIncomingMessage(func(msg store.Message) {
 		m.surface.Notify(acc, msg)
