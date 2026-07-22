@@ -59,6 +59,7 @@ type fakeSender struct {
 	reacted              int
 	reaction             discord.APIEmoji
 	err                  error
+	sendResult           *discord.Message
 	done                 chan struct{}
 	history              []discord.Message
 	historyBefore        []discord.Message
@@ -92,6 +93,9 @@ func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessag
 	f.mu.Unlock()
 	if f.done != nil {
 		close(f.done)
+	}
+	if f.sendResult != nil {
+		return f.sendResult, f.err
 	}
 	return &discord.Message{}, f.err
 }
@@ -444,19 +448,19 @@ func TestEditMessageCallsREST(t *testing.T) {
 	}
 }
 
-func TestDeleteMessageWaitsForGatewayRemoval(t *testing.T) {
-	fs := &fakeSender{done: make(chan struct{})}
+func TestDeleteMessageRemovesOnRESTSuccess(t *testing.T) {
+	fs := &fakeSender{}
 	a := newTestApp(fs)
 	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "bye"})
+	applied := make(chan struct{})
+	a.OnChange(func() { close(applied) })
 
+	// The REST delete succeeding removes the message directly, so it disappears
+	// even if the MESSAGE_DELETE gateway echo is never delivered.
 	a.DeleteMessage(42, 9)
-	<-fs.done
-	if got := len(a.store.Messages(42)); got != 1 {
-		t.Fatalf("messages after REST delete = %d, want still cached before gateway echo", got)
-	}
-	a.handleMessageDelete(&gateway.MessageDeleteEvent{ID: 9, ChannelID: 42})
+	<-applied
 	if got := len(a.store.Messages(42)); got != 0 {
-		t.Fatalf("messages after gateway delete = %d, want 0", got)
+		t.Fatalf("messages after REST delete = %d, want 0 (removed without a gateway echo)", got)
 	}
 }
 

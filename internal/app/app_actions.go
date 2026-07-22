@@ -203,7 +203,7 @@ func (a *App) SendToChannel(channel store.ChannelID, content string) {
 }
 
 func (a *App) deliver(channel store.ChannelID, data api.SendMessageData, nonce string) {
-	_, err := a.send.SendMessageComplex(discord.ChannelID(channel), data)
+	msg, err := a.send.SendMessageComplex(discord.ChannelID(channel), data)
 	if err != nil {
 		a.ui.Post(func() {
 			a.store.MarkFailed(channel, nonce)
@@ -211,29 +211,72 @@ func (a *App) deliver(channel store.ChannelID, data api.SendMessageData, nonce s
 				a.onError(err)
 			}
 		})
+		return
 	}
+	if msg == nil {
+		return
+	}
+	// Confirm the optimistic echo from the REST response rather than depending on
+	// the gateway MESSAGE_CREATE, which can be dropped or lost across a reconnect —
+	// otherwise the message stays "pending" forever. A later duplicate gateway
+	// echo re-matches the same nonce (or is caught by the HasMessage guard), so it
+	// never doubles the message.
+	confirmed := convertMessage(*msg)
+	if confirmed.ID == 0 {
+		// No usable id in the response; fall back to the gateway echo.
+		return
+	}
+	a.ui.Post(func() {
+		if !a.store.ReplaceMessage(nonce, confirmed) && !a.store.HasMessage(channel, confirmed.ID) {
+			a.store.AppendMessage(confirmed)
+		}
+		if a.onChange != nil {
+			a.onChange()
+		}
+	})
 }
 
-// EditMessage patches a message's content. The visible message updates after
-// Discord echoes MESSAGE_UPDATE; failures are reported via OnError.
+// EditMessage patches a message's content. The edit is applied from the REST
+// response so the visible message updates even if the MESSAGE_UPDATE echo is
+// missed; failures are reported via OnError.
 func (a *App) EditMessage(channel store.ChannelID, id store.MessageID, content string) {
 	if channel == 0 || id == 0 {
 		return
 	}
-	a.runInBackground(func() error {
-		_, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content)
-		return err
-	})
+	go func() {
+		if _, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content); err != nil {
+			a.reportAsyncError(err)
+			return
+		}
+		// Apply the content we just committed rather than waiting for the
+		// MESSAGE_UPDATE echo, which may be missed.
+		a.ui.Post(func() {
+			a.store.UpdateMessage(channel, id, func(m *store.Message) { m.Content = content })
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	}()
 }
 
-// DeleteMessage deletes a message. Local removal waits for MESSAGE_DELETE.
+// DeleteMessage deletes a message. The local removal is applied on REST success
+// so the message disappears even if the MESSAGE_DELETE echo is missed.
 func (a *App) DeleteMessage(channel store.ChannelID, id store.MessageID) {
 	if channel == 0 || id == 0 {
 		return
 	}
-	a.runInBackground(func() error {
-		return a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), "")
-	})
+	go func() {
+		if err := a.send.DeleteMessage(discord.ChannelID(channel), discord.MessageID(id), ""); err != nil {
+			a.reportAsyncError(err)
+			return
+		}
+		a.ui.Post(func() {
+			a.store.RemoveMessage(channel, id)
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	}()
 }
 
 // AddReaction applies the current user's reaction and lets the gateway update
