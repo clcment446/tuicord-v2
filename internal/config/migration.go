@@ -176,7 +176,8 @@ tuicord.configure({
     tty_colors = false,
     role_gradients = false,
     role_gradient_animations = false,
-    no_animations_over_ssh = false,
+    -- Set false to keep GIF and role-gradient animation enabled over SSH.
+    no_animations_over_ssh = true,
     sticky_anchor = true,
   },
   accessibility = {

@@ -444,7 +444,7 @@ func Default() Config {
 			ClipboardTimeoutSeconds: 5,
 			PlayVideos:              true,
 		},
-		Display:       Display{StickyAnchor: true},
+		Display:       Display{NoAnimationsOverSSH: true, StickyAnchor: true},
 		Accessibility: Accessibility{MouseOn: true},
 		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
@@ -780,7 +780,8 @@ role_gradients = false
 # Animate visible gradient role names (requires role_gradients = true).
 role_gradient_animations = false
 # Disable background animations when tuicord is launched over SSH.
-no_animations_over_ssh = false
+# Set false to keep GIF and role-gradient animation enabled remotely.
+no_animations_over_ssh = true
 ascii = false
 
 [auth]

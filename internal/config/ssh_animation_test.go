@@ -40,7 +40,6 @@ func TestApplySSHAnimationPolicy(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Default()
-			cfg.Display.NoAnimationsOverSSH = true
 			cfg.Display.RoleGradientAnimations = true
 			lookup := func(key string) string { return tt.env[key] }
 
@@ -61,7 +60,20 @@ func TestApplySSHAnimationPolicy(t *testing.T) {
 	}
 }
 
-func TestApplySSHAnimationPolicyRequiresOptIn(t *testing.T) {
+func TestDefaultSSHAnimationPolicySuppressesBackgroundAnimations(t *testing.T) {
+	cfg := Default()
+	if !cfg.Display.NoAnimationsOverSSH {
+		t.Fatal("Default().Display.NoAnimationsOverSSH = false, want true")
+	}
+	cfg.Display.RoleGradientAnimations = true
+
+	got := ApplySSHAnimationPolicy(cfg, func(string) string { return "present" })
+	if got.Media.AnimateGIFs || got.Display.RoleGradientAnimations {
+		t.Fatalf("default SSH policy preserved background animations: %+v", got)
+	}
+}
+
+func TestSSHAnimationPolicyExplicitFalsePreservesAnimations(t *testing.T) {
 	cfg := Default()
 	cfg.Display.NoAnimationsOverSSH = false
 	cfg.Display.RoleGradientAnimations = true
@@ -69,6 +81,6 @@ func TestApplySSHAnimationPolicyRequiresOptIn(t *testing.T) {
 
 	got := ApplySSHAnimationPolicy(cfg, func(string) string { return "present" })
 	if !got.Media.AnimateGIFs || !got.Display.RoleGradientAnimations {
-		t.Fatalf("opt-out policy changed animation settings: %+v", got)
+		t.Fatalf("explicit false changed animation settings: %+v", got)
 	}
 }
