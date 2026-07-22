@@ -233,7 +233,7 @@ func TestBackgroundReadStateChangePushesAccountBadges(t *testing.T) {
 	}
 }
 
-func TestActiveReadStateChangeRefreshesChannelAndGuildBadges(t *testing.T) {
+func TestActiveReadStateChangeUsesAttentionOnlyRefresh(t *testing.T) {
 	surf := &fakeSurface{}
 	m, _ := newManager(t, surf, []Seed{{Key: "token", Ning: wrapState(t)}}, nil)
 	if err := m.Start(); err != nil {
@@ -243,8 +243,8 @@ func TestActiveReadStateChangeRefreshesChannelAndGuildBadges(t *testing.T) {
 
 	m.readStateChanged(m.Active())
 
-	if surf.refreshChan != channels+1 || surf.refreshGuild != guilds+1 {
-		t.Fatalf("channel/guild refreshes = %d/%d, want %d/%d", surf.refreshChan, surf.refreshGuild, channels+1, guilds+1)
+	if surf.refreshChan != channels || surf.refreshGuild != guilds+1 {
+		t.Fatalf("full-channel/guild refreshes = %d/%d, want %d/%d", surf.refreshChan, surf.refreshGuild, channels, guilds+1)
 	}
 }
 

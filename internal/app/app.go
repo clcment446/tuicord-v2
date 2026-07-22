@@ -603,6 +603,9 @@ func (a *App) Unread() (unread bool, mentions int) {
 		mentions = a.handle.ReadState.TotalMentionCount()
 	}
 	unread = mentions > 0
+	a.unreadMu.RLock()
+	unread = unread || len(a.guildUnread) > 0
+	a.unreadMu.RUnlock()
 	if a.store != nil && (a.store.TotalUnread() > 0 || a.store.TotalPings() > 0) {
 		unread = true
 	}
@@ -621,11 +624,11 @@ func (a *App) channelUnread(channel store.ChannelID) (UnreadStatus, bool) {
 	if a == nil || a.store == nil || channel == 0 {
 		return Read, false
 	}
-	if status, ok := a.authoritativeChannelUnread(channel); ok {
-		return status, true
-	}
 	if cached, ok := a.cachedChannelUnread(channel); ok {
 		return cached, true
+	}
+	if status, ok := a.localReadState(channel); ok {
+		return status, true
 	}
 	if a.store.Pings(channel) > 0 {
 		return Mentioned, false
@@ -636,24 +639,47 @@ func (a *App) channelUnread(channel store.ChannelID) (UnreadStatus, bool) {
 	return Read, false
 }
 
-// authoritativeChannelUnread applies ningen's effective mute and permission
-// semantics when Discord has supplied a read position for the channel.
-func (a *App) authoritativeChannelUnread(channel store.ChannelID) (UnreadStatus, bool) {
-	if a == nil || a.handle == nil || a.handle.ReadState == nil || channel == 0 {
+// localReadState derives attention from in-memory read and channel watermarks.
+// It must never call ningen.ChannelIsUnread: with user-session/no-intent state,
+// that helper can synchronously fetch channel, guild, member, and role data.
+func (a *App) localReadState(channel store.ChannelID) (UnreadStatus, bool) {
+	if a == nil || a.handle == nil || a.handle.ReadState == nil || a.store == nil || channel == 0 {
 		return Read, false
 	}
-	id := discord.ChannelID(channel)
-	if a.handle.ReadState.ReadState(id) == nil {
+	state := a.handle.ReadState.ReadState(discord.ChannelID(channel))
+	if state == nil {
 		return Read, false
 	}
-	switch a.handle.ChannelIsUnread(id, ningen.UnreadOpts{}) {
-	case ningen.ChannelMentioned:
+	if state.MentionCount > 0 {
 		return Mentioned, true
-	case ningen.ChannelUnread:
-		return Unread, true
-	default:
+	}
+	if a.channelMutedLocal(channel) {
 		return Read, true
 	}
+	entry, ok := a.store.Channel(channel)
+	if ok && state.LastMessageID < discord.MessageID(entry.LastMessageID) {
+		return Unread, true
+	}
+	return Read, true
+}
+
+func (a *App) channelMutedLocal(channel store.ChannelID) bool {
+	if a == nil || a.handle == nil || a.handle.MutedState == nil {
+		return false
+	}
+	// Discord parent chains are shallow (channel → category). Keep a defensive
+	// bound without allocating a visited map for every startup channel.
+	for depth := 0; channel != 0 && depth < 8; depth++ {
+		if a.handle.MutedState.Channel(discord.ChannelID(channel)) {
+			return true
+		}
+		entry, ok := a.store.Channel(channel)
+		if !ok {
+			break
+		}
+		channel = entry.ParentID
+	}
+	return false
 }
 
 // cachedChannelUnread returns event-derived attention state for channels that
@@ -704,8 +730,8 @@ func (a *App) resetReadStateCache() {
 	if a.store != nil {
 		for _, guild := range a.store.Guilds() {
 			for _, channel := range a.store.Channels(guild.ID) {
-				status, authoritative := a.authoritativeChannelUnread(channel.ID)
-				if !authoritative {
+				status, known := a.localReadState(channel.ID)
+				if !known {
 					switch {
 					case a.store.Pings(channel.ID) > 0:
 						status = Mentioned
@@ -714,9 +740,7 @@ func (a *App) resetReadStateCache() {
 					}
 				}
 				if status == Read {
-					// An authoritative read position must also retire the local
-					// fallback, otherwise GuildPings can override it forever.
-					if authoritative {
+					if known {
 						a.store.ClearUnread(channel.ID)
 					}
 					continue
@@ -786,10 +810,18 @@ func (a *App) removeGuildReadState(guild store.GuildID) bool {
 	return channels || aggregate
 }
 
-// cacheReadState records one channel's latest authoritative attention state
-// and updates its guild aggregate without scanning the guild's channels.
+// cacheReadState records one channel's latest attention state.
 func (a *App) cacheReadState(channel store.ChannelID, guild store.GuildID, status UnreadStatus) {
-	if a == nil || channel == 0 || guild == 0 {
+	if channel == 0 {
+		return
+	}
+	a.cacheReadStateBatch(guild, map[store.ChannelID]UnreadStatus{channel: status})
+}
+
+// cacheReadStateBatch applies a dispatch worth of channel transitions under one
+// lock and computes the guild aggregate once, avoiding quadratic startup work.
+func (a *App) cacheReadStateBatch(guild store.GuildID, updates map[store.ChannelID]UnreadStatus) {
+	if a == nil || guild == 0 || len(updates) == 0 {
 		return
 	}
 	a.unreadMu.Lock()
@@ -805,15 +837,17 @@ func (a *App) cacheReadState(channel store.ChannelID, guild store.GuildID, statu
 		channels = make(map[store.ChannelID]UnreadStatus)
 		a.unreadChannels[guild] = channels
 	}
-	if status == Read {
-		delete(channels, channel)
-	} else {
-		channels[channel] = status
+	for channel, status := range updates {
+		if status == Read {
+			delete(channels, channel)
+		} else {
+			channels[channel] = status
+		}
 	}
 	aggregate := Read
-	for _, next := range channels {
-		if next > aggregate {
-			aggregate = next
+	for _, status := range channels {
+		if status > aggregate {
+			aggregate = status
 		}
 	}
 	if aggregate == Read {

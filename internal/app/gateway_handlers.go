@@ -66,23 +66,22 @@ func (a *App) registerGatewayLifecycleHandlers() {
 }
 
 func (a *App) handleChannelUnreadUpdate(e *gateway.ChannelUnreadUpdateEvent) {
-	if a == nil || e == nil {
+	if a == nil || e == nil || len(e.ChannelUnreadUpdates) == 0 {
 		return
 	}
 	guild := store.GuildID(e.GuildID)
+	updates := make(map[store.ChannelID]UnreadStatus, len(e.ChannelUnreadUpdates))
 	for _, update := range e.ChannelUnreadUpdates {
-		if a.handle != nil && a.handle.ReadState != nil {
-			a.handle.ReadState.MarkUnread(update.ID, update.LastMessageID, 0)
-		}
 		channel := store.ChannelID(update.ID)
-		status, authoritative := a.authoritativeChannelUnread(channel)
-		if !authoritative {
-			// This dispatch can precede ningen cabinet hydration. Keep the
-			// event-derived state so guild/channel badges still update.
-			status = Unread
+		status := Unread
+		if a.channelMutedLocal(channel) {
+			status = Read
 		}
-		a.cacheReadState(channel, guild, status)
+		updates[channel] = status
 	}
+	// Do not call ningen.MarkUnread here. It emits one asynchronous UpdateEvent
+	// per entry, turning one bulk startup dispatch into N+1 UI refreshes.
+	a.cacheReadStateBatch(guild, updates)
 	a.ui.Post(func() {
 		if a.onReadStateChange != nil {
 			a.onReadStateChange()
@@ -96,22 +95,18 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	}
 	channel := store.ChannelID(e.ChannelID)
 	guild := store.GuildID(e.GuildID)
-	// Ningen updates its state before forwarding this event. Prefer its
-	// effective result so muted or inaccessible channels do not inherit the
-	// raw event's Unread bit; retain the raw fields only as a defensive fallback.
-	status, authoritative := a.authoritativeChannelUnread(channel)
-	if !authoritative {
-		if e.ReadState.MentionCount > 0 {
-			status = Mentioned
-		} else if e.Unread {
-			status = Unread
-		}
+	// UpdateEvent already contains ningen's scalar unread result. Applying mute
+	// state locally preserves the useful semantics without its permission-aware
+	// helper performing REST fallback on this callback goroutine.
+	status := Read
+	if e.ReadState.MentionCount > 0 {
+		status = Mentioned
+	} else if e.Unread && !a.channelMutedLocal(channel) {
+		status = Unread
 	}
 	a.cacheReadState(channel, guild, status)
 	a.ui.Post(func() {
-		if authoritative && status == Read && a.store != nil {
-			// Retire local message counters when Discord acknowledges the
-			// channel; otherwise GuildPings would override the cache forever.
+		if status == Read && a.store != nil {
 			a.store.ClearUnread(channel)
 		}
 		if a.onReadStateChange != nil {

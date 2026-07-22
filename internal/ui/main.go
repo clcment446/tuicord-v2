@@ -570,8 +570,8 @@ func (mv *MainView) Refresh() {
 	mv.rebuildGuilds()
 	switch {
 	case mv.guildRowIndex(mv.app.ActiveGuild()) >= 0:
+		// refreshChannels updates member chrome for the active channel.
 		mv.refreshChannels()
-		mv.refreshMembers(mv.app.ActiveGuild())
 	case mv.app.ActiveGuild() == 0 && mv.firstGuildRow() >= 0:
 		i := mv.firstGuildRow()
 		mv.guildList.SetSelectedSilent(i)
@@ -792,16 +792,21 @@ func (mv *MainView) RefreshChannels() {
 	mv.refreshForum()
 }
 
-// RefreshGuildBadges repaints the server rail from the constant-time unread
-// cache. Read-state updates use this path so chat rendering is not disturbed.
+// RefreshGuildBadges repaints guild and channel attention rows from local
+// caches. It deliberately skips member/chat chrome during read-state bursts.
 func (mv *MainView) RefreshGuildBadges() {
 	if mv == nil || mv.app == nil {
 		return
 	}
 	mv.rebuildGuilds()
+	// Read-state changes can alter channel badges/priority, but must not rebuild
+	// the member pane or channel chrome for every startup unread entry.
+	mv.refreshChannelsWithChrome(false)
 }
 
-func (mv *MainView) refreshChannels() {
+func (mv *MainView) refreshChannels() { mv.refreshChannelsWithChrome(true) }
+
+func (mv *MainView) refreshChannelsWithChrome(updateChrome bool) {
 	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()
 	selectedChannel := store.ChannelID(0)
@@ -844,7 +849,9 @@ func (mv *MainView) refreshChannels() {
 		mv.channelList.SetSelectedSilent(i)
 		mv.onChannelSelected(i)
 	}
-	mv.updateChannelChrome()
+	if updateChrome {
+		mv.updateChannelChrome()
+	}
 }
 
 // channelListRowIndex finds every rendered row, including categories, so a

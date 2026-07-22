@@ -123,6 +123,9 @@ func TestGuildLifecycleUnavailableThenDelete(t *testing.T) {
 func TestGuildCreateRestoresUnavailableGuild(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.store.UpsertGuild(store.Guild{ID: 1, Name: "guild", Unavailable: true})
+	guildChanges, genericChanges := 0, 0
+	a.OnGuildChange(func() { guildChanges++ })
+	a.OnChange(func() { genericChanges++ })
 
 	a.handleGuildCreate(&gateway.GuildCreateEvent{
 		Guild:    discord.Guild{ID: 1, Name: "guild"},
@@ -132,5 +135,8 @@ func TestGuildCreateRestoresUnavailableGuild(t *testing.T) {
 	guild, ok := a.store.Guild(1)
 	if !ok || guild.Unavailable || len(a.store.Channels(1)) != 1 {
 		t.Fatalf("restored guild = %+v, channels=%v", guild, a.store.Channels(1))
+	}
+	if guildChanges != 1 || genericChanges != 0 {
+		t.Fatalf("guild/generic callbacks = %d/%d, want 1/0", guildChanges, genericChanges)
 	}
 }

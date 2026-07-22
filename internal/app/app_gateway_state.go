@@ -158,10 +158,9 @@ func (a *App) handleGuildCreate(e *gateway.GuildCreateEvent) {
 			}
 		}
 		if a.onGuildChange != nil {
+			// Guild refresh already rebuilds guild, channel, and member panels;
+			// firing onChange too duplicated the expensive startup work.
 			a.onGuildChange()
-		}
-		if a.onChange != nil {
-			a.onChange()
 		}
 	})
 }

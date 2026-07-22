@@ -104,17 +104,21 @@ func TestReadySeedsAndResetsReadStateCache(t *testing.T) {
 	}
 }
 
-func TestChannelUnreadDispatchCachesBeforeNingenHydration(t *testing.T) {
+func TestChannelUnreadDispatchBatchesBeforeNingenHydration(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 7})
-	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
 	changes := 0
-	a := &App{store: st, ui: syncPoster{}, onReadStateChange: func() { changes++ }}
+	a := &App{store: st, ui: syncPoster{}, handle: ning, onReadStateChange: func() { changes++ }}
 	event := &gateway.ChannelUnreadUpdateEvent{GuildID: 7}
-	event.ChannelUnreadUpdates = []struct {
-		ID            discord.ChannelID `json:"id"`
-		LastMessageID discord.MessageID `json:"last_message_id"`
-	}{{ID: 42, LastMessageID: 99}}
+	for i := 0; i < 500; i++ {
+		id := discord.ChannelID(42 + i)
+		st.UpsertChannel(store.Channel{ID: store.ChannelID(id), GuildID: 7})
+		event.ChannelUnreadUpdates = append(event.ChannelUnreadUpdates, struct {
+			ID            discord.ChannelID `json:"id"`
+			LastMessageID discord.MessageID `json:"last_message_id"`
+		}{ID: id, LastMessageID: discord.MessageID(1000 + i)})
+	}
 
 	a.handleChannelUnreadUpdate(event)
 
@@ -125,11 +129,14 @@ func TestChannelUnreadDispatchCachesBeforeNingenHydration(t *testing.T) {
 		t.Fatalf("guild status = %v, want unread", got)
 	}
 	if changes != 1 {
-		t.Fatalf("read-state callbacks = %d, want 1", changes)
+		t.Fatalf("read-state callbacks = %d, want one batched callback", changes)
+	}
+	if state := ning.ReadState.ReadState(42); state != nil {
+		t.Fatalf("bulk dispatch was mirrored through ningen MarkUnread: %+v", state)
 	}
 }
 
-func TestReadUpdateUsesEffectiveStateAndClearsLocalPing(t *testing.T) {
+func TestReadAcknowledgementClearsLocalPing(t *testing.T) {
 	ning := appdiscord.WrapSession(session.New(""))
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 7})
@@ -138,14 +145,11 @@ func TestReadUpdateUsesEffectiveStateAndClearsLocalPing(t *testing.T) {
 	st.IncrementPing(42)
 	a := &App{store: st, ui: syncPoster{}, handle: ning}
 
-	// The raw event says unread, but ningen has a valid read position and no
-	// visible channel in its cabinet, so effective permission/latest semantics
-	// classify it as read.
 	ning.ReadState.MarkRead(42, 50)
 	a.handleReadStateUpdate(&read.UpdateEvent{
 		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50},
 		GuildID:   7,
-		Unread:    true,
+		Unread:    false,
 	})
 
 	if got := a.GuildUnread(7); got != Read {
