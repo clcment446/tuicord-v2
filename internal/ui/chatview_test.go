@@ -1055,6 +1055,22 @@ func TestChatViewEmbedFirstLineIsStopAndAuthorNeverIs(t *testing.T) {
 	}
 }
 
+func TestChatViewFocusLatestStopUsesLatestMessage(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "one", Content: "first"})
+	st.AppendMessage(store.Message{ID: 2, ChannelID: 1, Author: "two", Content: "latest"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	buf := screen.NewBuffer(50, 8)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	view.focusLatestStop()
+
+	if view.focusedMessage.ID != 2 {
+		t.Fatalf("focused message = %d, want latest message 2", view.focusedMessage.ID)
+	}
+}
+
 func TestChatViewMultipleEmbedStopsHaveStableDistinctKeys(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "bot", Content: "intro", Embeds: []store.Embed{{Title: "One"}, {Title: "Two"}}})
