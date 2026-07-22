@@ -13,13 +13,20 @@ import (
 // pluginViewport is a compact, draggable panel owned by a Lua plugin. It is
 // drawn as a popup so it never replaces the chat tree beneath it.
 type pluginViewport struct {
-	modal     *widget.Modal
-	lines     []string
-	actions   []plugin.ViewportAction
-	onAction  func(string)
-	textStyle screen.Style
-	border    screen.Style
-	last      screen.Rect
+	modal       *widget.Modal
+	lines       []string
+	actions     []plugin.ViewportAction
+	onAction    func(string)
+	textStyle   screen.Style
+	border      screen.Style
+	last        screen.Rect
+	userResized bool
+}
+
+type pluginViewportActionLayout struct {
+	action plugin.ViewportAction
+	label  string
+	rect   screen.Rect
 }
 
 func newPluginViewport(title string, lines []string, actions []plugin.ViewportAction, onAction func(string), styles Styles) *pluginViewport {
@@ -51,11 +58,13 @@ func (p *pluginViewport) Draw(r screen.Region) {
 			r.Set(x, y, screen.Cell{Content: " ", Style: p.textStyle})
 		}
 	}
-	toggle := "[−]"
-	if p.modal.Collapsed() {
-		toggle = "[+]"
+	if toggleRect, ok := p.toggleRect(); ok {
+		toggle := "[−]"
+		if p.modal.Collapsed() {
+			toggle = "[+]"
+		}
+		p.drawText(r, toggleRect.X, toggleRect.Y, toggle, p.border)
 	}
-	p.drawText(r, p.last.X+p.last.W-4, p.last.Y, toggle, p.border)
 	if p.modal.Collapsed() {
 		return
 	}
@@ -66,18 +75,8 @@ func (p *pluginViewport) Draw(r screen.Region) {
 		}
 		p.drawText(r, p.last.X+1, p.last.Y+1+i, line, p.textStyle)
 	}
-	if len(p.actions) == 0 {
-		return
-	}
-	x := p.last.X + 1
-	y := p.last.Y + p.last.H - 2
-	for _, action := range p.actions {
-		label := "[" + action.Label + "]"
-		if x+text.Width(label) > p.last.X+p.last.W-1 {
-			break
-		}
-		p.drawText(r, x, y, label, p.border)
-		x += text.Width(label) + 1
+	for _, item := range p.actionLayout() {
+		p.drawText(r, item.rect.X, item.rect.Y, item.label, p.border)
 	}
 }
 
@@ -100,28 +99,61 @@ func (p *pluginViewport) Handle(ev tui.Event) bool {
 		return false
 	}
 	mouse, ok := ev.(input.MouseEvent)
-	if !ok || mouse.Kind != input.MousePress || mouse.Btn != input.ButtonLeft || !inside(p.last, mouse.X, mouse.Y) {
+	if !ok || !inside(p.last, mouse.X, mouse.Y) {
 		return false
 	}
-	if mouse.Y == p.last.Y && mouse.X >= p.last.X+p.last.W-4 {
+	// The viewport is opaque. Even mouse inputs it does not act on must stop
+	// here rather than reaching covered chat/sidebar widgets.
+	if mouse.Kind != input.MousePress || mouse.Btn != input.ButtonLeft {
+		return true
+	}
+	if toggleRect, drawable := p.toggleRect(); drawable && inside(toggleRect, mouse.X, mouse.Y) {
 		p.modal.SetCollapsed(!p.modal.Collapsed())
 		return true
 	}
-	if p.modal.Collapsed() || mouse.Y != p.last.Y+p.last.H-2 {
+	if p.modal.Collapsed() {
 		return true
 	}
-	x := p.last.X + 1
-	for _, action := range p.actions {
-		width := text.Width(action.Label) + 2
-		if mouse.X >= x && mouse.X < x+width {
+	for _, item := range p.actionLayout() {
+		if inside(item.rect, mouse.X, mouse.Y) {
 			if p.onAction != nil {
-				p.onAction(action.ID)
+				p.onAction(item.action.ID)
 			}
 			return true
 		}
-		x += width + 1
 	}
 	return true
+}
+
+func (p *pluginViewport) toggleRect() (screen.Rect, bool) {
+	if p == nil || p.last.W < 5 || p.last.H < 1 {
+		return screen.Rect{}, false
+	}
+	return screen.Rect{X: p.last.X + p.last.W - 4, Y: p.last.Y, W: 3, H: 1}, true
+}
+
+func (p *pluginViewport) actionLayout() []pluginViewportActionLayout {
+	if p == nil || p.modal == nil || p.modal.Collapsed() || p.last.W < 3 || p.last.H < 3 {
+		return nil
+	}
+	x := p.last.X + 1
+	y := p.last.Y + p.last.H - 2
+	right := p.last.X + p.last.W - 1
+	items := make([]pluginViewportActionLayout, 0, len(p.actions))
+	for _, action := range p.actions {
+		label := "[" + action.Label + "]"
+		width := text.Width(label)
+		if x+width > right {
+			break
+		}
+		items = append(items, pluginViewportActionLayout{
+			action: action,
+			label:  label,
+			rect:   screen.Rect{X: x, Y: y, W: width, H: 1},
+		})
+		x += width + 1
+	}
+	return items
 }
 
 func (p *pluginViewport) OverlayHit(x, y int) bool { return p != nil && inside(p.last, x, y) }
@@ -131,7 +163,7 @@ func (p *pluginViewport) DragStart(x, y int) (tui.DragOp, bool) {
 		return nil, false
 	}
 	// The collapse control is a title-bar action, not a drag handle.
-	if y == p.last.Y && x >= p.last.X+p.last.W-4 {
+	if toggleRect, drawable := p.toggleRect(); drawable && inside(toggleRect, x, y) {
 		return nil, false
 	}
 	return p.modal.DragStart(x, y)
@@ -141,7 +173,32 @@ func (p *pluginViewport) ResizeStart(x, y int) (tui.DragOp, bool) {
 	if p == nil || p.modal == nil || p.modal.Collapsed() {
 		return nil, false
 	}
-	return p.modal.ResizeStart(x, y)
+	op, ok := p.modal.ResizeStart(x, y)
+	if !ok {
+		return nil, false
+	}
+	return &pluginViewportResize{viewport: p, op: op}, true
+}
+
+type pluginViewportResize struct {
+	viewport *pluginViewport
+	op       tui.DragOp
+}
+
+func (op *pluginViewportResize) DragMove(dx, dy int) {
+	if op != nil && op.op != nil {
+		op.op.DragMove(dx, dy)
+	}
+}
+
+func (op *pluginViewportResize) DragEnd(commit bool) {
+	if op == nil || op.op == nil {
+		return
+	}
+	op.op.DragEnd(commit)
+	if commit && op.viewport != nil {
+		op.viewport.userResized = true
+	}
 }
 
 func inside(rect screen.Rect, x, y int) bool {

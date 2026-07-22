@@ -168,10 +168,13 @@ func (s *Shell) OpenPluginViewport(title string, lines []string, actions []plugi
 	viewport := newPluginViewport(title, lines, actions, onAction, s.styles)
 	if previous, ok := s.popup.(*pluginViewport); ok && previous.last.W > 0 && previous.last.H > 0 {
 		// Plugins commonly refresh a viewport by opening it again. Retain its
-		// rendered geometry so a data update never recenters a dragged/resized
-		// panel under the user's pointer.
-		width, height := previous.modal.Size()
-		viewport.modal.SetSize(width, height)
+		// position and any user-selected size, but let an automatically sized
+		// panel follow changing content.
+		if previous.userResized {
+			width, height := previous.modal.Size()
+			viewport.modal.SetSize(width, height)
+			viewport.userResized = true
+		}
 		viewport.modal.SetPosition(previous.last.X, previous.last.Y)
 		viewport.modal.SetCollapsed(previous.modal.Collapsed())
 	}
