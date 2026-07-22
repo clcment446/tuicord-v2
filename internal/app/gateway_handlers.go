@@ -117,8 +117,18 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	} else if e.Unread && !a.channelMutedLocal(channel) {
 		status = Unread
 	}
-	a.cacheReadState(channel, guild, status)
 	a.ui.Post(func() {
+		// DM acknowledgements carry guild id 0. The read-state cache is keyed by
+		// guild, and DMs live under the synthetic DirectMessagesGuildID, so resolve
+		// the guild from the store (UI-owned, safe here) before caching; otherwise
+		// cacheReadState drops the update and the DM badge never clears.
+		g := guild
+		if g == 0 && a.store != nil {
+			if entry, ok := a.store.Channel(channel); ok {
+				g = entry.GuildID
+			}
+		}
+		a.cacheReadState(channel, g, status)
 		if status == Read && a.store != nil {
 			a.store.ClearUnread(channel)
 		}
