@@ -69,31 +69,22 @@ func (a *App) loadGuilds(limit uint) {
 func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 	guilds, guildErr := a.dirs.Guilds(limit)
 	privateChannels, dmErr := a.dirs.PrivateChannels()
-	if guildErr != nil && dmErr != nil {
-		a.ui.Post(func() {
-			// Any deletion invalidates the directory gate. Do not let this old
-			// failure clear a newer request's pending state.
-			if !a.directorySnapshotCurrent(snapshot, nil, nil) {
-				a.finishGuildLoadVersion(snapshot.gateVersion, false)
-				return
-			}
-			a.finishGuildLoad(false)
-			if a.onError != nil {
-				a.onError(guildErr)
-			}
-		})
-		return
-	}
 	privateChannels = a.hydratePrivateChannels(privateChannels)
 	a.ui.Post(func() {
 		if !a.directorySnapshotCurrent(snapshot, guilds, privateChannels) {
 			// A returned guild/channel was deleted or replaced while this directory
-			// request (including DM detail hydration) was in flight. Finish only this
-			// gate version so a generation-only rejection remains retryable without
-			// disturbing a newer request after explicit invalidation.
-			a.finishGuildLoadVersion(snapshot.gateVersion, false)
+			// request (including DM detail hydration) was in flight. Finish only
+			// this gate version. finishGuildLoadVersion returns true when this gate
+			// version is still current, meaning the rejection was a generation
+			// change (a deletion mid-load) with no newer request to replace it —
+			// retry so the directory is not silently dropped. A false result means
+			// a newer request already supersedes this one.
+			if a.finishGuildLoadVersion(snapshot.gateVersion, false) {
+				a.LoadGuilds(limit)
+			}
 			return
 		}
+		// Ingest whatever each endpoint returned. A failed endpoint yields nil.
 		for _, guild := range guilds {
 			a.store.UpsertGuild(store.Guild{ID: store.GuildID(guild.ID), Name: guild.Name})
 		}
@@ -104,6 +95,21 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 				ingestPrivateChannel(a.store, channel)
 			}
 			a.markChannelsLoaded(DirectMessagesGuildID)
+		}
+		if guildErr != nil || dmErr != nil {
+			// One endpoint succeeded and the other failed. A single success must not
+			// mask the other's failure as a fully loaded directory: leave the gate
+			// unloaded (retryable on the next connect/reconnect) and surface the
+			// error, exactly like a total failure.
+			a.finishGuildLoad(false)
+			if a.onError != nil {
+				if guildErr != nil {
+					a.onError(guildErr)
+				} else {
+					a.onError(dmErr)
+				}
+			}
+			return
 		}
 		a.finishGuildLoad(true)
 		if a.onReady != nil {
@@ -320,10 +326,14 @@ func (a *App) finishGuildLoad(ok bool) {
 	a.guildsGate.finish(ok)
 }
 
-func (a *App) finishGuildLoadVersion(version uint64, ok bool) {
+// finishGuildLoadVersion completes the given gate version and reports whether it
+// was still current. A false result means a newer request has superseded this
+// one; a true result on a discarded load means the data generation changed
+// mid-load with no replacement request, so the caller should retry.
+func (a *App) finishGuildLoadVersion(version uint64, ok bool) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	a.guildsGate.finishVersion(version, ok)
+	return a.guildsGate.finishVersion(version, ok)
 }
 
 func (a *App) beginHistoryLoad(channel store.ChannelID) (uint64, bool) {

@@ -1187,6 +1187,37 @@ func TestLoadGuildsLoadsDirectoryAndUsesSessionCache(t *testing.T) {
 	}
 }
 
+func TestDirectoryPartialFailureDoesNotMaskAsLoaded(t *testing.T) {
+	fs := &fakeSender{
+		guildsErr: errors.New("guilds endpoint down"),
+		dms: []discord.Channel{{
+			ID: 91, Type: discord.DirectMessage,
+			DMRecipients: []discord.User{{ID: 100, Username: "alice"}},
+		}},
+	}
+	a := newTestApp(fs)
+	errDone := make(chan error, 1)
+	a.OnError(func(err error) { errDone <- err })
+
+	a.LoadGuilds(100)
+	gotErr := <-errDone
+
+	if gotErr == nil {
+		t.Fatal("partial endpoint failure did not surface an error")
+	}
+	// The successful DM endpoint is still ingested.
+	if _, ok := a.store.Channel(91); !ok {
+		t.Fatal("successful DM endpoint data was not ingested")
+	}
+	// But a single success must not mask the guilds failure as a loaded directory.
+	a.resourceMu.Lock()
+	loaded := a.guildsGate.loaded
+	a.resourceMu.Unlock()
+	if loaded {
+		t.Fatal("directory marked loaded despite a failed endpoint")
+	}
+}
+
 func TestLoadChannelsLoadsGuildChannelsAndUsesSessionCache(t *testing.T) {
 	fs := &fakeSender{
 		channels: []discord.Channel{{ID: 10, Type: discord.GuildText, Name: "general"}},
