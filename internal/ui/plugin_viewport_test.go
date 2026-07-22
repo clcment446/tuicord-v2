@@ -95,4 +95,52 @@ func TestPluginViewportCollapseShrinksBoundsAndStopsClaimingOldArea(t *testing.T
 	if shell.OverlayAt(start.X+1, start.Y+start.H-1) != nil {
 		t.Fatal("collapsed viewport still claimed its old content area")
 	}
+
+	if !runtime.Handle(input.MouseEvent{X: viewport.last.X + viewport.last.W - 2, Y: viewport.last.Y, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("expand press was not handled")
+	}
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+	if got, want := viewport.last.H, start.H; got != want {
+		t.Fatalf("expanded viewport height = %d, want restored %d", got, want)
+	}
+}
+
+func TestPluginViewportRefreshWhileCollapsedKeepsRestoreSizeAndLatestContent(t *testing.T) {
+	runtime, shell, _, _ := newVimFocusHarness(t, vimTestConfig())
+	shell.OpenPluginViewport("AutoBot", []string{"old status"}, nil, nil)
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+	viewport := shell.popup.(*pluginViewport)
+	expandedHeight := viewport.last.H
+	start := viewport.last
+
+	if !runtime.Handle(input.MouseEvent{X: start.X + start.W - 2, Y: start.Y, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("collapse press was not handled")
+	}
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+
+	shell.OpenPluginViewport("AutoBot", []string{"new status"}, nil, nil)
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+	viewport = shell.popup.(*pluginViewport)
+	if !viewport.modal.Collapsed() || viewport.last.H != 1 {
+		t.Fatalf("collapsed refresh geometry = %+v, collapsed=%v", viewport.last, viewport.modal.Collapsed())
+	}
+
+	if !runtime.Handle(input.MouseEvent{X: viewport.last.X + viewport.last.W - 2, Y: viewport.last.Y, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("expand press after refresh was not handled")
+	}
+	buf := runtime.Render(shell, tui.Size{W: 80, H: 24})
+	if viewport.last.H != expandedHeight {
+		t.Fatalf("expanded height after collapsed refresh = %d, want %d", viewport.last.H, expandedHeight)
+	}
+	found := false
+	for y := viewport.last.Y; y < viewport.last.Y+viewport.last.H; y++ {
+		for x := viewport.last.X; x < viewport.last.X+viewport.last.W; x++ {
+			if buf.Cell(x, y).Content == "n" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("expanded refreshed viewport did not render latest content")
+	}
 }

@@ -170,8 +170,10 @@ func (s *Shell) OpenPluginViewport(title string, lines []string, actions []plugi
 		// Plugins commonly refresh a viewport by opening it again. Retain its
 		// rendered geometry so a data update never recenters a dragged/resized
 		// panel under the user's pointer.
-		viewport.modal.SetSize(previous.last.W, previous.last.H)
+		width, height := previous.modal.Size()
+		viewport.modal.SetSize(width, height)
 		viewport.modal.SetPosition(previous.last.X, previous.last.Y)
+		viewport.modal.SetCollapsed(previous.modal.Collapsed())
 	}
 	s.popup = viewport
 }
