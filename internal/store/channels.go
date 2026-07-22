@@ -38,7 +38,7 @@ func (s *Store) RemoveChannel(id ChannelID) {
 		delete(s.deletedMessages, id)
 		delete(s.prunedDeleteRevision, id)
 		delete(s.unread, id)
-		delete(s.pings, id)
+		s.clearPing(id)
 		s.channelGeneration[id]++
 		s.touchMeta()
 	}
@@ -102,7 +102,7 @@ func (s *Store) removeChannel(id ChannelID) bool {
 	delete(s.deletedMessages, id)
 	delete(s.prunedDeleteRevision, id)
 	delete(s.unread, id)
-	delete(s.pings, id)
+	s.clearPing(id)
 	s.channelGeneration[id]++
 	s.touchMeta()
 	return true
