@@ -285,3 +285,27 @@ func TestMetaRevIgnoresMessageMutations(t *testing.T) {
 			"invalidate renders of other messages", s.MetaRev(), before)
 	}
 }
+
+// TestMetaRevStableOnUnchangedMemberUpserts guards the hot path: every guild
+// MESSAGE_CREATE re-upserts its author's member, so an unchanged re-upsert must
+// not bump MetaRev (which would invalidate the whole transcript cache).
+func TestMetaRevStableOnUnchangedMemberUpserts(t *testing.T) {
+	s := New(0)
+	member := Member{ID: 42, Name: "alice", Username: "alice", RoleIDs: []RoleID{7, 8}}
+	s.UpsertMember(1, member)
+	before := s.MetaRev()
+
+	// Identical re-upsert (same identity and roles) changes nothing.
+	s.UpsertMember(1, Member{ID: 42, Name: "alice", Username: "alice", RoleIDs: []RoleID{7, 8}})
+	// RememberMemberIdentity with the same/global-only identity changes nothing.
+	s.RememberMemberIdentity(1, Member{ID: 42, Username: "alice"})
+	if s.MetaRev() != before {
+		t.Fatalf("MetaRev = %d, want unchanged at %d after no-op member upserts", s.MetaRev(), before)
+	}
+
+	// A real change (added role) must still invalidate.
+	s.UpsertMember(1, Member{ID: 42, Name: "alice", Username: "alice", RoleIDs: []RoleID{7, 8, 9}})
+	if s.MetaRev() == before {
+		t.Fatal("MetaRev did not advance on a changed member")
+	}
+}

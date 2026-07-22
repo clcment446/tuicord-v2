@@ -1027,8 +1027,30 @@ func (s *Store) UpsertMember(guild GuildID, m Member) {
 		byUser = map[UserID]Member{}
 		s.members[guild] = byUser
 	}
+	// Every MESSAGE_CREATE in a guild re-upserts its author's member. Bumping the
+	// metadata revision on an unchanged member would invalidate the entire
+	// transcript cache on each new message, so only touch meta on a real change.
+	if existing, ok := byUser[m.ID]; ok && sameMember(existing, m) {
+		return
+	}
 	byUser[m.ID] = m
 	s.touchMeta()
+}
+
+// sameMember reports whether two members carry identical rendered identity, so
+// re-upserting an unchanged member can skip the metadata-revision bump.
+func sameMember(a, b Member) bool {
+	if a.ID != b.ID || a.Name != b.Name || a.Username != b.Username ||
+		a.Nick != b.Nick || a.AvatarURL != b.AvatarURL || a.Color != b.Color ||
+		len(a.RoleIDs) != len(b.RoleIDs) {
+		return false
+	}
+	for i := range a.RoleIDs {
+		if a.RoleIDs[i] != b.RoleIDs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // RememberMemberIdentity records a message author's identity without replacing
@@ -1042,23 +1064,33 @@ func (s *Store) RememberMemberIdentity(guild GuildID, m Member) {
 		byUser = map[UserID]Member{}
 		s.members[guild] = byUser
 	}
-	if existing, ok := byUser[m.ID]; ok {
-		// Sparse message authors carry global identity only. Never replace a
-		// guild nickname or guild avatar learned from a member payload.
-		if existing.Name == "" && m.Name != "" {
-			existing.Name = m.Name
-		}
-		if m.Username != "" {
-			existing.Username = m.Username
-		}
-		if existing.AvatarURL == "" && m.AvatarURL != "" {
-			existing.AvatarURL = m.AvatarURL
-		}
-		byUser[m.ID] = existing
-	} else {
+	existing, ok := byUser[m.ID]
+	if !ok {
 		byUser[m.ID] = m
+		s.touchMeta()
+		return
 	}
-	s.touchMeta()
+	// Sparse message authors carry global identity only. Never replace a guild
+	// nickname or guild avatar learned from a member payload. Only bump the
+	// metadata revision (which invalidates the transcript cache) on a real change,
+	// since this runs for every message author.
+	changed := false
+	if existing.Name == "" && m.Name != "" {
+		existing.Name = m.Name
+		changed = true
+	}
+	if m.Username != "" && m.Username != existing.Username {
+		existing.Username = m.Username
+		changed = true
+	}
+	if existing.AvatarURL == "" && m.AvatarURL != "" {
+		existing.AvatarURL = m.AvatarURL
+		changed = true
+	}
+	if changed {
+		byUser[m.ID] = existing
+		s.touchMeta()
+	}
 }
 
 // RemoveMember deletes a guild member.
