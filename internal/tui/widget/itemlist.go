@@ -317,11 +317,7 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		if ev.Release {
 			return false
 		}
-		switch ev.Key {
-		case input.KeyRune:
-			if !w.vimNavigation {
-				return false
-			}
+		if w.vimNavigation {
 			switch {
 			case input.KeyMatches(ev, w.vimScrollDown):
 				w.SetSelectedSilent(w.selected + 1)
@@ -330,6 +326,8 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 				w.SetSelectedSilent(w.selected - 1)
 				return true
 			}
+		}
+		switch ev.Key {
 		case input.KeyEnter:
 			if len(w.items) == 0 {
 				return false

@@ -365,10 +365,11 @@ func (m *Manager) isActive(acc *Account) bool {
 
 func (m *Manager) readStateChanged(acc *Account) {
 	if m.isActive(acc) {
+		m.surface.RefreshChannels()
 		m.surface.RefreshGuildBadges()
 	}
-	// Background accounts have no visible guild rail, but their selector badge
-	// must still follow authoritative read acknowledgements and mentions.
+	// Background accounts have no visible guild/channel rails, but their
+	// selector badge must still follow authoritative acknowledgements/mentions.
 	m.pushBadges()
 }
 

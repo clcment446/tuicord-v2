@@ -624,6 +624,9 @@ func (a *App) channelUnread(channel store.ChannelID) (UnreadStatus, bool) {
 	if status, ok := a.authoritativeChannelUnread(channel); ok {
 		return status, true
 	}
+	if cached, ok := a.cachedChannelUnread(channel); ok {
+		return cached, true
+	}
 	if a.store.Pings(channel) > 0 {
 		return Mentioned, false
 	}
@@ -651,6 +654,22 @@ func (a *App) authoritativeChannelUnread(channel store.ChannelID) (UnreadStatus,
 	default:
 		return Read, true
 	}
+}
+
+// cachedChannelUnread returns event-derived attention state for channels that
+// arrived before ningen's cabinet/read-state hydration.
+func (a *App) cachedChannelUnread(channel store.ChannelID) (UnreadStatus, bool) {
+	if a == nil || a.store == nil || channel == 0 {
+		return Read, false
+	}
+	entry, ok := a.store.Channel(channel)
+	if !ok || entry.GuildID == 0 {
+		return Read, false
+	}
+	a.unreadMu.RLock()
+	status, ok := a.unreadChannels[entry.GuildID][channel]
+	a.unreadMu.RUnlock()
+	return status, ok
 }
 
 // GuildUnread returns the strongest read state among a guild's channels.
@@ -685,7 +704,15 @@ func (a *App) resetReadStateCache() {
 	if a.store != nil {
 		for _, guild := range a.store.Guilds() {
 			for _, channel := range a.store.Channels(guild.ID) {
-				status, authoritative := a.channelUnread(channel.ID)
+				status, authoritative := a.authoritativeChannelUnread(channel.ID)
+				if !authoritative {
+					switch {
+					case a.store.Pings(channel.ID) > 0:
+						status = Mentioned
+					case a.store.Unread(channel.ID) > 0:
+						status = Unread
+					}
+				}
 				if status == Read {
 					// An authoritative read position must also retire the local
 					// fallback, otherwise GuildPings can override it forever.

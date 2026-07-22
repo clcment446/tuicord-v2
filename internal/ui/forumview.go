@@ -305,15 +305,15 @@ func (fv *ForumView) Handle(ev tui.Event) bool {
 		}
 		if fv.onNavigate != nil {
 			direction := 0
-			switch key.Key {
-			case input.KeyUp:
+			if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollUp) {
 				direction = -1
-			case input.KeyDown:
+			} else if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollDown) {
 				direction = 1
-			case input.KeyRune:
-				if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollUp) {
+			} else {
+				switch key.Key {
+				case input.KeyUp:
 					direction = -1
-				} else if fv.vimNavigation && keyMatches(key, fv.vimKeys.ScrollDown) {
+				case input.KeyDown:
 					direction = 1
 				}
 			}

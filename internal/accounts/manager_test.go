@@ -233,6 +233,21 @@ func TestBackgroundReadStateChangePushesAccountBadges(t *testing.T) {
 	}
 }
 
+func TestActiveReadStateChangeRefreshesChannelAndGuildBadges(t *testing.T) {
+	surf := &fakeSurface{}
+	m, _ := newManager(t, surf, []Seed{{Key: "token", Ning: wrapState(t)}}, nil)
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	channels, guilds := surf.refreshChan, surf.refreshGuild
+
+	m.readStateChanged(m.Active())
+
+	if surf.refreshChan != channels+1 || surf.refreshGuild != guilds+1 {
+		t.Fatalf("channel/guild refreshes = %d/%d, want %d/%d", surf.refreshChan, surf.refreshGuild, channels+1, guilds+1)
+	}
+}
+
 func TestBadgeLabelFallsBackToKey(t *testing.T) {
 	surf := &fakeSurface{}
 	seeds := []Seed{{Key: "acct-xyz", Ning: wrapState(t)}}
