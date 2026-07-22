@@ -144,6 +144,85 @@ func TestUpdateComposerPreviewDecodesOffUIThread(t *testing.T) {
 	}
 }
 
+// TestStaleDecodeDroppedAfterClearAndRestage proves the epoch guard: an
+// off-thread decode that started before clearAttachments must not populate the
+// cache after the same temp path is re-staged, since its bytes may be from the
+// old file that once lived at that reused path. A fresh decode is issued instead.
+func TestStaleDecodeDroppedAfterClearAndRestage(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		app:             app.New(discord.WrapSession(session.New("")), store.New(0), tui.New()),
+		composerFiles:   widget.NewText(""),
+		composerPreview: widget.Column(),
+		composerNode:    &layout.Node{Basis: composerBaseBasis},
+		previewCellW:    8,
+		previewCellH:    16,
+		styles:          Styles{},
+	}
+	// Stage P: an async decode is now in flight at the current epoch.
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	staleEpoch := mv.previewEpoch
+	if !mv.previewPending[img] {
+		t.Fatal("staging did not launch an off-thread decode")
+	}
+
+	// Clear (bumps the epoch, drops the pending guard) then re-stage the SAME path.
+	mv.clearAttachments()
+	if mv.previewPending != nil && mv.previewPending[img] {
+		t.Fatal("clearAttachments left a stale pending guard for the reused path")
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if !mv.previewPending[img] {
+		t.Fatal("re-stage did not issue a fresh decode for the reused temp path")
+	}
+
+	// The original in-flight decode posts its (stale) result back. It must be
+	// dropped: caching it would show the OLD file's bytes for the reused path.
+	stale := &imagePreview{cols: 1, rows: 1}
+	mv.applyDecodedPreview(img, staleEpoch, stale, true)
+	if got := mv.previewCache[img]; got == stale {
+		t.Fatal("stale in-flight decode populated previewCache with the old image")
+	}
+
+	// The fresh decode (current epoch) still populates normally.
+	fresh := &imagePreview{cols: 2, rows: 2}
+	mv.applyDecodedPreview(img, mv.previewEpoch, fresh, true)
+	if got := mv.previewCache[img]; got != fresh {
+		t.Fatalf("fresh decode did not populate previewCache: got %v", got)
+	}
+}
+
+// TestSyncPreviewDecodePopulatesImmediately confirms the test decode seam still
+// caches inline with no event loop after the epoch-guard change.
+func TestSyncPreviewDecodePopulatesImmediately(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		composerFiles:     widget.NewText(""),
+		composerPreview:   widget.Column(),
+		composerNode:      &layout.Node{Basis: composerBaseBasis},
+		previewCellW:      8,
+		previewCellH:      16,
+		styles:            Styles{},
+		syncPreviewDecode: true,
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mv.previewCache[img]; !ok {
+		t.Fatal("sync decode did not populate previewCache immediately")
+	}
+}
+
 func TestStageTempImageQueuesAndCleansUp(t *testing.T) {
 	mv := &MainView{composerFiles: widget.NewText("")}
 	path := filepath.Join(t.TempDir(), "clip.png")
