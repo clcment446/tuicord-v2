@@ -10,7 +10,7 @@ import (
 )
 
 // NewHelpOverlay builds a read-only panel listing the client's key bindings.
-func NewHelpOverlay(cfg config.Config) tui.Widget {
+func NewHelpOverlay(cfg config.Config, styles Styles) tui.Widget {
 	focusKey := cfg.Keys.FocusComposer
 	focusDescription := "Focus the composer"
 	if cfg.Accessibility.VimNavigation {
@@ -56,7 +56,7 @@ func NewHelpOverlay(cfg config.Config) tui.Widget {
 	for _, l := range lines {
 		rows = append(rows, widget.NewText(pad(l[0], 14)+l[1]))
 	}
-	return titled("Help", widget.Column(rows...))
+	return titled(styles, "Help", widget.Column(rows...))
 }
 
 func pad(s string, width int) string {

@@ -9,41 +9,48 @@ import (
 )
 
 func (a *App) registerGatewayLifecycleHandlers() {
-	a.handle.AddHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
+	// Gateway ingress must be synchronous. Arikawa's ophandler.Loop dispatches
+	// events from the socket in order on a single goroutine, but AddHandler runs
+	// each callback in its own goroutine (`go h.call`), so a CREATE dispatched
+	// before a DELETE could enqueue its ui.Post after the DELETE's, resurrecting
+	// the entity. AddSyncHandler runs inline, preserving dispatch order into the
+	// Post FIFO. The callbacks only convert payloads and enqueue a non-blocking
+	// Post, so they never stall the socket loop for long.
+	a.handle.AddSyncHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
 		a.handleChannelUnreadUpdate(e)
 	})
-	a.handle.AddHandler(func(e *read.UpdateEvent) {
+	a.handle.AddSyncHandler(func(e *read.UpdateEvent) {
 		a.handleReadStateUpdate(e)
 	})
-	a.handle.AddHandler(func(e *gateway.ReadyEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ReadyEvent) {
 		a.handleReady(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildCreateEvent) {
 		a.handleGuildCreate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildUpdateEvent) {
 		a.handleGuildUpdate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildDeleteEvent) {
 		a.handleGuildDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelCreateEvent) {
 		a.handleChannelUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelUpdateEvent) {
 		a.handleChannelUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ChannelDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ChannelDeleteEvent) {
 		a.handleChannelDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildEmojisUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildEmojisUpdateEvent) {
 		guildID := store.GuildID(e.GuildID)
 		emojis := convertGuildEmojis(e.Emojis)
 		a.ui.Post(func() {
@@ -54,7 +61,7 @@ func (a *App) registerGatewayLifecycleHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.UserSettingsUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.UserSettingsUpdateEvent) {
 		folders := convertGuildFolders(e.GuildFolders)
 		a.ui.Post(func() {
 			a.store.SetGuildFolders(folders)
@@ -62,6 +69,27 @@ func (a *App) registerGatewayLifecycleHandlers() {
 				a.onChange()
 			}
 		})
+	})
+
+	a.handle.AddSyncHandler(func(e *gateway.UserGuildSettingsUpdateEvent) {
+		a.handleGuildSettingsUpdate(e)
+	})
+}
+
+// handleGuildSettingsUpdate refreshes derived attention after a mute-setting
+// change. ningen's MutedState (a sync handler registered before this one) has
+// already applied the event, so recomputing the read-state cache picks up the
+// new mute state: a newly muted channel drops its badge, an unmuted one regains
+// it. Without this the cached badges stayed stale until the next read event.
+func (a *App) handleGuildSettingsUpdate(e *gateway.UserGuildSettingsUpdateEvent) {
+	if a == nil || e == nil {
+		return
+	}
+	a.ui.Post(func() {
+		a.resetReadStateCache()
+		if a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 	})
 }
 
@@ -95,6 +123,13 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	}
 	channel := store.ChannelID(e.ChannelID)
 	guild := store.GuildID(e.GuildID)
+	// The event embeds a value copy of ningen's read state. Snapshot the marker by
+	// value now, but apply it inside the Post below so localReadState and MarkRead
+	// never read ningen's live pointer.
+	mark := readMark{
+		lastRead: e.ReadState.LastMessageID,
+		mentions: e.ReadState.MentionCount,
+	}
 	// UpdateEvent already contains ningen's scalar unread result. Applying mute
 	// state locally preserves the useful semantics without its permission-aware
 	// helper performing REST fallback on this callback goroutine.
@@ -104,8 +139,33 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 	} else if e.Unread && !a.channelMutedLocal(channel) {
 		status = Unread
 	}
-	a.cacheReadState(channel, guild, status)
 	a.ui.Post(func() {
+		// putReadMark must run here, not synchronously above: replaceReadMarks
+		// (READY) and removeCachedReadState (deletes) both mutate readMarks on the
+		// UI goroutine. A synchronous marker write was race-free but not order-safe,
+		// so an ack landing between READY's dispatch and its drained Post was wiped
+		// (lost ack), and a late ack could resurrect a mark for a deleted channel.
+		// Deferring it into the FIFO Post keeps it ordered with those mutations.
+		a.putReadMark(channel, mark)
+		// DM acknowledgements carry guild id 0. The read-state cache is keyed by
+		// guild, and DMs live under the synthetic DirectMessagesGuildID, so resolve
+		// the guild from the store (UI-owned, safe here) before caching; otherwise
+		// cacheReadState drops the update and the DM badge never clears.
+		g := guild
+		if g == 0 && a.store != nil {
+			if entry, ok := a.store.Channel(channel); ok {
+				g = entry.GuildID
+			}
+		}
+		// A read.UpdateEvent with guild id 0 is by definition a DM ack. When the DM
+		// channel is not yet hydrated the lookup above leaves g at 0, so
+		// cacheReadStateBatch would early-return and the DM badge would never clear.
+		// Default to the synthetic DM guild; a guild channel always carries a
+		// non-zero guild id, so this cannot mis-route one.
+		if g == 0 {
+			g = DirectMessagesGuildID
+		}
+		a.cacheReadState(channel, g, status)
 		if status == Read && a.store != nil {
 			a.store.ClearUnread(channel)
 		}
@@ -116,51 +176,55 @@ func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
 }
 
 func (a *App) registerGatewayMessageHandlers() {
-	a.handle.AddHandler(func(e *gateway.MessageCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageCreateEvent) {
 		a.handleMessageCreate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageUpdateEvent) {
 		a.handleMessageUpdate(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageDeleteEvent) {
 		a.handleMessageDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageDeleteBulkEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageDeleteBulkEvent) {
 		a.handleMessageDeleteBulk(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionAddEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionAddEvent) {
 		a.handleReactionAdd(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveEvent) {
 		a.handleReactionRemove(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveAllEvent) {
 		a.handleReactionRemoveAll(e)
+	})
+
+	a.handle.AddSyncHandler(func(e *gateway.MessageReactionRemoveEmojiEvent) {
+		a.handleReactionRemoveEmoji(e)
 	})
 }
 
 func (a *App) registerGatewayMemberHandlers() {
-	a.handle.AddHandler(func(e *gateway.GuildMembersChunkEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMembersChunkEvent) {
 		a.handleMembersChunk(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberAddEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberAddEvent) {
 		a.handleMemberUpsert(e.GuildID, e.Member)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberUpdateEvent) {
 		member := discord.Member{User: e.User}
 		e.UpdateMember(&member)
 		a.handleMemberUpsert(e.GuildID, member)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildMemberRemoveEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildMemberRemoveEvent) {
 		guildID := store.GuildID(e.GuildID)
 		userID := store.UserID(e.User.ID)
 		a.ui.Post(func() {
@@ -171,15 +235,15 @@ func (a *App) registerGatewayMemberHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleCreateEvent) {
 		a.handleRoleUpsert(e.GuildID, e.Role)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleUpdateEvent) {
 		a.handleRoleUpsert(e.GuildID, e.Role)
 	})
 
-	a.handle.AddHandler(func(e *gateway.GuildRoleDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.GuildRoleDeleteEvent) {
 		guildID := store.GuildID(e.GuildID)
 		roleID := store.RoleID(e.RoleID)
 		a.ui.Post(func() {
@@ -193,23 +257,23 @@ func (a *App) registerGatewayMemberHandlers() {
 }
 
 func (a *App) registerGatewayThreadHandlers() {
-	a.handle.AddHandler(func(e *gateway.ThreadCreateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadCreateEvent) {
 		a.handleThreadUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadUpdateEvent) {
 		a.handleThreadUpsert(e.Channel)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadDeleteEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadDeleteEvent) {
 		a.handleThreadDelete(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadListSyncEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadListSyncEvent) {
 		a.handleThreadListSync(e)
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadMemberUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadMemberUpdateEvent) {
 		id := store.ChannelID(e.ThreadMember.ID)
 		a.ui.Post(func() {
 			// A ThreadMemberUpdate for the current user means we joined; leaving
@@ -221,7 +285,7 @@ func (a *App) registerGatewayThreadHandlers() {
 		})
 	})
 
-	a.handle.AddHandler(func(e *gateway.ThreadMembersUpdateEvent) {
+	a.handle.AddSyncHandler(func(e *gateway.ThreadMembersUpdateEvent) {
 		a.handleThreadMembersUpdate(e)
 	})
 }

@@ -29,7 +29,7 @@ func TestPluginHostAccessorsDoNotWaitForUIEventLoop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := newPluginHost(orch, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
+	host := newPluginHost(func() *app.App { return orch }, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
 
 	type ids struct {
 		guild, channel, self uint64
@@ -61,7 +61,7 @@ func TestManagerCloseDoesNotWaitForStoppedUIAccessor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := newPluginHost(orch, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
+	host := newPluginHost(func() *app.App { return orch }, uiApp, nil, cfg.ColorOverrides, uiStyles(cfg), activeTheme)
 	entered := make(chan struct{})
 	access := host.ActiveChannel
 	host.ActiveChannel = func() uint64 {

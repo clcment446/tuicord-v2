@@ -65,14 +65,14 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		widget.NewText("Log in to Discord"),
 		widget.NewText(""),
 		widget.NewText("Option 1 — paste a token:"),
-		titled("Token", tokenInput),
+		titled(styles, "Token", tokenInput),
 		widget.NewText(""),
 		widget.NewText("Option 2 — scan the QR code with the Discord mobile app."),
 	)
 
 	qr := NewQRPanel(ctx, app, styles, setToken, preferredMode, onModeSelected)
 
-	root := widget.NewSplit(titled("Login", tokenPanel), titled("QR Code", qr)).
+	root := widget.NewSplit(titled(styles, "Login", tokenPanel), titled(styles, "QR Code", qr)).
 		Basis(36).
 		MinFirst(30).
 		Vertical()

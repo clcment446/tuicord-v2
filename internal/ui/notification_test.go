@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -80,10 +81,128 @@ func TestIncomingNotificationClosesActionLayersBeforeNavigation(t *testing.T) {
 		popup:        widget.NewText("popup"),
 		viewerCancel: cancel,
 	}
-	sh.showIncomingMessageToast(store.Message{ChannelID: 9}, "Mina", "hello")
+	sh.showIncomingMessageToast(store.Message{ChannelID: 9}, "Mina", "hello", nil)
 	sh.toasts[0].onActivate()
 	if !overlay.closed || sh.overlay != nil || sh.popup != nil || sh.viewerCancel != nil {
 		t.Fatalf("activation left action layers open: closed=%v overlay=%v popup=%v cancel=%v", overlay.closed, sh.overlay, sh.popup, sh.viewerCancel)
+	}
+}
+
+// blockingDesktopNotifier simulates a stalled notify-send/osascript process: its
+// Notify never returns until release is closed.
+type blockingDesktopNotifier struct {
+	release chan struct{}
+	calls   int64
+}
+
+func (n *blockingDesktopNotifier) Notify(title, body string) error {
+	atomic.AddInt64(&n.calls, 1)
+	<-n.release
+	return nil
+}
+
+func TestSaturatedNotificationDispatchStillShowsToast(t *testing.T) {
+	sh := &Shell{
+		cfg:      config.Default(),
+		mv:       &MainView{Root: widget.NewText("main")},
+		notifier: &recordingDesktopNotifier{},
+		// A permanently saturated pool: dispatch never accepts work.
+		dispatch: func(func()) bool { return false },
+	}
+	sh.Handle(input.FocusEvent{Focused: false})
+	sh.NotifyIncomingMessage(store.Message{Author: "Mina", Content: "hello", ChannelID: 9})
+	if got := len(sh.Toasts()); got != 1 {
+		t.Fatalf("toast count when dispatch saturated = %d, want 1 (ping must not be lost silently)", got)
+	}
+	if sh.Toasts()[0].onActivate == nil {
+		t.Fatal("saturated-dispatch fallback toast must remain actionable")
+	}
+}
+
+func TestHungNotifierFallsBackToToastWithoutBlocking(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	notifier := &blockingDesktopNotifier{release: release}
+	sh := &Shell{
+		cfg:           config.Default(),
+		mv:            &MainView{Root: widget.NewText("main")},
+		notifier:      notifier,
+		notifyTimeout: 20 * time.Millisecond,
+		// nil dispatch runs the notification work inline; notify() must still return
+		// once the timeout elapses rather than blocking on the hung notifier.
+	}
+	sh.Handle(input.FocusEvent{Focused: false})
+
+	done := make(chan struct{})
+	go func() {
+		sh.NotifyIncomingMessage(store.Message{Author: "Mina", Content: "hello", ChannelID: 9})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyIncomingMessage blocked on a hung notifier instead of timing out")
+	}
+	if got := len(sh.Toasts()); got != 1 {
+		t.Fatalf("toast count after hung notifier = %d, want 1 fallback toast", got)
+	}
+	if atomic.LoadInt64(&notifier.calls) != 1 {
+		t.Fatalf("notifier.Notify calls = %d, want 1", atomic.LoadInt64(&notifier.calls))
+	}
+}
+
+func TestBoundedNotificationDispatchReportsDropWhenSaturated(t *testing.T) {
+	dispatch := boundedNotificationDispatch()
+	release := make(chan struct{})
+	defer close(release)
+	accepted := 0
+	// Fill and oversubscribe the pool; parked jobs never free their slot.
+	for i := 0; i < maxConcurrentDesktopNotifications*4; i++ {
+		if dispatch(func() { <-release }) {
+			accepted++
+		}
+	}
+	if accepted != maxConcurrentDesktopNotifications {
+		t.Fatalf("accepted %d jobs, want exactly the cap %d", accepted, maxConcurrentDesktopNotifications)
+	}
+}
+
+func TestBoundedNotificationDispatchCapsConcurrency(t *testing.T) {
+	dispatch := boundedNotificationDispatch()
+	release := make(chan struct{})
+	var started int64
+	// Every accepted job parks on release, so the semaphore never frees: only the
+	// cap's worth of jobs are ever accepted; the rest must be dropped, never
+	// spawned as unbounded goroutines/processes.
+	for i := 0; i < maxConcurrentDesktopNotifications*8; i++ {
+		dispatch(func() {
+			atomic.AddInt64(&started, 1)
+			<-release
+		})
+	}
+	time.Sleep(50 * time.Millisecond)
+	got := atomic.LoadInt64(&started)
+	close(release)
+	if got > int64(maxConcurrentDesktopNotifications) {
+		t.Fatalf("started %d jobs concurrently, want <= %d", got, maxConcurrentDesktopNotifications)
+	}
+	if got == 0 {
+		t.Fatal("no notification work ran")
+	}
+}
+
+func TestBackgroundAccountToastSwitchesAccountBeforeNavigating(t *testing.T) {
+	var order []string
+	sh := &Shell{cfg: config.Default(), mv: &MainView{Root: widget.NewText("main")}}
+	sh.NotifyAccountMessage("Bob", func() { order = append(order, "switch") }, store.Message{ChannelID: 9})
+	if len(sh.toasts) != 1 {
+		t.Fatalf("expected one toast, got %d", len(sh.toasts))
+	}
+	// NavigateToChannel records after the switch; with a bare MainView it is a
+	// no-op, so we assert ordering via the switch callback firing on activation.
+	sh.toasts[0].onActivate()
+	if len(order) != 1 || order[0] != "switch" {
+		t.Fatalf("account switch did not run on activation: %v", order)
 	}
 }
 

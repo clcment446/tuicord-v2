@@ -1070,6 +1070,38 @@ func TestChatViewEmbedFirstLineIsStopAndAuthorNeverIs(t *testing.T) {
 	}
 }
 
+func TestMoveFocusRevealsTargetWithinViewport(t *testing.T) {
+	w := &ChatView{}
+	w.renderLineCount = 100
+	w.viewportHeight = 10
+	w.bottomScroll.Update(100, 10) // known; maxOffset = 90
+	w.bottomScroll.SetOffset(0)    // viewport shows lines [90,100)
+	w.keyboardFocused = true
+	w.focusedExplicit = true // skip initial-focus bootstrap (needs a live source)
+	w.focusStops = []chatFocusStop{
+		{messageKey: "a", line: 95}, // currently visible
+		{messageKey: "b", line: 20}, // far above the viewport
+		{messageKey: "c", line: 96}, // below when focus sits high
+	}
+
+	visible := func(line int) bool {
+		start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
+		end := min(start+w.viewportHeight, w.renderLineCount)
+		return line >= start && line < end
+	}
+
+	w.focusStopIndex = 0
+	w.moveFocus(1) // to line 20, above the viewport -> revealed at top
+	if !visible(20) {
+		t.Fatalf("target line 20 not visible after upward focus move (offset=%d)", w.bottomScroll.Offset())
+	}
+
+	w.moveFocus(1) // to line 96, below the viewport -> revealed at bottom
+	if !visible(96) {
+		t.Fatalf("target line 96 not visible after downward focus move (offset=%d)", w.bottomScroll.Offset())
+	}
+}
+
 func TestChatViewFocusLatestStopUsesLatestMessage(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "one", Content: "first"})

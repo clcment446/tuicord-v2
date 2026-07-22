@@ -71,6 +71,19 @@ type MainView struct {
 	composerNode        *layout.Node
 	previewCellW        int
 	previewCellH        int
+	// previewCache holds thumbnails already decoded off the UI thread, keyed by
+	// attachment path; previewPending guards against launching a second decode
+	// for the same path. Both are UI-goroutine-owned.
+	previewCache        map[string]*imagePreview
+	previewPending      map[string]bool
+	// previewEpoch is bumped whenever attachments are cleared/reset. An in-flight
+	// off-thread decode captures the epoch at request time; if it no longer matches
+	// when the decode posts back, the result is stale (its temp path may have been
+	// reused for different bytes) and is discarded rather than cached.
+	previewEpoch int
+	// syncPreviewDecode forces inline thumbnail decoding for tests with no event
+	// loop; production leaves it false so decodes run off the UI goroutine.
+	syncPreviewDecode bool
 	composer            *widget.TextInput
 	attachments         []queuedAttachment
 	composerMode        composerMode
@@ -469,7 +482,10 @@ func chatMediaConfig(appCfg config.Config) media.Config {
 		VideoAudio:           m.VideoAudio,
 	}
 	cfg = cfg.Bounded()
-	local := os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""
+	// Use the same SSH detection as the animation policy (config.IsSSH also checks
+	// SSH_CLIENT). A mismatch left SHM enabled on SSH_CLIENT-only sessions, where
+	// the remote /dev/shm the terminal reads does not exist locally.
+	local := !config.IsSSH(os.Getenv)
 	switch strings.ToLower(strings.TrimSpace(m.VideoUseSHM)) {
 	case "true", "yes", "on":
 		cfg.VideoUseSHM = true
@@ -650,10 +666,38 @@ func (mv *MainView) SetActiveAccount(a *app.App) {
 	if mv == nil || a == nil {
 		return
 	}
+	mv.resetAccountState()
 	mv.app = a
 	mv.chat.SetSource(a.Store(), a.ActiveChannel)
 	mv.lastActiveChannel = a.ActiveChannel()
 	mv.Refresh()
+}
+
+// resetAccountState drops per-account composer and forum state before rebinding
+// to a new account. Without this a reply/edit target, staged attachments, or a
+// forum view built against the previous account's store would leak across the
+// switch — a pending reply could be sent through the wrong Discord account.
+func (mv *MainView) resetAccountState() {
+	mv.composerMode = composerNormal
+	mv.composerTarget = store.Message{}
+	mv.replyMention = false
+	if mv.composer != nil {
+		mv.composer.SetValue("")
+	}
+	mv.clearAttachments()
+	// Forum views captured the previous account's store and bound app methods.
+	// Release their media and drop them so the next openForum rebuilds against
+	// the active account.
+	if mv.forumPreview != nil {
+		mv.forumPreview.CloseMedia()
+	}
+	mv.showChat()
+	mv.forumID = 0
+	mv.forumActive = false
+	mv.forumPreviewID = 0
+	mv.forumView = nil
+	mv.forumPreview = nil
+	mv.forumPreviewBox = nil
 }
 
 // rebuildGuilds rebuilds the guild rail rows (folders + guilds + pins) and keeps
@@ -1538,6 +1582,14 @@ func (mv *MainView) clearAttachments() {
 		}
 	}
 	mv.attachments = nil
+	// Drop decoded thumbnails so a re-staged temp path cannot reuse a stale image
+	// and memory is released. Also clear the pending guards and bump the decode
+	// epoch: a re-staged temp path must be free to decode again, and any in-flight
+	// decode that started before this clear must not post its (possibly stale) image
+	// back — isStagedImage alone is insufficient when the same temp path is reused.
+	mv.previewCache = nil
+	mv.previewPending = nil
+	mv.previewEpoch++
 	mv.updateAttachmentChips()
 }
 
@@ -1669,17 +1721,22 @@ func (mv *MainView) updateComposerStatus() {
 	}
 }
 
-func titled(title string, child tui.Widget) *widget.Border {
+// titled wraps child in a titled border themed from styles. Every overlay and
+// popup panel routes through here so their frames match the main-layout panels
+// (which use MainView.titled); passing an empty Styles falls back to the plain
+// border only when no theme is available.
+func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
 	b.SetTitle(title)
-	b.SetStyle(screen.Style{})
+	b.SetStyle(styles.Cell("panels.border"))
+	b.SetFocusStyle(styles.Cell("panels.focus"))
 	return b
 }
 
 func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
-	b := titled(title, child)
-	b.SetStyle(mv.styles.Cell("panels.border"))
-	b.SetFocusStyle(mv.styles.Cell("panels.focus"))
+	b := titled(mv.styles, title, child)
+	// Track for live re-theming on a runtime theme switch (overlays are recreated
+	// per open, so they need this only for the persistent main-layout panels).
 	mv.themedBorders = append(mv.themedBorders, b)
 	return b
 }

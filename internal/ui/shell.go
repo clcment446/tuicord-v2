@@ -82,7 +82,8 @@ type Shell struct {
 	popup          tui.Widget // small interactive layer drawn over current()
 	toasts         []*Toast
 	notifier       desktopNotifier
-	dispatch       func(func())
+	dispatch       func(func()) bool
+	notifyTimeout  time.Duration
 	post           func(func())
 	tryPost        func(func()) bool
 	unfocused      bool
@@ -151,9 +152,7 @@ func (s *Shell) OpenPluginOverlay(title string, lines []string) {
 		empty.SetStyle(textStyle)
 		rows = append(rows, empty)
 	}
-	border := titled(title, widget.Column(rows...))
-	border.SetStyle(s.styles.Cell("panels.border"))
-	border.SetFocusStyle(s.styles.Cell("panels.focus"))
+	border := titled(s.styles, title, widget.Column(rows...))
 	s.setIndependentOverlay(border)
 }
 
@@ -205,11 +204,70 @@ end run`
 	}
 }
 
+// maxConcurrentDesktopNotifications caps how many desktop-notifier calls run at
+// once. Each call may spawn an OS process (notify-send/osascript), so an
+// unfocused burst of pings must not spawn unbounded goroutines and processes.
+const maxConcurrentDesktopNotifications = 4
+
+// notifyDispatchTimeout bounds a single notifier.Notify call so a stalled
+// notify-send/osascript cannot hold its concurrency slot forever and
+// permanently saturate the cap. It is slightly longer than the notifier's own
+// process timeout so a well-behaved notifier reports its own error first.
+const notifyDispatchTimeout = desktopNotificationTimeout + time.Second
+
+// boundedNotificationDispatch runs notification work on a bounded set of
+// goroutines, reporting whether the work was accepted. Once the cap is
+// saturated it drops the work (returns false) rather than spawning one
+// goroutine (and OS process) per ping during a burst; the caller then falls
+// back to an in-app toast so the ping is never lost silently.
+func boundedNotificationDispatch() func(func()) bool {
+	sem := make(chan struct{}, maxConcurrentDesktopNotifications)
+	return func(fn func()) bool {
+		if fn == nil {
+			return false
+		}
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				fn()
+			}()
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+// notify runs the configured notifier with a hard timeout so a stalled notifier
+// process cannot block the dispatch goroutine (and hold its concurrency slot)
+// indefinitely. A timeout is reported as an error so the caller shows the in-app
+// toast fallback rather than losing the ping.
+func (s *Shell) notify(title, body string) error {
+	if s == nil || s.notifier == nil {
+		return errors.New("no desktop notifier configured")
+	}
+	timeout := s.notifyTimeout
+	if timeout <= 0 {
+		timeout = notifyDispatchTimeout
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.notifier.Notify(title, body) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		// The Notify goroutine leaks until its own process timeout releases it,
+		// but the slot is freed now so later notifications are not starved.
+		return fmt.Errorf("desktop notification timed out after %s", timeout)
+	}
+}
+
 // NewShell wraps a MainView with overlay handling.
 func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	mediaCfg := chatMediaConfig(cfg)
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: func(fn func()) { go fn() }, post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
+	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: boundedNotificationDispatch(), post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
 	if mediaCfg.Enabled && mediaCfg.Prefetch {
 		s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	}
@@ -272,6 +330,25 @@ func (s *Shell) SetActiveAccount(a *app.App) {
 	if s == nil || a == nil {
 		return
 	}
+	// Tear down transient per-account UI before rebinding. Overlays, popups, and
+	// the Vim editor interaction belong to the previous account; leaving them
+	// live could route a pending action or popup callback through the newly
+	// active account, or resume the composer for a channel that is no longer
+	// selected.
+	if closer, ok := s.overlay.(overlayCloser); ok {
+		closer.Close()
+	}
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+		s.viewerCancel = nil
+	}
+	if !s.videoRegion.Empty() {
+		s.teardownVideo()
+	}
+	s.overlay = nil
+	s.composerOverlay = nil
+	s.popup = nil
+	s.exitEditor(nil)
 	s.app = a
 }
 
@@ -1212,7 +1289,7 @@ func (s *Shell) Handle(ev tui.Event) bool {
 			s.pasteImage()
 			return true
 		case keyMatches(key, s.cfg.Keys.Help):
-			s.setIndependentOverlay(NewHelpOverlay(s.cfg))
+			s.setIndependentOverlay(NewHelpOverlay(s.cfg, s.styles))
 			return true
 		}
 	}
@@ -2181,7 +2258,7 @@ func (s *Shell) showNotification(title, detail string) {
 	s.toasts = append([]*Toast{toast}, s.toasts...)
 }
 
-func (s *Shell) showIncomingMessageToast(message store.Message, title, body string) {
+func (s *Shell) showIncomingMessageToast(message store.Message, title, body string, beforeNav func()) {
 	toast := newExpiringToast(title, body, s.styles, s.clock())
 	if message.ChannelID != 0 && s.mv != nil {
 		channelID := message.ChannelID
@@ -2190,6 +2267,12 @@ func (s *Shell) showIncomingMessageToast(message store.Message, title, body stri
 			// activated channel. Clear all actionable layers first.
 			s.popup = nil
 			s.closeOverlay()
+			// A background-account ping switches to its account first, so the
+			// channel is resolved against the account that actually received it
+			// rather than the currently active one.
+			if beforeNav != nil {
+				beforeNav()
+			}
 			s.mv.NavigateToChannel(channelID)
 		}
 	}
@@ -2199,6 +2282,14 @@ func (s *Shell) showIncomingMessageToast(message store.Message, title, body stri
 // NotifyIncomingMessage routes an incoming Discord ping to the desktop only
 // while this terminal window is unfocused; otherwise it becomes an in-app toast.
 func (s *Shell) NotifyIncomingMessage(message store.Message) {
+	s.notifyIncoming(message, nil)
+}
+
+// notifyIncoming shows a ping. beforeNav, when set, runs on the UI goroutine just
+// before the toast navigates — background-account pings pass their account switch
+// here so activation lands on the account that received the message rather than
+// the currently active one.
+func (s *Shell) notifyIncoming(message store.Message, beforeNav func()) {
 	if s == nil {
 		return
 	}
@@ -2212,35 +2303,44 @@ func (s *Shell) NotifyIncomingMessage(message store.Message) {
 	}
 	body = tuitext.Truncate(body, 240, tuitext.Ellipsis)
 	if s.unfocused && s.notifier != nil {
-		s.dispatchNotification(func() {
-			if err := s.notifier.Notify(title, body); err != nil {
-				s.postNotification(func() { s.showIncomingMessageToast(message, title, body) })
+		dispatched := s.dispatchNotification(func() {
+			if err := s.notify(title, body); err != nil {
+				s.postNotification(func() { s.showIncomingMessageToast(message, title, body, beforeNav) })
 			}
 		})
+		if !dispatched {
+			// The concurrency cap is saturated (a ping burst, or a hung notifier
+			// holding every slot). Never drop the ping silently: fall back to the
+			// in-app toast so the user still sees it.
+			s.postNotification(func() { s.showIncomingMessageToast(message, title, body, beforeNav) })
+		}
 		return
 	}
-	s.showIncomingMessageToast(message, title, body)
+	s.showIncomingMessageToast(message, title, body, beforeNav)
 }
 
 // NotifyAccountMessage notifies about a message that arrived on a background
 // (non-active) account, prefixing the sender with the account label so the user
 // can tell which account received it.
-func (s *Shell) NotifyAccountMessage(account string, message store.Message) {
+func (s *Shell) NotifyAccountMessage(account string, activate func(), message store.Message) {
 	if s == nil {
 		return
 	}
 	if account != "" {
 		message.Author = account + " · " + strings.TrimSpace(message.Author)
 	}
-	s.NotifyIncomingMessage(message)
+	s.notifyIncoming(message, activate)
 }
 
-func (s *Shell) dispatchNotification(fn func()) {
+// dispatchNotification runs fn on the bounded notification pool, reporting
+// whether it was accepted (true) or dropped because the pool is saturated
+// (false). A nil dispatch (tests) runs fn inline and always reports accepted.
+func (s *Shell) dispatchNotification(fn func()) bool {
 	if s != nil && s.dispatch != nil {
-		s.dispatch(fn)
-		return
+		return s.dispatch(fn)
 	}
 	fn()
+	return true
 }
 
 func (s *Shell) postNotification(fn func()) {

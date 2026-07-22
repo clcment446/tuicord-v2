@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/session"
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/ningen/v3"
@@ -324,6 +325,23 @@ type App struct {
 	unreadMu       sync.RWMutex
 	unreadChannels map[store.GuildID]map[store.ChannelID]UnreadStatus
 	guildUnread    map[store.GuildID]UnreadStatus
+	// readMarks is a UI-safe copy of Discord's per-channel read marker. Ningen's
+	// ReadState getter hands back an internal pointer whose fields the gateway
+	// mutates without a lock the reader can share, so deriving attention from it
+	// raced UI reads (localReadState, MarkRead) under the race detector. These
+	// markers are fed only from value copies (READY entries and read.UpdateEvent)
+	// under unreadMu, so no reader ever touches ningen's live struct.
+	readMarks map[store.ChannelID]readMark
+	// editApplied records, per message, the edit timestamp of the last REST edit
+	// response applied to the store. Two EditMessage REST calls can complete out
+	// of order; comparing against this makes them converge on the server's last
+	// write instead of whichever goroutine reaches the UI last. It is mutated only
+	// on the UI goroutine (inside EditMessage's Post), so it needs no lock.
+	editApplied map[store.ChannelID]map[store.MessageID]time.Time
+	// directoryRetryBackoff delays each self-retry of a directory load that was
+	// invalidated mid-flight. Zero uses defaultDirectoryRetryBackoff; tests set it
+	// small to keep the bounded-retry path fast.
+	directoryRetryBackoff time.Duration
 	// sessionID is the gateway session identifier from READY; Discord requires
 	// it on user-originated interaction payloads.
 	sessionID string
@@ -523,7 +541,9 @@ func (a *App) OnIncomingMessage(fn func(store.Message)) { a.onIncomingMessage = 
 func (a *App) OnError(fn func(error)) { a.onError = fn }
 
 // SetEventSink registers an optional consumer of client events (the plugin
-// system). Pass nil to detach.
+// system). Pass nil to detach. Call on the UI goroutine: emit runs only inside
+// Post closures, so swapping the sink there (e.g. on an account switch) cannot
+// race an in-flight emit.
 func (a *App) SetEventSink(sink EventSink) { a.events = sink }
 
 // emit forwards an event to the registered sink, if any. Safe to call with a
@@ -566,6 +586,9 @@ type directoryRequestSnapshot struct {
 	guilds      map[store.GuildID]uint64
 	channels    map[store.ChannelID]uint64
 	gateVersion uint64
+	// attempt counts how many times this directory load has already been retried
+	// after a mid-flight generation change, so the self-retry can be capped.
+	attempt int
 }
 
 // dmHydrationConcurrency bounds how many DM channel-detail requests run at once
@@ -646,21 +669,21 @@ func (a *App) channelUnread(channel store.ChannelID) (UnreadStatus, bool) {
 // It must never call ningen.ChannelIsUnread: with user-session/no-intent state,
 // that helper can synchronously fetch channel, guild, member, and role data.
 func (a *App) localReadState(channel store.ChannelID) (UnreadStatus, bool) {
-	if a == nil || a.handle == nil || a.handle.ReadState == nil || a.store == nil || channel == 0 {
+	if a == nil || a.store == nil || channel == 0 {
 		return Read, false
 	}
-	state := a.handle.ReadState.ReadState(discord.ChannelID(channel))
-	if state == nil {
+	mark, ok := a.lookupReadMark(channel)
+	if !ok {
 		return Read, false
 	}
-	if state.MentionCount > 0 {
+	if mark.mentions > 0 {
 		return Mentioned, true
 	}
 	if a.channelMutedLocal(channel) {
 		return Read, true
 	}
 	entry, ok := a.store.Channel(channel)
-	if ok && state.LastMessageID < discord.MessageID(entry.LastMessageID) {
+	if ok && mark.lastRead < discord.MessageID(entry.LastMessageID) {
 		return Unread, true
 	}
 	return Read, true
@@ -763,6 +786,7 @@ func (a *App) removeCachedReadState(channel store.ChannelID, guild store.GuildID
 	}
 	a.unreadMu.Lock()
 	defer a.unreadMu.Unlock()
+	delete(a.readMarks, channel)
 	if guild == 0 {
 		for candidate, channels := range a.unreadChannels {
 			if _, ok := channels[channel]; ok {
@@ -802,6 +826,74 @@ func (a *App) removeGuildReadState(guild store.GuildID) bool {
 	delete(a.unreadChannels, guild)
 	delete(a.guildUnread, guild)
 	return channels || aggregate
+}
+
+// readMark is the UI-safe subset of a channel's Discord read state: the last
+// acknowledged message (the read watermark) and the unread mention count.
+type readMark struct {
+	lastRead discord.MessageID
+	mentions int
+}
+
+// replaceReadMarks swaps the whole marker map after READY so a reconnect cannot
+// retain markers from the previous session's generation.
+func (a *App) replaceReadMarks(marks map[store.ChannelID]readMark) {
+	a.unreadMu.Lock()
+	a.readMarks = marks
+	a.unreadMu.Unlock()
+}
+
+// putReadMark records one channel's latest read marker from a value copy.
+func (a *App) putReadMark(channel store.ChannelID, mark readMark) {
+	if channel == 0 {
+		return
+	}
+	a.unreadMu.Lock()
+	if a.readMarks == nil {
+		a.readMarks = make(map[store.ChannelID]readMark)
+	}
+	a.readMarks[channel] = mark
+	a.unreadMu.Unlock()
+}
+
+// lookupReadMark returns a channel's read marker snapshot, if one is known.
+func (a *App) lookupReadMark(channel store.ChannelID) (readMark, bool) {
+	a.unreadMu.RLock()
+	mark, ok := a.readMarks[channel]
+	a.unreadMu.RUnlock()
+	return mark, ok
+}
+
+// readMarksFromReady snapshots READY's read-state entries into value copies.
+// Discord usually sends them as the `read_state` array (decoded into
+// e.ReadStates), but occasionally as a `read_state.entries` object, which
+// arikawa cannot decode into a slice; ningen mirrors this fallback. Parsing the
+// raw body ourselves keeps the snapshot race-free instead of reading ningen's
+// live pointers after it processed READY.
+func readMarksFromReady(e *gateway.ReadyEvent) map[store.ChannelID]readMark {
+	marks := make(map[store.ChannelID]readMark, len(e.ReadStates))
+	for _, rs := range e.ReadStates {
+		marks[store.ChannelID(rs.ChannelID)] = readMark{
+			lastRead: rs.LastMessageID,
+			mentions: rs.MentionCount,
+		}
+	}
+	if len(marks) == 0 && len(e.RawEventBody) > 0 {
+		var weird struct {
+			ReadState struct {
+				Entries []gateway.ReadState `json:"entries"`
+			} `json:"read_state"`
+		}
+		if json.Unmarshal(e.RawEventBody, &weird) == nil {
+			for _, rs := range weird.ReadState.Entries {
+				marks[store.ChannelID(rs.ChannelID)] = readMark{
+					lastRead: rs.LastMessageID,
+					mentions: rs.MentionCount,
+				}
+			}
+		}
+	}
+	return marks
 }
 
 // cacheReadState records one channel's latest attention state.
@@ -863,13 +955,13 @@ func (a *App) MarkRead(channel store.ChannelID, message store.MessageID) {
 	if latest, ok := a.store.Channel(channel); ok && latest.LastMessageID > message {
 		message = latest.LastMessageID
 	}
+	// Read positions never move backwards. The authoritative read watermark comes
+	// from the UI-safe marker snapshot rather than ningen's live pointer.
+	if mark, ok := a.lookupReadMark(channel); ok && store.MessageID(mark.lastRead) > message {
+		message = store.MessageID(mark.lastRead)
+	}
 	if a.handle != nil {
 		id := discord.ChannelID(channel)
-		if a.handle.ReadState != nil {
-			if state := a.handle.ReadState.ReadState(id); state != nil && store.MessageID(state.LastMessageID) > message {
-				message = store.MessageID(state.LastMessageID)
-			}
-		}
 		if latest := store.MessageID(a.handle.LastMessage(id)); latest > message {
 			message = latest
 		}

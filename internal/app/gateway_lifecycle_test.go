@@ -120,6 +120,41 @@ func TestGuildLifecycleUnavailableThenDelete(t *testing.T) {
 	}
 }
 
+func TestGuildCreatePrunesChannelsAndRolesDeletedWhileDisconnected(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.UpsertGuild(store.Guild{ID: 1, Name: "guild"})
+	a.store.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "kept"})
+	a.store.UpsertChannel(store.Channel{ID: 11, GuildID: 1, Name: "deleted-while-away"})
+	a.store.UpsertThread(store.Channel{ID: 12, GuildID: 1, ParentID: 10, Name: "thread"})
+	a.store.UpsertRole(1, store.Role{ID: 20, Name: "kept"})
+	a.store.UpsertRole(1, store.Role{ID: 21, Name: "deleted-role"})
+	a.cacheReadState(11, 1, Mentioned)
+
+	// A reconnect GUILD_CREATE re-sends the authoritative snapshot: channel 11 and
+	// role 21 are gone; the thread is absent (threads sync separately) but kept.
+	a.handleGuildCreate(&gateway.GuildCreateEvent{
+		Guild:    discord.Guild{ID: 1, Name: "guild", Roles: []discord.Role{{ID: 20, Name: "kept"}}},
+		Channels: []discord.Channel{{ID: 10, Type: discord.GuildText, Name: "kept"}},
+	})
+
+	if _, ok := a.store.Channel(11); ok {
+		t.Fatal("channel deleted while disconnected was retained")
+	}
+	if _, ok := a.store.Channel(10); !ok {
+		t.Fatal("live channel was pruned")
+	}
+	if _, ok := a.store.Channel(12); !ok {
+		t.Fatal("thread was pruned by the guild snapshot (threads sync separately)")
+	}
+	roleIDs := map[store.RoleID]bool{}
+	for _, r := range a.store.Roles(1) {
+		roleIDs[r.ID] = true
+	}
+	if roleIDs[21] || !roleIDs[20] {
+		t.Fatalf("roles after reconcile = %v, want only 20", roleIDs)
+	}
+}
+
 func TestGuildCreateRestoresUnavailableGuild(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.store.UpsertGuild(store.Guild{ID: 1, Name: "guild", Unavailable: true})

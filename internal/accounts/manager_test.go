@@ -33,6 +33,50 @@ func (f *fakeSurface) Notify(a *Account, _ store.Message) { f.notifies = append(
 func (f *fakeSurface) ShowError(_ *Account, err error)    { f.errors = append(f.errors, err) }
 func (f *fakeSurface) Badges(b []Badge)                   { f.lastBadges = b }
 
+// recordingSink records the account the currently-bound plugin events come from.
+type recordingSink struct{ events int }
+
+func (r *recordingSink) Emit(string, map[string]any) { r.events++ }
+
+// TestEventSinkFollowsActiveAccount proves plugin events are delivered only from
+// the active account, so a switch moves plugin observation to the new account.
+func TestEventSinkFollowsActiveAccount(t *testing.T) {
+	surf := &fakeSurface{}
+	sink := &recordingSink{}
+	seeds := []Seed{
+		{Key: "token", Label: "Alice", Ning: wrapState(t)},
+		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+	}
+	m := New(Options{
+		UI: tui.New(), Ctx: context.Background(), Surface: surf,
+		Persist: func(config.Accounts) {}, Seeds: seeds, Active: 0,
+		AutoConnect: false, EventSink: sink,
+	})
+	if err := m.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// Account 0 is active: SetActive emits "channel.switch", which reaches the sink.
+	a0 := m.Accounts()[0].App()
+	a0.SetActive(1, 1)
+	if sink.events == 0 {
+		t.Fatal("active account events did not reach the sink")
+	}
+
+	if err := m.Switch(1); err != nil {
+		t.Fatalf("Switch(1): %v", err)
+	}
+	before := sink.events
+	a0.SetActive(2, 2) // account 0 is now a background account: detached
+	if sink.events != before {
+		t.Fatal("background account events still reached the sink")
+	}
+	m.Accounts()[1].App().SetActive(3, 3) // newly active account: attached
+	if sink.events == before {
+		t.Fatal("newly active account events did not reach the sink")
+	}
+}
+
 // wrapState builds a ningen state around an offline fake session so app.New
 // works without any network. The connection is never opened in these tests.
 func wrapState(t *testing.T) *ningen.State {

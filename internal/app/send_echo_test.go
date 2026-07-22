@@ -55,6 +55,39 @@ func TestSendThenGatewayEchoReconciles(t *testing.T) {
 	}
 }
 
+// TestSendConfirmsFromRESTResponseWithoutGatewayEcho pins that a successful REST
+// send reconciles the optimistic echo from its own response, so the message does
+// not stay "pending" forever when the gateway MESSAGE_CREATE echo is missed.
+func TestSendConfirmsFromRESTResponseWithoutGatewayEcho(t *testing.T) {
+	// The REST response carries the created message; deliver reconciles the
+	// optimistic echo by the sent nonce, so the response's nonce is irrelevant.
+	fs := &fakeSender{sendResult: &discord.Message{ID: 99, ChannelID: 5, Content: "hello"}}
+	a := newTestApp(fs)
+	a.activeChannel = 5
+	a.SetActive(0, 5)
+	applied := make(chan struct{}, 1)
+	a.OnChange(func() {
+		select {
+		case applied <- struct{}{}:
+		default:
+		}
+	})
+
+	a.Send("hello")
+	<-applied // deliver's confirmation Post fired onChange
+
+	msgs := a.store.Messages(5)
+	if len(msgs) != 1 {
+		t.Fatalf("store holds %d messages, want 1 confirmed (no gateway echo arrived)", len(msgs))
+	}
+	if msgs[0].Pending {
+		t.Error("message still pending after the REST response confirmed it")
+	}
+	if msgs[0].ID != 99 {
+		t.Errorf("confirmed message ID = %d, want 99", msgs[0].ID)
+	}
+}
+
 // TestSendThenHistoryLoadKeepsPendingEcho pins the ordering hazard that made a
 // sent message vanish.
 //

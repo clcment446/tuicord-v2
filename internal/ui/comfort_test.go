@@ -87,7 +87,7 @@ func TestShellTogglesOverlays(t *testing.T) {
 	sh := &Shell{cfg: cfg}
 
 	// Open quick switcher directly (no app needed for toggle state).
-	sh.overlay = NewHelpOverlay(cfg)
+	sh.overlay = NewHelpOverlay(cfg, Styles{})
 	if sh.current() == nil || sh.overlay == nil {
 		t.Fatal("help overlay not set")
 	}

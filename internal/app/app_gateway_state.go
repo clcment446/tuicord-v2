@@ -116,12 +116,21 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	if e.UserSettings != nil {
 		folders = convertGuildFolders(e.UserSettings.GuildFolders)
 	}
+	// Snapshot READY's read markers synchronously (this handler runs on the
+	// socket loop after ningen's own sync READY handler). Ningen retains pointers
+	// into e.ReadStates and mutates them from later events, so we copy the values
+	// out now rather than reading them back on the UI goroutine.
+	readMarks := readMarksFromReady(e)
 	a.ui.Post(func() {
 		a.selfID = selfID
 		a.publishStateSnapshot()
 		a.sessionID = sessionID
 		a.store.SetNitro(hasNitro)
 		a.store.SetGuildFolders(folders)
+		// READY guilds are not reconciled here: a user-session READY does not
+		// reliably deliver the full guild/channel directory (hence the REST pull in
+		// connect), so pruning against it would drop live entities. Per-guild
+		// reconciliation happens on the authoritative GUILD_CREATE that follows.
 		for i := range guilds {
 			ingestGuild(a.store, &guilds[i])
 			a.markRolesLoaded(store.GuildID(guilds[i].ID))
@@ -139,6 +148,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		// READY is authoritative for the connection's read-state generation.
 		// Rebuild from the directory already in memory so startup is seeded and
 		// a reconnect cannot retain entries from the previous session.
+		a.replaceReadMarks(readMarks)
 		a.resetReadStateCache()
 		if a.onReady != nil {
 			a.onReady()
@@ -152,6 +162,10 @@ func (a *App) handleGuildCreate(e *gateway.GuildCreateEvent) {
 	a.ui.Post(func() {
 		ingestGuild(a.store, &guild)
 		if !guild.Unavailable {
+			// A fresh GUILD_CREATE (notably on reconnect) is the authoritative
+			// snapshot of this guild's channels and roles. Prune anything the store
+			// still holds that the snapshot dropped while we were disconnected.
+			a.reconcileGuildFromSnapshot(&guild)
 			a.markRolesLoaded(store.GuildID(guild.ID))
 			if len(guild.Channels) > 0 {
 				a.markChannelsLoaded(store.GuildID(guild.ID))
@@ -248,11 +262,19 @@ func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 		readStateChanged := a.removeCachedReadState(id, guildID)
 		for _, guild := range a.store.Guilds() {
 			for _, channel := range a.store.Channels(guild.ID) {
-				if channel.ID == id || channel.ParentID == id {
-					a.invalidateChannelLoads(channel.ID)
-					if channel.ParentID == id && a.removeCachedReadState(channel.ID, channel.GuildID) {
-						readStateChanged = true
-					}
+				if channel.ParentID != id {
+					continue
+				}
+				// Only threads are cascade-removed with their parent (see
+				// Store.RemoveChannel). A deleted category's child channels survive,
+				// re-parented to none, so their loads and unread cache must be kept:
+				// clearing them blanked live badges. Act only on thread children.
+				if channel.Thread == nil {
+					continue
+				}
+				a.invalidateChannelLoads(channel.ID)
+				if a.removeCachedReadState(channel.ID, channel.GuildID) {
+					readStateChanged = true
 				}
 			}
 		}
@@ -361,6 +383,61 @@ func (a *App) invalidateChannelLoads(id store.ChannelID) {
 	a.guildsGate.invalidate()
 }
 
+// reconcileGuildFromSnapshot prunes channels and roles the store still holds for
+// a guild that a fresh GUILD_CREATE snapshot no longer lists — entities deleted
+// while the client was disconnected, which never produce a delete event. Threads
+// are intentionally left alone: the guild snapshot carries only active threads,
+// so they are reconciled separately via THREAD_LIST_SYNC. A snapshot with no
+// channels is treated as partial and never prunes channels.
+func (a *App) reconcileGuildFromSnapshot(g *gateway.GuildCreateEvent) {
+	if a == nil || a.store == nil || g == nil || g.Unavailable {
+		return
+	}
+	guildID := store.GuildID(g.ID)
+	readStateChanged := false
+	if len(g.Channels) > 0 {
+		channels := make(map[store.ChannelID]struct{}, len(g.Channels))
+		for _, c := range g.Channels {
+			channels[store.ChannelID(c.ID)] = struct{}{}
+		}
+		for _, c := range a.store.Channels(guildID) {
+			if c.Thread != nil {
+				continue
+			}
+			if _, ok := channels[c.ID]; ok {
+				continue
+			}
+			a.invalidateChannelLoads(c.ID)
+			if a.removeCachedReadState(c.ID, guildID) {
+				readStateChanged = true
+			}
+			// RemoveChannel cascades this channel's child threads.
+			a.store.RemoveChannel(c.ID)
+		}
+	}
+	if len(g.Roles) > 0 {
+		roles := make(map[store.RoleID]struct{}, len(g.Roles))
+		for _, r := range g.Roles {
+			roles[store.RoleID(r.ID)] = struct{}{}
+		}
+		rolesInvalidated := false
+		for _, r := range a.store.Roles(guildID) {
+			if _, ok := roles[r.ID]; ok {
+				continue
+			}
+			if !rolesInvalidated {
+				a.invalidateRoleLoad(guildID)
+				rolesInvalidated = true
+			}
+			a.store.RemoveRole(guildID, r.ID)
+		}
+	}
+	if readStateChanged && a.onReadStateChange != nil {
+		a.onReadStateChange()
+	}
+	a.repairActiveChannel()
+}
+
 // repairActiveChannel clears a selection removed by channel or thread
 // lifecycle events. It must run on the UI goroutine after the store mutation.
 func (a *App) repairActiveChannel() {
@@ -394,7 +471,12 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		// Reconcile an optimistic local echo when possible; otherwise append.
 		appended := !a.store.ReplaceMessage(msg.Nonce, msg)
 		pingsSelf := a.messagePingsSelf(e.Message)
-		if appended {
+		if appended && a.store.HasMessage(msg.ChannelID, msg.ID) {
+			// The gateway can redeliver a MESSAGE_CREATE. It carries no nonce match,
+			// so it looks like a fresh append; appending would duplicate the message
+			// and double-count unread/pings. It is already stored — ignore it.
+			appended = false
+		} else if appended {
 			a.store.AppendMessage(msg)
 			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID {
 				a.store.IncrementUnread(msg.ChannelID)
@@ -577,6 +659,24 @@ func (a *App) handleReactionRemove(e *gateway.MessageReactionRemoveEvent) {
 			"channel_id": uint64(channel),
 			"message_id": uint64(id),
 			"user_id":    userID,
+			"emoji":      name,
+		})
+	})
+}
+
+func (a *App) handleReactionRemoveEmoji(e *gateway.MessageReactionRemoveEmojiEvent) {
+	channel := store.ChannelID(e.ChannelID)
+	id := store.MessageID(e.MessageID)
+	name := e.Emoji.Name
+	emojiID := uint64(e.Emoji.ID)
+	a.ui.Post(func() {
+		a.store.RemoveReactionEmoji(channel, id, name, emojiID)
+		if a.onChange != nil {
+			a.onChange()
+		}
+		a.emit("reaction.remove_emoji", map[string]any{
+			"channel_id": uint64(channel),
+			"message_id": uint64(id),
 			"emoji":      name,
 		})
 	})

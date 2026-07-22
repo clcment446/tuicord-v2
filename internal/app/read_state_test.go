@@ -83,16 +83,19 @@ func TestReadySeedsAndResetsReadStateCache(t *testing.T) {
 	st.UpsertChannel(store.Channel{ID: 99, GuildID: 8, Name: "old"})
 	a := &App{store: st, ui: syncPoster{}, handle: ning}
 
-	// Seed one effective mention and one authoritative read position. These are
-	// already in ningen when App receives READY in production.
-	ning.ReadState.MarkRead(42, 50)
-	ning.ReadState.MarkUnread(42, 60, 1)
-	ning.ReadState.MarkRead(43, 70)
+	// READY carries the connection's read markers: one effective mention and one
+	// authoritative read position. App snapshots these value copies instead of
+	// reading ningen's live pointers.
 	st.IncrementUnread(43)
 	st.IncrementPing(43)
 	a.cacheReadState(99, 8, Mentioned)
 
-	a.handleReady(&gateway.ReadyEvent{})
+	ready := &gateway.ReadyEvent{}
+	ready.ReadStates = []gateway.ReadState{
+		{ChannelID: 42, LastMessageID: 60, MentionCount: 1},
+		{ChannelID: 43, LastMessageID: 70},
+	}
+	a.handleReady(ready)
 
 	if got := a.GuildUnread(7); got != Mentioned {
 		t.Fatalf("READY-seeded guild status = %v, want mentioned", got)
@@ -205,6 +208,142 @@ func TestReadAcknowledgementClearsLocalPing(t *testing.T) {
 	}
 }
 
+func TestMuteSettingChangeRefreshesCachedBadges(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7, LastMessageID: 100})
+	changes := 0
+	a := &App{store: st, ui: syncPoster{}, handle: ning, onReadStateChange: func() { changes++ }}
+
+	// Channel 42 is unread (read watermark behind the latest message).
+	a.putReadMark(42, readMark{lastRead: 50})
+	a.resetReadStateCache()
+	if got := a.GuildUnread(7); got != Unread {
+		t.Fatalf("pre-mute status = %v, want unread", got)
+	}
+
+	// Mute the channel through ningen, then deliver the settings update to App.
+	event := &gateway.UserGuildSettingsUpdateEvent{UserGuildSetting: gateway.UserGuildSetting{
+		GuildID:          7,
+		ChannelOverrides: []gateway.UserChannelOverride{{ChannelID: 42, Muted: true}},
+	}}
+	// ningen registers its MutedState on the embedded state handler (the
+	// prehandler), so dispatch there. READY initializes the mute maps; the
+	// settings update then applies the mute before App recomputes.
+	ning.State.Handler.Call(&gateway.ReadyEvent{})
+	ning.State.Handler.Call(event)
+	a.handleGuildSettingsUpdate(event)
+
+	if got := a.GuildUnread(7); got != Read {
+		t.Fatalf("muted channel status = %v, want read", got)
+	}
+	if changes == 0 {
+		t.Fatal("mute change did not fire a read-state refresh")
+	}
+}
+
+func TestDMAckWithZeroGuildClearsSyntheticDMBadge(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: store.GuildID(DirectMessagesGuildID), Name: "Direct Messages"})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: DirectMessagesGuildID, Kind: store.ChannelDM})
+	st.IncrementUnread(42)
+	a := &App{store: st, ui: syncPoster{}, handle: ning}
+
+	// A DM is first observed as unread under the synthetic guild.
+	a.cacheReadState(42, DirectMessagesGuildID, Unread)
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Unread {
+		t.Fatalf("DM guild status = %v, want unread", got)
+	}
+
+	// The ack for a DM carries guild id 0; it must still clear the DM badge.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50},
+		GuildID:   0,
+		Unread:    false,
+	})
+
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Read {
+		t.Fatalf("DM guild status after ack = %v, want read", got)
+	}
+	if st.Unread(42) != 0 {
+		t.Fatalf("DM local unread survived ack: %d", st.Unread(42))
+	}
+}
+
+func TestReadAckAfterReadySurvivesReplaceReadMarks(t *testing.T) {
+	ui := &queuedPoster{}
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
+	a := &App{store: st, ui: ui}
+
+	// READY snapshots the connection's markers and enqueues replaceReadMarks.
+	ready := &gateway.ReadyEvent{}
+	ready.ReadStates = []gateway.ReadState{{ChannelID: 42, LastMessageID: 60}}
+	a.handleReady(ready)
+	// A live read ack for the same channel lands before READY's Post drains.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 90},
+		GuildID:   7,
+	})
+	// FIFO drain runs replaceReadMarks (from READY) before the ack's putReadMark, so
+	// the ack's newer watermark must survive rather than being wiped as a lost ack.
+	ui.run()
+
+	mark, ok := a.lookupReadMark(42)
+	if !ok || mark.lastRead != 90 {
+		t.Fatalf("read mark = %+v ok=%v, want lastRead 90 (the ack must survive READY)", mark, ok)
+	}
+}
+
+func TestLateReadAckDoesNotSynchronouslyResurrectDeletedMark(t *testing.T) {
+	ui := &queuedPoster{}
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
+	a := &App{store: st, ui: ui}
+	a.putReadMark(42, readMark{lastRead: 50})
+
+	// The channel is deleted; draining its Post drops the cached mark.
+	a.handleChannelDelete(&gateway.ChannelDeleteEvent{Channel: discord.Channel{ID: 42, GuildID: 7}})
+	ui.run()
+	if _, ok := a.lookupReadMark(42); ok {
+		t.Fatal("channel delete did not drop the read mark")
+	}
+
+	// A read ack for the just-deleted channel arrives late. Because putReadMark now
+	// runs on the UI queue rather than synchronously on the ingest goroutine, it
+	// cannot inject an orphaned mark ahead of the ordered delete cleanup.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 90},
+		GuildID:   7,
+	})
+	if _, ok := a.lookupReadMark(42); ok {
+		t.Fatal("late read ack synchronously resurrected a mark for the deleted channel")
+	}
+}
+
+func TestDMAckForUnhydratedChannelResolvesToDMGuild(t *testing.T) {
+	// The DM channel is not yet stored (still hydrating) when its ack arrives.
+	a := &App{store: store.New(0), ui: syncPoster{}}
+
+	// A DM ack carries guild id 0; with no store entry to resolve it, the update
+	// must still be routed to the synthetic DM guild rather than dropped.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50, MentionCount: 1},
+		GuildID:   0,
+	})
+
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Mentioned {
+		t.Fatalf("unhydrated DM ack guild status = %v, want mentioned under the DM guild", got)
+	}
+	if got := a.ChannelUnread(42); got != Mentioned {
+		t.Fatalf("unhydrated DM channel status = %v, want mentioned", got)
+	}
+}
+
 func TestReadStateCacheRemovedByDeletionPaths(t *testing.T) {
 	t.Run("channel and child thread", func(t *testing.T) {
 		a := newTestApp(&fakeSender{})
@@ -219,6 +358,25 @@ func TestReadStateCacheRemovedByDeletionPaths(t *testing.T) {
 
 		if got := a.GuildUnread(7); got != Read || a.store.GuildPings(7) != 0 {
 			t.Fatalf("status after parent delete = %v, local guild pings = %d; want read/0", got, a.store.GuildPings(7))
+		}
+	})
+
+	t.Run("category keeps surviving child channel unread", func(t *testing.T) {
+		a := newTestApp(&fakeSender{})
+		a.store.UpsertGuild(store.Guild{ID: 7})
+		a.store.UpsertChannel(store.Channel{ID: 50, GuildID: 7, Kind: store.ChannelCategory})
+		a.store.UpsertChannel(store.Channel{ID: 51, GuildID: 7, ParentID: 50, Kind: store.ChannelText})
+		a.cacheReadState(51, 7, Mentioned)
+
+		// Deleting a category does not delete its child channels (Discord re-parents
+		// them); their unread badge must survive.
+		a.handleChannelDelete(&gateway.ChannelDeleteEvent{Channel: discord.Channel{ID: 50, GuildID: 7}})
+
+		if _, ok := a.store.Channel(51); !ok {
+			t.Fatal("child channel was removed with its category")
+		}
+		if got := a.GuildUnread(7); got != Mentioned {
+			t.Fatalf("child unread after category delete = %v, want mentioned", got)
 		}
 	})
 
@@ -263,8 +421,10 @@ func TestMarkReadNeverMovesBehindAuthoritativeStateOrLatestChannel(t *testing.T)
 		t.Run(tt.name, func(t *testing.T) {
 			ning := appdiscord.WrapSession(session.New(""))
 			ning.ChannelSet(&discord.Channel{ID: 42, GuildID: 7, LastMessageID: tt.latest}, true)
-			ning.ReadState.MarkRead(42, tt.read)
 			a := &App{store: store.New(0), handle: ning}
+			// The read watermark App must not fall behind comes from its own marker
+			// snapshot, fed in production by READY and read.UpdateEvent value copies.
+			a.putReadMark(42, readMark{lastRead: tt.read})
 
 			a.MarkRead(42, 100)
 
