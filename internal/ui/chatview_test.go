@@ -741,6 +741,20 @@ func TestChatViewEscapeReturnsToNewestMessages(t *testing.T) {
 	}
 }
 
+func TestChatViewFocusNotifiesReadMessage(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	view.msgs = []store.Message{{ID: 42, ChannelID: 1}}
+	view.focusStops = []chatFocusStop{{msg: 1, messageKey: "42", key: "42"}}
+	var got store.Message
+	view.OnMessageFocus(func(message store.Message) { got = message })
+
+	view.setFocusStop(0)
+
+	if got.ID != 42 || got.ChannelID != 1 {
+		t.Fatalf("focused message callback = %+v, want message 42 in channel 1", got)
+	}
+}
+
 func TestChatViewPageKeysScrollByViewport(t *testing.T) {
 	st := store.New(0)
 	for i := 0; i < 10; i++ {

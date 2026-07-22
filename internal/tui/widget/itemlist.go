@@ -13,10 +13,11 @@ import (
 // trailing text (an unread count, a mention marker) drawn right-aligned. A zero
 // Style falls back to the list's default row or selected style.
 type Item struct {
-	Label   string
-	Badge   string
-	Style   screen.Style
-	Graphic *ItemGraphic
+	Label      string
+	Badge      string
+	Style      screen.Style
+	BadgeStyle screen.Style
+	Graphic    *ItemGraphic
 }
 
 // ItemGraphic is an optional 2-cell Kitty graphic drawn over the start of a row.
@@ -281,6 +282,9 @@ func (w *ItemList) drawRow(r screen.Region, y, index int) {
 	}
 	if badgeW > 0 && badgeW < r.Width() {
 		badgeStyle := w.badgeStyle
+		if item.BadgeStyle != (screen.Style{}) {
+			badgeStyle = item.BadgeStyle
+		}
 		if selected {
 			badgeStyle = w.selectedStyle
 		}

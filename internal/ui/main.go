@@ -702,10 +702,18 @@ func (mv *MainView) guildItem(row store.GuildRow) widget.Item {
 		label = "  " + row.Name
 	}
 	badge := ""
+	var kind serverBadgeKind
 	if mv.app != nil {
-		badge = unreadBadge(mv.app.Store().GuildPings(row.GuildID))
+		badge, kind = serverUnreadBadge(serverUnreadStatus(mv.app.GuildUnread(row.GuildID)))
 	}
-	return widget.Item{Label: label, Badge: badge}
+	item := widget.Item{Label: label, Badge: badge}
+	switch kind {
+	case serverUnreadBadgeKind:
+		item.BadgeStyle = mv.styles.Accent
+	case serverMentionBadge:
+		item.BadgeStyle = mv.styles.Error
+	}
+	return item
 }
 
 func (mv *MainView) guildRowIndex(id store.GuildID) int {

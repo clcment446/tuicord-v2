@@ -65,6 +65,7 @@ type ChatView struct {
 	lastRenderWidth         int
 	onMessageAction         func(rune, store.Message)
 	onMessageCopy           func([]store.Message)
+	onMessageFocus          func(store.Message)
 	// Inline video: onPlayVideo starts playback of a chat video in the given
 	// absolute cell region; onStopVideo tears the current playback down. The
 	// widget owns activation and the stop conditions; the Shell owns the player.
@@ -492,6 +493,9 @@ func (w *ChatView) OnMessageAction(fn func(rune, store.Message)) { w.onMessageAc
 
 // OnMessageCopy receives the messages selected through Vim visual mode.
 func (w *ChatView) OnMessageCopy(fn func([]store.Message)) { w.onMessageCopy = fn }
+
+// OnMessageFocus receives the message under the keyboard or mouse focus bar.
+func (w *ChatView) OnMessageFocus(fn func(store.Message)) { w.onMessageFocus = fn }
 
 // OnPlayVideo registers the callback that starts inline video playback. The
 // region is in absolute terminal cells.
@@ -2675,6 +2679,9 @@ func (w *ChatView) focusAtVisible(x, y int) {
 	w.focusedMessage = nextMessage
 	w.focusedMessageSet = true
 	w.focusedExplicit = true
+	if w.onMessageFocus != nil && nextMessage.ID != 0 {
+		w.onMessageFocus(nextMessage)
+	}
 	w.focusKey = stop.messageKey
 	if previous != w.focusKey {
 		w.activePickerSet = false
@@ -3128,6 +3135,9 @@ func (w *ChatView) setFocusStop(index int) {
 	w.focusKey = stop.messageKey
 	w.focusedMessageSet = true
 	w.focusedExplicit = true
+	if w.onMessageFocus != nil && nextMessage.ID != 0 {
+		w.onMessageFocus(nextMessage)
+	}
 	if previousMessage != w.focusKey {
 		w.activePickerSet = false
 		w.activePicker = componentAction{}

@@ -56,8 +56,8 @@ func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
 	mv := &MainView{app: a, state: &uistate.State{}, guildList: widget.NewItemList(nil), channelList: widget.NewItemList(nil)}
 	mv.rebuildGuilds()
 	mv.refreshChannels()
-	if got := mv.guildList.Items()[0].Badge; got != "2" {
-		t.Fatalf("server badge = %q, want 2", got)
+	if got := mv.guildList.Items()[0].Badge; got != serverUnreadDot {
+		t.Fatalf("server badge = %q, want %q", got, serverUnreadDot)
 	}
 	if got := mv.channelList.Items()[0].Badge; got != "2" {
 		t.Fatalf("channel badge = %q, want 2", got)
