@@ -650,10 +650,38 @@ func (mv *MainView) SetActiveAccount(a *app.App) {
 	if mv == nil || a == nil {
 		return
 	}
+	mv.resetAccountState()
 	mv.app = a
 	mv.chat.SetSource(a.Store(), a.ActiveChannel)
 	mv.lastActiveChannel = a.ActiveChannel()
 	mv.Refresh()
+}
+
+// resetAccountState drops per-account composer and forum state before rebinding
+// to a new account. Without this a reply/edit target, staged attachments, or a
+// forum view built against the previous account's store would leak across the
+// switch — a pending reply could be sent through the wrong Discord account.
+func (mv *MainView) resetAccountState() {
+	mv.composerMode = composerNormal
+	mv.composerTarget = store.Message{}
+	mv.replyMention = false
+	if mv.composer != nil {
+		mv.composer.SetValue("")
+	}
+	mv.clearAttachments()
+	// Forum views captured the previous account's store and bound app methods.
+	// Release their media and drop them so the next openForum rebuilds against
+	// the active account.
+	if mv.forumPreview != nil {
+		mv.forumPreview.CloseMedia()
+	}
+	mv.showChat()
+	mv.forumID = 0
+	mv.forumActive = false
+	mv.forumPreviewID = 0
+	mv.forumView = nil
+	mv.forumPreview = nil
+	mv.forumPreviewBox = nil
 }
 
 // rebuildGuilds rebuilds the guild rail rows (folders + guilds + pins) and keeps

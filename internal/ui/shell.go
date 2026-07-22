@@ -272,6 +272,25 @@ func (s *Shell) SetActiveAccount(a *app.App) {
 	if s == nil || a == nil {
 		return
 	}
+	// Tear down transient per-account UI before rebinding. Overlays, popups, and
+	// the Vim editor interaction belong to the previous account; leaving them
+	// live could route a pending action or popup callback through the newly
+	// active account, or resume the composer for a channel that is no longer
+	// selected.
+	if closer, ok := s.overlay.(overlayCloser); ok {
+		closer.Close()
+	}
+	if s.viewerCancel != nil {
+		s.viewerCancel()
+		s.viewerCancel = nil
+	}
+	if !s.videoRegion.Empty() {
+		s.teardownVideo()
+	}
+	s.overlay = nil
+	s.composerOverlay = nil
+	s.popup = nil
+	s.exitEditor(nil)
 	s.app = a
 }
 
