@@ -133,6 +133,7 @@ func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fake
 	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
 	p.queryText.SetStyle(styles.Cell("picker.query"))
 	p.queryText.SetWrap(false)
+	p.tabText.SetStyle(styles.Cell("picker"))
 	p.tabText.SetWrap(false)
 	p.hintText.SetStyle(styles.Cell("picker.hint"))
 	p.hintText.SetWrap(false)
@@ -142,9 +143,9 @@ func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fake
 	p.stickers = buildStickerEntries(st, active, nitro, fakeNitro)
 
 	p.body = widget.Column(
-		titled("Picker — type to search", p.queryText),
+		titled(styles, "Picker — type to search", p.queryText),
 		p.tabText,
-		titled("Results", p.list),
+		titled(styles, "Results", p.list),
 		p.hintText,
 	)
 	p.body.Children()[0].Layout().Basis = 3

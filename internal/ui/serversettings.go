@@ -45,7 +45,7 @@ func NewServerSettings(st *store.Store, guild store.GuildID, styles Styles, chan
 	tabs := widget.NewTabs([]widget.Tab{{Label: "Channels", Content: cl}, {Label: "Roles", Content: rl}})
 	tabs.SetStyle(styles.Cell("settings.tab"))
 	tabs.SetActiveStyle(styles.Cell("settings.tab.active"))
-	root := titled("Server settings · Enter options · ←/→ tabs · Esc close", tabs)
+	root := titled(styles, "Server settings · Enter options · ←/→ tabs · Esc close", tabs)
 	root.SetStyle(styles.Cell("panels.border"))
 	return &ServerSettings{tabs: tabs, root: root, node: layout.Node{Grow: 1}}
 }

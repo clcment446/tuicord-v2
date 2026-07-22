@@ -1721,17 +1721,22 @@ func (mv *MainView) updateComposerStatus() {
 	}
 }
 
-func titled(title string, child tui.Widget) *widget.Border {
+// titled wraps child in a titled border themed from styles. Every overlay and
+// popup panel routes through here so their frames match the main-layout panels
+// (which use MainView.titled); passing an empty Styles falls back to the plain
+// border only when no theme is available.
+func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
 	b.SetTitle(title)
-	b.SetStyle(screen.Style{})
+	b.SetStyle(styles.Cell("panels.border"))
+	b.SetFocusStyle(styles.Cell("panels.focus"))
 	return b
 }
 
 func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
-	b := titled(title, child)
-	b.SetStyle(mv.styles.Cell("panels.border"))
-	b.SetFocusStyle(mv.styles.Cell("panels.focus"))
+	b := titled(mv.styles, title, child)
+	// Track for live re-theming on a runtime theme switch (overlays are recreated
+	// per open, so they need this only for the persistent main-layout panels).
 	mv.themedBorders = append(mv.themedBorders, b)
 	return b
 }
