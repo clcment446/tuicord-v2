@@ -77,7 +77,7 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 		p.hint.SetContent(`fuzzy search · \server · \server#channel · ↑/↓ move · enter jump`)
 	}
 	p.entries = inlineEntries(st, active, activeChannel, nitro, fakeNitro, trigger)
-	p.body = widget.Column(titled(title, p.header), titled("Matches", p.list), p.hint)
+	p.body = widget.Column(titled(styles, title, p.header), titled(styles, "Matches", p.list), p.hint)
 	p.body.Children()[0].Layout().Basis = 3
 	p.body.Children()[0].Layout().Grow = 0
 	p.body.Children()[1].Layout().Grow = 1

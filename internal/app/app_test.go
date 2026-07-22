@@ -59,6 +59,9 @@ type fakeSender struct {
 	reacted              int
 	reaction             discord.APIEmoji
 	err                  error
+	sendResult           *discord.Message
+	editResult           *discord.Message
+	guildsHook           func()
 	done                 chan struct{}
 	history              []discord.Message
 	historyBefore        []discord.Message
@@ -93,6 +96,9 @@ func (f *fakeSender) SendMessageComplex(_ discord.ChannelID, data api.SendMessag
 	if f.done != nil {
 		close(f.done)
 	}
+	if f.sendResult != nil {
+		return f.sendResult, f.err
+	}
 	return &discord.Message{}, f.err
 }
 
@@ -103,6 +109,9 @@ func (f *fakeSender) EditText(_ discord.ChannelID, _ discord.MessageID, content 
 	f.mu.Unlock()
 	if f.done != nil {
 		close(f.done)
+	}
+	if f.editResult != nil {
+		return f.editResult, f.err
 	}
 	return &discord.Message{}, f.err
 }
@@ -195,6 +204,9 @@ func (f *fakeSender) Guilds(uint) ([]discord.Guild, error) {
 	f.mu.Lock()
 	f.guildsN++
 	f.mu.Unlock()
+	if f.guildsHook != nil {
+		f.guildsHook()
+	}
 	return append([]discord.Guild(nil), f.guilds...), f.guildsErr
 }
 
@@ -444,19 +456,118 @@ func TestEditMessageCallsREST(t *testing.T) {
 	}
 }
 
-func TestDeleteMessageWaitsForGatewayRemoval(t *testing.T) {
-	fs := &fakeSender{done: make(chan struct{})}
+func TestDeleteMessageRemovesOnRESTSuccess(t *testing.T) {
+	fs := &fakeSender{}
 	a := newTestApp(fs)
 	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "bye"})
+	applied := make(chan struct{})
+	a.OnChange(func() { close(applied) })
 
+	// The REST delete succeeding removes the message directly, so it disappears
+	// even if the MESSAGE_DELETE gateway echo is never delivered.
 	a.DeleteMessage(42, 9)
-	<-fs.done
-	if got := len(a.store.Messages(42)); got != 1 {
-		t.Fatalf("messages after REST delete = %d, want still cached before gateway echo", got)
-	}
-	a.handleMessageDelete(&gateway.MessageDeleteEvent{ID: 9, ChannelID: 42})
+	<-applied
 	if got := len(a.store.Messages(42)); got != 0 {
-		t.Fatalf("messages after gateway delete = %d, want 0", got)
+		t.Fatalf("messages after REST delete = %d, want 0 (removed without a gateway echo)", got)
+	}
+}
+
+func TestEditMessageAppliesRESTResponseContent(t *testing.T) {
+	fs := &fakeSender{editResult: &discord.Message{ID: 9, ChannelID: 42, Content: "authoritative"}}
+	a := newTestApp(fs)
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "original"})
+	applied := make(chan struct{})
+	a.OnChange(func() { close(applied) })
+
+	// The user typed "typed" but the store must reflect the server's committed body.
+	a.EditMessage(42, 9, "typed")
+	<-applied
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 || msgs[0].Content != "authoritative" {
+		t.Fatalf("edited content = %+v, want \"authoritative\" from the REST response", msgs)
+	}
+}
+
+func TestEditConfirmationsConvergeOnServerLastWrite(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "original"})
+
+	base := time.Now()
+	// Two edits complete REST out of order: the newer edit (base+1s) applies first,
+	// then the older edit (base) applies late. The store must keep the newer content
+	// rather than letting the last goroutine to reach the UI win.
+	a.applyEditConfirmation(42, 9, "second", base.Add(time.Second))
+	a.applyEditConfirmation(42, 9, "first", base)
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 {
+		t.Fatalf("store holds %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Content != "second" {
+		t.Fatalf("message content = %q, want \"second\" (server's last write must win)", msgs[0].Content)
+	}
+}
+
+func TestDeleteThenEditDoesNotResurrectMessage(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "bye"})
+
+	// The delete lands first, removing the message; a late edit confirmation for the
+	// removed message must not bring it back.
+	a.store.RemoveMessage(42, 9)
+	a.applyEditConfirmation(42, 9, "edited", time.Now())
+
+	if got := len(a.store.Messages(42)); got != 0 {
+		t.Fatalf("messages after delete-then-edit = %d, want 0 (edit must not resurrect)", got)
+	}
+}
+
+func TestDirectoryLoadRetryStormIsBounded(t *testing.T) {
+	fs := &fakeSender{guilds: []discord.Guild{{ID: 1, Name: "g"}}}
+	a := newTestApp(fs)
+	a.directoryRetryBackoff = time.Millisecond
+	// Every REST round trip mutates the store generation, so directorySnapshotCurrent
+	// rejects each completion and forces another retry — the storm the cap must stop.
+	var extra store.GuildID = 1000
+	fs.guildsHook = func() {
+		a.store.UpsertGuild(store.Guild{ID: extra, Name: "x"})
+		extra++
+	}
+	errCh := make(chan error, 1)
+	a.OnError(func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+
+	a.LoadGuilds(100)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errDirectoryUnsettled) {
+			t.Fatalf("directory retry error = %v, want errDirectoryUnsettled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("directory load retried without ever stopping (no error after the cap)")
+	}
+
+	// The gate is left unloaded so a later connect can retry, and REST was hit a
+	// bounded number of times, not forever.
+	a.resourceMu.Lock()
+	loaded := a.guildsGate.loaded
+	pending := a.guildsGate.pending
+	a.resourceMu.Unlock()
+	if loaded || pending {
+		t.Fatalf("directory gate loaded=%v pending=%v, want unloaded and not pending", loaded, pending)
+	}
+	fs.mu.Lock()
+	calls := fs.guildsN
+	fs.mu.Unlock()
+	if calls != maxDirectoryLoadRetries+1 {
+		t.Fatalf("guild REST calls = %d, want %d (initial + %d bounded retries)",
+			calls, maxDirectoryLoadRetries+1, maxDirectoryLoadRetries)
 	}
 }
 
@@ -763,6 +874,27 @@ func TestMessageCreateEventLoadsDiscordMessage(t *testing.T) {
 	member, ok := a.store.Member(1, 100)
 	if !ok || member.Name != "ali" || len(member.RoleIDs) != 1 || member.RoleIDs[0] != 200 {
 		t.Fatalf("message member = %+v,%v, want ali with role 200", member, ok)
+	}
+}
+
+func TestDuplicateMessageCreateDoesNotDoubleCount(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.SetActive(1, 42) // active channel differs from 43, so pings count
+
+	create := &gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 99, GuildID: 1, ChannelID: 43,
+		Author:  discord.User{ID: 100, Username: "alice"},
+		Content: "hello",
+	}}
+	a.handleMessageCreate(create)
+	// The gateway redelivers the same MESSAGE_CREATE (no nonce match).
+	a.handleMessageCreate(create)
+
+	if msgs := a.store.Messages(43); len(msgs) != 1 {
+		t.Fatalf("messages after duplicate = %d, want 1", len(msgs))
+	}
+	if got := a.store.Unread(43); got != 1 {
+		t.Fatalf("unread after duplicate = %d, want 1", got)
 	}
 }
 
@@ -1163,6 +1295,37 @@ func TestLoadGuildsLoadsDirectoryAndUsesSessionCache(t *testing.T) {
 	}
 	if !ready {
 		t.Fatal("OnReady was not called after REST directory load")
+	}
+}
+
+func TestDirectoryPartialFailureDoesNotMaskAsLoaded(t *testing.T) {
+	fs := &fakeSender{
+		guildsErr: errors.New("guilds endpoint down"),
+		dms: []discord.Channel{{
+			ID: 91, Type: discord.DirectMessage,
+			DMRecipients: []discord.User{{ID: 100, Username: "alice"}},
+		}},
+	}
+	a := newTestApp(fs)
+	errDone := make(chan error, 1)
+	a.OnError(func(err error) { errDone <- err })
+
+	a.LoadGuilds(100)
+	gotErr := <-errDone
+
+	if gotErr == nil {
+		t.Fatal("partial endpoint failure did not surface an error")
+	}
+	// The successful DM endpoint is still ingested.
+	if _, ok := a.store.Channel(91); !ok {
+		t.Fatal("successful DM endpoint data was not ingested")
+	}
+	// But a single success must not mask the guilds failure as a loaded directory.
+	a.resourceMu.Lock()
+	loaded := a.guildsGate.loaded
+	a.resourceMu.Unlock()
+	if loaded {
+		t.Fatal("directory marked loaded despite a failed endpoint")
 	}
 }
 

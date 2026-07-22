@@ -65,10 +65,11 @@ func (w *imagePreview) Draw(r screen.Region) {
 
 func (w *imagePreview) Handle(tui.Event) bool { return false }
 
-// buildImagePreview decodes an image file into a crisp, bounded thumbnail widget
+// decodeImagePreview decodes an image file into a crisp, bounded thumbnail widget
 // sized for the composer. It downscales to the exact display pixel budget so the
-// terminal renders it 1:1 rather than upscaling a tiny image.
-func (mv *MainView) buildImagePreview(path string) (*imagePreview, bool) {
+// terminal renders it 1:1 rather than upscaling a tiny image. It is pure (no
+// MainView access) so it can run off the UI goroutine.
+func decodeImagePreview(path string, cellW, cellH int, style screen.Style) (*imagePreview, bool) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, false
@@ -80,20 +81,94 @@ func (mv *MainView) buildImagePreview(path string) (*imagePreview, bool) {
 	}
 	b := img.Bounds()
 	cols, rows := fitMediaCells(b.Dx(), b.Dy(), composerPreviewMaxCols, composerPreviewMaxRows)
-	scaled := media.DownscaleToPixels(img, cols*mv.previewCellW, rows*mv.previewCellH)
+	scaled := media.DownscaleToPixels(img, cols*cellW, rows*cellH)
 	p := &imagePreview{
 		img:   scaled,
 		cols:  cols,
 		rows:  rows,
 		id:    stableImageID("composer-preview:" + path),
-		style: mv.styles.Cell("messages.content"),
+		style: style,
 	}
 	p.node.Basis = rows
 	return p, true
 }
 
+// requestImagePreview decodes and downscales one staged image off the UI thread,
+// then posts the finished thumbnail back and rebuilds the preview. Large images
+// previously decoded on the UI goroutine, stalling input while several were
+// staged. syncPreviewDecode makes the decode inline for tests that have no event
+// loop to drain the posted result.
+func (mv *MainView) requestImagePreview(path string) {
+	if mv == nil {
+		return
+	}
+	if mv.previewCache == nil {
+		mv.previewCache = map[string]*imagePreview{}
+	}
+	if mv.previewPending == nil {
+		mv.previewPending = map[string]bool{}
+	}
+	cellW, cellH := mv.previewCellW, mv.previewCellH
+	style := mv.styles.Cell("messages.content")
+	if mv.syncPreviewDecode {
+		if p, ok := decodeImagePreview(path, cellW, cellH, style); ok {
+			mv.previewCache[path] = p
+		}
+		return
+	}
+	if mv.app == nil || mv.previewPending[path] {
+		return
+	}
+	mv.previewPending[path] = true
+	// Capture the decode epoch so a clear/re-stage that reuses this temp path can
+	// invalidate this in-flight decode when it posts back (see applyDecodedPreview).
+	epoch := mv.previewEpoch
+	go func() {
+		p, ok := decodeImagePreview(path, cellW, cellH, style)
+		mv.app.Post(func() {
+			mv.applyDecodedPreview(path, epoch, p, ok)
+		})
+	}()
+}
+
+// applyDecodedPreview installs a thumbnail decoded off the UI thread, but only if
+// it is still current. A clearAttachments/re-stage between the decode's start and
+// this callback bumps previewEpoch; a mismatch means the decode is stale — the
+// temp path may have been reused for different bytes — so the result is discarded
+// without touching the pending guard or cache the fresh decode now owns. The
+// isStagedImage check still covers a plain unstage (send/clear) with no re-stage.
+func (mv *MainView) applyDecodedPreview(path string, epoch int, p *imagePreview, ok bool) {
+	if mv == nil {
+		return
+	}
+	if epoch != mv.previewEpoch {
+		return
+	}
+	delete(mv.previewPending, path)
+	if !ok || !mv.isStagedImage(path) {
+		return
+	}
+	if mv.previewCache == nil {
+		mv.previewCache = map[string]*imagePreview{}
+	}
+	mv.previewCache[path] = p
+	mv.updateComposerPreview()
+}
+
+// isStagedImage reports whether path is still a staged image attachment.
+func (mv *MainView) isStagedImage(path string) bool {
+	for _, a := range mv.attachments {
+		if a.path == path && isImageFilename(a.meta.Filename) {
+			return true
+		}
+	}
+	return false
+}
+
 // updateComposerPreview rebuilds the inline image thumbnails above the composer
 // from the staged image attachments and adjusts the composer's height to fit.
+// Thumbnails not yet decoded are requested off the UI thread and appear once
+// their decode posts back.
 func (mv *MainView) updateComposerPreview() {
 	if mv.composerPreview == nil {
 		return
@@ -101,7 +176,13 @@ func (mv *MainView) updateComposerPreview() {
 	var rows []tui.Widget
 	total := 0
 	for _, attachment := range mv.imageAttachments() {
-		p, ok := mv.buildImagePreview(attachment.path)
+		p, ok := mv.previewCache[attachment.path]
+		if !ok {
+			// Kick off the decode; async path shows it on a later rebuild, the sync
+			// (test) path populates the cache immediately.
+			mv.requestImagePreview(attachment.path)
+			p, ok = mv.previewCache[attachment.path]
+		}
 		if !ok {
 			continue
 		}

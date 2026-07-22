@@ -37,7 +37,7 @@ func NewPrompt(title, placeholder string, styles Styles, onSubmit func(string), 
 	p.input.SetPlaceholderStyle(styles.Cell("prompt.placeholder"))
 	p.input.SetCursorStyle(styles.Cell("prompt.cursor"))
 	p.input.OnSubmit(func(string) { p.confirm() })
-	p.body = widget.Column(titled(title, p.input))
+	p.body = widget.Column(titled(styles, title, p.input))
 	p.body.Children()[0].Layout().Basis = 3
 	p.body.Children()[0].Layout().Grow = 0
 	return p

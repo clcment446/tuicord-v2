@@ -171,3 +171,25 @@ func (r *ring) removeReaction(id MessageID, emojiName string, emojiID uint64, me
 	}
 	return false
 }
+
+// removeReactionEmoji drops the entire reaction entry for one emoji, regardless
+// of count. It backs MESSAGE_REACTION_REMOVE_EMOJI (a moderator clearing one
+// emoji from a message). Returns true when a matching entry was removed.
+func (r *ring) removeReactionEmoji(id MessageID, emojiName string, emojiID uint64, rev uint64) bool {
+	i, ok := r.indexByID(id)
+	if !ok {
+		return false
+	}
+	msg := &r.buf[i]
+	for j := range msg.Reactions {
+		rx := &msg.Reactions[j]
+		if rx.EmojiName != emojiName || rx.EmojiID != emojiID {
+			continue
+		}
+		msg.Reactions = append(msg.Reactions[:j], msg.Reactions[j+1:]...)
+		msg.rev = rev
+		r.rev = rev
+		return true
+	}
+	return false
+}

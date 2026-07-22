@@ -53,7 +53,7 @@ func NewQuickSwitcher(st *store.Store, styles Styles, onPick func(store.GuildID,
 	qs.input.OnChange(qs.applyFilter)
 	qs.input.OnSubmit(func(string) { qs.pick() })
 
-	qs.body = widget.Column(titled("Quick Switcher", qs.input), titled("Channels", qs.list))
+	qs.body = widget.Column(titled(styles, "Quick Switcher", qs.input), titled(styles, "Channels", qs.list))
 	qs.body.Children()[0].Layout().Basis = 3
 	qs.body.Children()[0].Layout().Grow = 0
 	qs.body.Children()[1].Layout().Grow = 1

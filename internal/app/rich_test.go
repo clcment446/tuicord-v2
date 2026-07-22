@@ -338,6 +338,27 @@ func TestReactionAddAndRemoveUpdateStore(t *testing.T) {
 	}
 }
 
+func TestReactionRemoveEmojiClearsOneEmoji(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{ID: 7, ChannelID: 3, Author: "alice"})
+	a.handleReactionAdd(&gateway.MessageReactionAddEvent{
+		ChannelID: 3, MessageID: 7, UserID: 1, Emoji: discord.Emoji{Name: "👍"},
+	})
+	a.handleReactionAdd(&gateway.MessageReactionAddEvent{
+		ChannelID: 3, MessageID: 7, UserID: 2, Emoji: discord.Emoji{Name: "🎉"},
+	})
+
+	// A moderator clears just the 👍 emoji; 🎉 remains untouched.
+	a.handleReactionRemoveEmoji(&gateway.MessageReactionRemoveEmojiEvent{
+		ChannelID: 3, MessageID: 7, Emoji: discord.Emoji{Name: "👍"},
+	})
+
+	got := a.store.Messages(3)[0].Reactions
+	if len(got) != 1 || got[0].EmojiName != "🎉" {
+		t.Fatalf("reactions after remove-emoji = %+v, want only 🎉", got)
+	}
+}
+
 func TestDiscordRoleGradientColorsDecodeFromJSON(t *testing.T) {
 	var role discord.Role
 	payload := []byte(`{"id":"7","name":"gradient","permissions":"0","position":1,"color":1122867,"colors":{"primary_color":1122867,"secondary_color":null,"tertiary_color":4478310}}`)

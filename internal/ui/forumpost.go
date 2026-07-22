@@ -36,7 +36,7 @@ func NewForumPostPrompt(tags []store.Tag, styles Styles, onSubmit func(string, s
 	p.body.SetCursorStyle(styles.Cell("forum.body.cursor"))
 	p.tagList.SetStyle(styles.Cell("forum.tags"))
 	p.tagList.SetSelectedStyle(styles.Cell("forum.tags.selected"))
-	p.root = widget.Column(titled("Title", p.title), titled("Body", p.body), titled("Tags — Space toggles", p.tagList), widget.NewText("Tab fields · Ctrl+Enter create · Esc cancel"))
+	p.root = widget.Column(titled(styles, "Title", p.title), titled(styles, "Body", p.body), titled(styles, "Tags — Space toggles", p.tagList), widget.NewText("Tab fields · Ctrl+Enter create · Esc cancel"))
 	p.root.Children()[0].Layout().Basis = 3
 	p.root.Children()[1].Layout().Basis = 3
 	p.root.Children()[2].Layout().Grow = 1

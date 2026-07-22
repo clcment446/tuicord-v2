@@ -3,9 +3,24 @@ package app
 
 import (
 	"awesomeProject/internal/store"
+	"errors"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"sync"
+	"time"
 )
+
+// Directory self-retry bounds. A guild/channel delete landing during each REST
+// round trip re-invalidates the directory generation; without a cap the load
+// would retry forever (REST livelock / rate-limit). maxDirectoryLoadRetries
+// bounds the self-retries, each spaced by defaultDirectoryRetryBackoff.
+const (
+	maxDirectoryLoadRetries      = 3
+	defaultDirectoryRetryBackoff = 250 * time.Millisecond
+)
+
+// errDirectoryUnsettled is surfaced when a directory load keeps being
+// invalidated by concurrent deletions until the retry budget is exhausted.
+var errDirectoryUnsettled = errors.New("directory load kept being invalidated by concurrent changes")
 
 // LoadRoles fetches role definitions for a guild once per session. READY and
 // GUILD_CREATE usually include roles, so this is primarily a guarded fallback.
@@ -69,31 +84,23 @@ func (a *App) loadGuilds(limit uint) {
 func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 	guilds, guildErr := a.dirs.Guilds(limit)
 	privateChannels, dmErr := a.dirs.PrivateChannels()
-	if guildErr != nil && dmErr != nil {
-		a.ui.Post(func() {
-			// Any deletion invalidates the directory gate. Do not let this old
-			// failure clear a newer request's pending state.
-			if !a.directorySnapshotCurrent(snapshot, nil, nil) {
-				a.finishGuildLoadVersion(snapshot.gateVersion, false)
-				return
-			}
-			a.finishGuildLoad(false)
-			if a.onError != nil {
-				a.onError(guildErr)
-			}
-		})
-		return
-	}
 	privateChannels = a.hydratePrivateChannels(privateChannels)
 	a.ui.Post(func() {
 		if !a.directorySnapshotCurrent(snapshot, guilds, privateChannels) {
 			// A returned guild/channel was deleted or replaced while this directory
-			// request (including DM detail hydration) was in flight. Finish only this
-			// gate version so a generation-only rejection remains retryable without
-			// disturbing a newer request after explicit invalidation.
-			a.finishGuildLoadVersion(snapshot.gateVersion, false)
+			// request (including DM detail hydration) was in flight. Finish only
+			// this gate version. finishGuildLoadVersion returns true when this gate
+			// version is still current, meaning the rejection was a generation
+			// change (a deletion mid-load) with no newer request to replace it —
+			// retry so the directory is not silently dropped. A false result means
+			// a newer request already supersedes this one. The retry is bounded and
+			// backed off so a delete landing on every round trip cannot livelock REST.
+			if a.finishGuildLoadVersion(snapshot.gateVersion, false) {
+				a.scheduleGuildLoadRetry(limit, snapshot.attempt)
+			}
 			return
 		}
+		// Ingest whatever each endpoint returned. A failed endpoint yields nil.
 		for _, guild := range guilds {
 			a.store.UpsertGuild(store.Guild{ID: store.GuildID(guild.ID), Name: guild.Name})
 		}
@@ -105,10 +112,55 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 			}
 			a.markChannelsLoaded(DirectMessagesGuildID)
 		}
+		if guildErr != nil || dmErr != nil {
+			// One endpoint succeeded and the other failed. A single success must not
+			// mask the other's failure as a fully loaded directory: leave the gate
+			// unloaded (retryable on the next connect/reconnect) and surface the
+			// error, exactly like a total failure.
+			a.finishGuildLoad(false)
+			if a.onError != nil {
+				if guildErr != nil {
+					a.onError(guildErr)
+				} else {
+					a.onError(dmErr)
+				}
+			}
+			return
+		}
 		a.finishGuildLoad(true)
 		if a.onReady != nil {
 			a.onReady()
 		}
+	})
+}
+
+// scheduleGuildLoadRetry re-runs a directory load that was invalidated by a
+// mid-flight generation change. It runs on the UI goroutine (from loadGuildsFrom's
+// Post). Rather than re-invoke synchronously, it reserves a fresh gate version,
+// snapshots the current generations, and re-issues after a short backoff with an
+// incremented attempt counter. Once the budget is spent it gives up: leave the
+// gate unloaded (retryable on the next connect) and surface a clear error.
+func (a *App) scheduleGuildLoadRetry(limit uint, attempt int) {
+	if attempt >= maxDirectoryLoadRetries {
+		a.finishGuildLoad(false)
+		if a.onError != nil {
+			a.onError(errDirectoryUnsettled)
+		}
+		return
+	}
+	version, ok := a.beginGuildLoad()
+	if !ok {
+		return
+	}
+	next := a.directoryRequestSnapshot()
+	next.gateVersion = version
+	next.attempt = attempt + 1
+	backoff := a.directoryRetryBackoff
+	if backoff <= 0 {
+		backoff = defaultDirectoryRetryBackoff
+	}
+	time.AfterFunc(backoff, func() {
+		a.loadGuildsFrom(limit, next)
 	})
 }
 
@@ -320,10 +372,14 @@ func (a *App) finishGuildLoad(ok bool) {
 	a.guildsGate.finish(ok)
 }
 
-func (a *App) finishGuildLoadVersion(version uint64, ok bool) {
+// finishGuildLoadVersion completes the given gate version and reports whether it
+// was still current. A false result means a newer request has superseded this
+// one; a true result on a discarded load means the data generation changed
+// mid-load with no replacement request, so the caller should retry.
+func (a *App) finishGuildLoadVersion(version uint64, ok bool) bool {
 	a.resourceMu.Lock()
 	defer a.resourceMu.Unlock()
-	a.guildsGate.finishVersion(version, ok)
+	return a.guildsGate.finishVersion(version, ok)
 }
 
 func (a *App) beginHistoryLoad(channel store.ChannelID) (uint64, bool) {

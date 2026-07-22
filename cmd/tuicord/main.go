@@ -109,7 +109,14 @@ func run() error {
 		registry = []uistate.Account{{Key: keyring.LegacyTokenKey}}
 		activeIdx = 0
 	}
+	if activeIdx < 0 || activeIdx >= len(registry) {
+		activeIdx = 0
+	}
 	activeKey := registry[activeIdx].Key
+	// Two registry rows with the same keyring key are the same token; keeping
+	// both would connect the account twice. Drop later duplicates and re-resolve
+	// the active row to its surviving position.
+	registry, activeIdx = dedupAccountRegistry(registry, activeKey)
 
 	warnStore := func(err error) {
 		fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
@@ -182,14 +189,24 @@ func run() error {
 		Seeds:       seeds,
 		Active:      activeIdx,
 		AutoConnect: true,
+		// The Manager binds this sink to whichever account is active, so plugins
+		// observe the active account rather than the launch account.
+		EventSink: luaManager,
 	})
 	surface.manager = accountManager
 	mv.SetAccountSelectHandler(func(i int) { _ = accountManager.Switch(i) })
 
 	// Attach the live Host only after App/MainView/Shell exist. Config keymaps and
 	// commands remain registered in the same manager; ordinary plugins now load
-	// according to the Lua-derived Config.
-	if errs := attachAndLoadPlugins(luaManager, orch, uiApp, shell, cfg, styles, activeTheme); len(errs) > 0 {
+	// according to the Lua-derived Config. Host actions resolve the active account
+	// at call time so a plugin acts through the currently selected account.
+	activeApp := func() *app.App {
+		if acc := accountManager.Active(); acc != nil {
+			return acc.App()
+		}
+		return nil
+	}
+	if errs := attachAndLoadPlugins(luaManager, activeApp, uiApp, shell, cfg, styles, activeTheme); len(errs) > 0 {
 		shell.ShowToast("Plugin load", pluginLoadError(errs))
 	}
 
@@ -223,7 +240,14 @@ func (u *uiSurface) Notify(a *accounts.Account, msg store.Message) {
 		u.shell.NotifyIncomingMessage(msg)
 		return
 	}
-	u.shell.NotifyAccountMessage(a.Label(), msg)
+	// Activating a background-account ping must switch to that account first, so
+	// the channel is resolved against the account that received the message.
+	target := a
+	u.shell.NotifyAccountMessage(a.Label(), func() {
+		if u.manager != nil {
+			_ = u.manager.SwitchTo(target)
+		}
+	}, msg)
 }
 
 func (u *uiSurface) ShowError(a *accounts.Account, err error) {
@@ -264,6 +288,32 @@ func accountErrorToast(a *accounts.Account, err error) (string, error) {
 func isGatewayAuthFailure(err error) bool {
 	var closeErr *ws.CloseEvent
 	return errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode
+}
+
+// dedupAccountRegistry drops registry rows that repeat an earlier account key,
+// keeping the first occurrence, and returns the deduped list along with the
+// index of activeKey within it (0 if the key is absent). Rows with an empty key
+// (the legacy single-account fallback) are never treated as duplicates.
+func dedupAccountRegistry(list []uistate.Account, activeKey string) ([]uistate.Account, int) {
+	seen := make(map[string]struct{}, len(list))
+	out := make([]uistate.Account, 0, len(list))
+	for _, a := range list {
+		if a.Key != "" {
+			if _, dup := seen[a.Key]; dup {
+				continue
+			}
+			seen[a.Key] = struct{}{}
+		}
+		out = append(out, a)
+	}
+	active := 0
+	for i, a := range out {
+		if a.Key == activeKey {
+			active = i
+			break
+		}
+	}
+	return out, active
 }
 
 func seedLegacyState(state *uistate.State, cfg config.Config) bool {

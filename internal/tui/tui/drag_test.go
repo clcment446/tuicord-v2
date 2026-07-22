@@ -80,6 +80,24 @@ func TestDragIgnoresRightButton(t *testing.T) {
 	}
 }
 
+func TestHandleWidgetMouseIgnoresRightButton(t *testing.T) {
+	op := &recordDragOp{}
+	var drag DragManager
+	w := &dragWidget{testWidget: *newTestWidget("floating", false), op: op}
+
+	// A transient widget (plugin viewport) must not start dragging on right-click.
+	if drag.HandleWidgetMouse(input.MouseEvent{X: 1, Y: 1, Btn: input.ButtonRight, Kind: input.MousePress}, w) {
+		t.Fatal("right button started a transient-widget drag")
+	}
+	if drag.Active() {
+		t.Fatal("drag is active after right button on transient widget")
+	}
+	// Sanity: the left button still starts the drag.
+	if !drag.HandleWidgetMouse(input.MouseEvent{X: 1, Y: 1, Btn: input.ButtonLeft, Kind: input.MousePress}, w) {
+		t.Fatal("left button did not start a transient-widget drag")
+	}
+}
+
 func TestTransientOverlayOwnsDragWithoutRootGeometry(t *testing.T) {
 	op := &recordDragOp{}
 	target := &dragWidget{testWidget: *newTestWidget("floating", false), op: op}

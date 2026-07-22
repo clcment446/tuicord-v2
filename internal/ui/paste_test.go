@@ -12,10 +12,14 @@ import (
 	"testing"
 	"time"
 
+	"awesomeProject/internal/app"
+	"awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
+
+	"github.com/diamondburned/arikawa/v3/session"
 )
 
 func writePNG(t *testing.T, path string, w, h int) {
@@ -64,10 +68,10 @@ func TestBuildImagePreview(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "big.png")
 	writePNG(t, path, 400, 300)
 
-	mv := &MainView{previewCellW: 8, previewCellH: 16, styles: Styles{}}
-	p, ok := mv.buildImagePreview(path)
+	style := Styles{}.Cell("messages.content")
+	p, ok := decodeImagePreview(path, 8, 16, style)
 	if !ok {
-		t.Fatal("buildImagePreview failed on a valid PNG")
+		t.Fatal("decodeImagePreview failed on a valid PNG")
 	}
 	// The thumbnail must fit the composer budget.
 	if p.cols < 1 || p.cols > composerPreviewMaxCols {
@@ -80,8 +84,8 @@ func TestBuildImagePreview(t *testing.T) {
 	if got := p.Measure(tui.Size{}); got.W != p.cols || got.H != p.rows {
 		t.Fatalf("Measure = %+v, want %dx%d", got, p.cols, p.rows)
 	}
-	if _, ok := mv.buildImagePreview(filepath.Join(t.TempDir(), "missing.png")); ok {
-		t.Fatal("buildImagePreview reported ok for a missing file")
+	if _, ok := decodeImagePreview(filepath.Join(t.TempDir(), "missing.png"), 8, 16, style); ok {
+		t.Fatal("decodeImagePreview reported ok for a missing file")
 	}
 }
 
@@ -94,9 +98,10 @@ func TestUpdateComposerPreviewTracksAttachments(t *testing.T) {
 		composerFiles:   widget.NewText(""),
 		composerPreview: widget.Column(),
 		composerNode:    &layout.Node{Basis: composerBaseBasis},
-		previewCellW:    8,
-		previewCellH:    16,
-		styles:          Styles{},
+		previewCellW:      8,
+		previewCellH:      16,
+		styles:            Styles{},
+		syncPreviewDecode: true,
 	}
 	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
 		t.Fatal(err)
@@ -107,6 +112,114 @@ func TestUpdateComposerPreviewTracksAttachments(t *testing.T) {
 	mv.clearAttachments()
 	if !mv.composerPreview.Layout().Hidden || mv.composerNode.Basis != composerBaseBasis {
 		t.Fatalf("preview not reset after clear: hidden=%v basis=%d", mv.composerPreview.Layout().Hidden, mv.composerNode.Basis)
+	}
+}
+
+// TestUpdateComposerPreviewDecodesOffUIThread proves the default path defers the
+// decode: after staging, the thumbnail is not yet cached (it is decoding on a
+// goroutine) and the path is marked pending.
+func TestUpdateComposerPreviewDecodesOffUIThread(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		app:             app.New(discord.WrapSession(session.New("")), store.New(0), tui.New()),
+		composerFiles:   widget.NewText(""),
+		composerPreview: widget.Column(),
+		composerNode:    &layout.Node{Basis: composerBaseBasis},
+		previewCellW:    8,
+		previewCellH:    16,
+		styles:          Styles{},
+		// syncPreviewDecode left false: production behavior.
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, cached := mv.previewCache[img]; cached {
+		t.Fatal("thumbnail was decoded synchronously on the UI thread")
+	}
+	if !mv.previewPending[img] {
+		t.Fatal("off-thread decode was not marked pending")
+	}
+}
+
+// TestStaleDecodeDroppedAfterClearAndRestage proves the epoch guard: an
+// off-thread decode that started before clearAttachments must not populate the
+// cache after the same temp path is re-staged, since its bytes may be from the
+// old file that once lived at that reused path. A fresh decode is issued instead.
+func TestStaleDecodeDroppedAfterClearAndRestage(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		app:             app.New(discord.WrapSession(session.New("")), store.New(0), tui.New()),
+		composerFiles:   widget.NewText(""),
+		composerPreview: widget.Column(),
+		composerNode:    &layout.Node{Basis: composerBaseBasis},
+		previewCellW:    8,
+		previewCellH:    16,
+		styles:          Styles{},
+	}
+	// Stage P: an async decode is now in flight at the current epoch.
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	staleEpoch := mv.previewEpoch
+	if !mv.previewPending[img] {
+		t.Fatal("staging did not launch an off-thread decode")
+	}
+
+	// Clear (bumps the epoch, drops the pending guard) then re-stage the SAME path.
+	mv.clearAttachments()
+	if mv.previewPending != nil && mv.previewPending[img] {
+		t.Fatal("clearAttachments left a stale pending guard for the reused path")
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if !mv.previewPending[img] {
+		t.Fatal("re-stage did not issue a fresh decode for the reused temp path")
+	}
+
+	// The original in-flight decode posts its (stale) result back. It must be
+	// dropped: caching it would show the OLD file's bytes for the reused path.
+	stale := &imagePreview{cols: 1, rows: 1}
+	mv.applyDecodedPreview(img, staleEpoch, stale, true)
+	if got := mv.previewCache[img]; got == stale {
+		t.Fatal("stale in-flight decode populated previewCache with the old image")
+	}
+
+	// The fresh decode (current epoch) still populates normally.
+	fresh := &imagePreview{cols: 2, rows: 2}
+	mv.applyDecodedPreview(img, mv.previewEpoch, fresh, true)
+	if got := mv.previewCache[img]; got != fresh {
+		t.Fatalf("fresh decode did not populate previewCache: got %v", got)
+	}
+}
+
+// TestSyncPreviewDecodePopulatesImmediately confirms the test decode seam still
+// caches inline with no event loop after the epoch-guard change.
+func TestSyncPreviewDecodePopulatesImmediately(t *testing.T) {
+	dir := t.TempDir()
+	img := filepath.Join(dir, "a.png")
+	writePNG(t, img, 200, 120)
+
+	mv := &MainView{
+		composerFiles:     widget.NewText(""),
+		composerPreview:   widget.Column(),
+		composerNode:      &layout.Node{Basis: composerBaseBasis},
+		previewCellW:      8,
+		previewCellH:      16,
+		styles:            Styles{},
+		syncPreviewDecode: true,
+	}
+	if err := mv.StageTempImage(img, "a.png", 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mv.previewCache[img]; !ok {
+		t.Fatal("sync decode did not populate previewCache immediately")
 	}
 }
 
