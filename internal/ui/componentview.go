@@ -3,6 +3,7 @@ package ui
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,36 +13,32 @@ import (
 )
 
 type componentAction struct {
-	shortcut     rune
+	message      store.Message
+	defaults     []string
+	options      []store.ComponentOption
 	customID     string
 	label        string
 	controlLabel string
-	kind         store.ComponentKind
+	value        string
+	url          string
 	rawType      int
+	kind         store.ComponentKind
+	shortcut     rune
 	disabled     bool
 	expandable   bool
 	option       bool
 	multi        bool
-	value        string
-	defaults     []string
-	options      []store.ComponentOption
-	url          string
-	message      store.Message
 }
 
 func (a componentAction) key() string {
 	key := a.controlKey()
 	if a.option {
-		key += fmt.Sprintf(":option:%s:%s", a.value, a.label)
+		key += ":option:" + a.value + ":" + a.label
 	}
 	return key
 }
 
 func (a componentAction) controlKey() string {
-	id := fmt.Sprintf("%d", a.message.ID)
-	if a.message.ID == 0 {
-		id = "pending:" + a.message.Nonce
-	}
 	target := a.customID
 	if target == "" {
 		target = a.url
@@ -49,12 +46,26 @@ func (a componentAction) controlKey() string {
 	if target == "" {
 		target = a.label
 	}
-	return fmt.Sprintf("%d:%s:%d:%s", a.message.ChannelID, id, a.kind, target)
+	var buf [96]byte
+	out := strconv.AppendUint(buf[:0], uint64(a.message.ChannelID), 10)
+	out = append(out, ':')
+	if a.message.ID != 0 {
+		out = strconv.AppendUint(out, uint64(a.message.ID), 10)
+	} else {
+		out = append(out, "pending:"...)
+		out = append(out, a.message.Nonce...)
+	}
+	out = append(out, ':')
+	out = strconv.AppendInt(out, int64(a.kind), 10)
+	out = append(out, ':')
+	out = append(out, target...)
+	return string(out)
 }
 
 type componentHit struct {
-	start, end int
 	action     componentAction
+	key        string
+	start, end int
 }
 
 // ComponentAction is the public description of the last component the user
@@ -334,7 +345,7 @@ func (w *ChatView) renderComponentControls(ctx *componentRenderContext, m store.
 		style := w.componentControlStyle(node, action, base)
 		line.segments = append(line.segments, chatSegment{text: chip, style: style})
 		if !action.disabled && chipWidth > 0 {
-			line.actions = append(line.actions, componentHit{start: x, end: x + chipWidth, action: action})
+			line.actions = append(line.actions, componentHit{key: action.key(), action: action, start: x, end: x + chipWidth})
 		}
 		x += chipWidth
 		if expandedNow {
@@ -437,9 +448,10 @@ func (w *ChatView) renderComponentOptions(ctx *componentRenderContext, m store.M
 		start := text.Width(frame.prefix)
 		if text.Width(content) > 0 {
 			line.actions = append(line.actions, componentHit{
+				key:    action.key(),
+				action: action,
 				start:  start,
 				end:    start + text.Width(content),
-				action: action,
 			})
 		}
 		lines = append(lines, line)

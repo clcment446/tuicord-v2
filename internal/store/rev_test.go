@@ -134,6 +134,7 @@ func TestMessageRevBumpsOnEveryMutator(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := seed()
 			before := firstMessage(t, s, channel).Rev()
+			beforeChannel := s.MsgRev(channel)
 
 			tc.apply(t, s)
 
@@ -152,7 +153,34 @@ func TestMessageRevBumpsOnEveryMutator(t *testing.T) {
 					"stamp a fresh revision renders stale output undetectably",
 					after, tc.name, before)
 			}
+			if got := s.MsgRev(channel); got <= beforeChannel {
+				t.Errorf("MsgRev = %d after %s, want > %d", got, tc.name, beforeChannel)
+			}
 		})
+	}
+}
+
+func TestMsgRevBumpsOnRemove(t *testing.T) {
+	s := New(0)
+	s.AppendMessage(Message{ID: 1, ChannelID: 1})
+	before := s.MsgRev(1)
+	if !s.RemoveMessage(1, 1) {
+		t.Fatal("RemoveMessage reported no match")
+	}
+	if got := s.MsgRev(1); got <= before {
+		t.Fatalf("MsgRev = %d after remove, want > %d", got, before)
+	}
+}
+
+func TestMsgsIntoReusesCapacity(t *testing.T) {
+	s := New(0)
+	s.AppendMessage(Message{ID: 1, ChannelID: 1})
+	s.AppendMessage(Message{ID: 2, ChannelID: 1})
+	dst := make([]Message, 0, 2)
+	base := &dst[:cap(dst)][0]
+	got := s.MsgsInto(1, dst)
+	if len(got) != 2 || &got[0] != base {
+		t.Fatal("MsgsInto did not reuse destination capacity")
 	}
 }
 
