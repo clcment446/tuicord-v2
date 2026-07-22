@@ -176,6 +176,7 @@ tuicord.configure({
     tty_colors = false,
     role_gradients = false,
     role_gradient_animations = false,
+    no_animations_over_ssh = false,
     sticky_anchor = true,
   },
   accessibility = {
