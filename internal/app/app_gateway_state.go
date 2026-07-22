@@ -463,7 +463,12 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 		// Reconcile an optimistic local echo when possible; otherwise append.
 		appended := !a.store.ReplaceMessage(msg.Nonce, msg)
 		pingsSelf := a.messagePingsSelf(e.Message)
-		if appended {
+		if appended && a.store.HasMessage(msg.ChannelID, msg.ID) {
+			// The gateway can redeliver a MESSAGE_CREATE. It carries no nonce match,
+			// so it looks like a fresh append; appending would duplicate the message
+			// and double-count unread/pings. It is already stored — ignore it.
+			appended = false
+		} else if appended {
 			a.store.AppendMessage(msg)
 			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID {
 				a.store.IncrementUnread(msg.ChannelID)
