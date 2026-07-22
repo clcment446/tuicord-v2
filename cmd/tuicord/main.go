@@ -109,7 +109,14 @@ func run() error {
 		registry = []uistate.Account{{Key: keyring.LegacyTokenKey}}
 		activeIdx = 0
 	}
+	if activeIdx < 0 || activeIdx >= len(registry) {
+		activeIdx = 0
+	}
 	activeKey := registry[activeIdx].Key
+	// Two registry rows with the same keyring key are the same token; keeping
+	// both would connect the account twice. Drop later duplicates and re-resolve
+	// the active row to its surviving position.
+	registry, activeIdx = dedupAccountRegistry(registry, activeKey)
 
 	warnStore := func(err error) {
 		fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
@@ -274,6 +281,32 @@ func accountErrorToast(a *accounts.Account, err error) (string, error) {
 func isGatewayAuthFailure(err error) bool {
 	var closeErr *ws.CloseEvent
 	return errors.As(err, &closeErr) && closeErr.Code == gatewayAuthFailedCode
+}
+
+// dedupAccountRegistry drops registry rows that repeat an earlier account key,
+// keeping the first occurrence, and returns the deduped list along with the
+// index of activeKey within it (0 if the key is absent). Rows with an empty key
+// (the legacy single-account fallback) are never treated as duplicates.
+func dedupAccountRegistry(list []uistate.Account, activeKey string) ([]uistate.Account, int) {
+	seen := make(map[string]struct{}, len(list))
+	out := make([]uistate.Account, 0, len(list))
+	for _, a := range list {
+		if a.Key != "" {
+			if _, dup := seen[a.Key]; dup {
+				continue
+			}
+			seen[a.Key] = struct{}{}
+		}
+		out = append(out, a)
+	}
+	active := 0
+	for i, a := range out {
+		if a.Key == activeKey {
+			active = i
+			break
+		}
+	}
+	return out, active
 }
 
 func seedLegacyState(state *uistate.State, cfg config.Config) bool {
