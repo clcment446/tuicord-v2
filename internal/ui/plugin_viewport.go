@@ -19,7 +19,6 @@ type pluginViewport struct {
 	onAction  func(string)
 	textStyle screen.Style
 	border    screen.Style
-	collapsed bool
 	last      screen.Rect
 }
 
@@ -44,7 +43,7 @@ func (p *pluginViewport) Draw(r screen.Region) {
 	}
 	p.modal.Draw(r)
 	p.last = p.modal.Bounds(tui.Size{W: r.Width(), H: r.Height()})
-	if p.last.W < 3 || p.last.H < 3 {
+	if p.last.W < 3 || p.last.H < 1 {
 		return
 	}
 	for y := p.last.Y + 1; y < p.last.Y+p.last.H-1; y++ {
@@ -53,11 +52,11 @@ func (p *pluginViewport) Draw(r screen.Region) {
 		}
 	}
 	toggle := "[−]"
-	if p.collapsed {
+	if p.modal.Collapsed() {
 		toggle = "[+]"
 	}
 	p.drawText(r, p.last.X+p.last.W-4, p.last.Y, toggle, p.border)
-	if p.collapsed {
+	if p.modal.Collapsed() {
 		return
 	}
 	maxLines := max(0, p.last.H-4)
@@ -105,10 +104,10 @@ func (p *pluginViewport) Handle(ev tui.Event) bool {
 		return false
 	}
 	if mouse.Y == p.last.Y && mouse.X >= p.last.X+p.last.W-4 {
-		p.collapsed = !p.collapsed
+		p.modal.SetCollapsed(!p.modal.Collapsed())
 		return true
 	}
-	if p.collapsed || mouse.Y != p.last.Y+p.last.H-2 {
+	if p.modal.Collapsed() || mouse.Y != p.last.Y+p.last.H-2 {
 		return true
 	}
 	x := p.last.X + 1
@@ -139,7 +138,7 @@ func (p *pluginViewport) DragStart(x, y int) (tui.DragOp, bool) {
 }
 
 func (p *pluginViewport) ResizeStart(x, y int) (tui.DragOp, bool) {
-	if p == nil || p.modal == nil || p.collapsed {
+	if p == nil || p.modal == nil || p.modal.Collapsed() {
 		return nil, false
 	}
 	return p.modal.ResizeStart(x, y)

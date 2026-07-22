@@ -17,6 +17,7 @@ type Modal struct {
 	screenH        int
 	last           screen.Rect
 	explicitOrigin bool
+	collapsed      bool
 	style          screen.Style
 	node           layout.Node
 }
@@ -62,6 +63,17 @@ func (w *Modal) SetSize(width, height int) {
 	w.h = maxInt(height, 2)
 }
 
+// SetCollapsed reduces the modal to its title bar while retaining its
+// configured size for expansion.
+func (w *Modal) SetCollapsed(collapsed bool) {
+	if w != nil {
+		w.collapsed = collapsed
+	}
+}
+
+// Collapsed reports whether the modal is currently reduced to its title bar.
+func (w *Modal) Collapsed() bool { return w != nil && w.collapsed }
+
 // SetPosition sets the modal top-left position in cells.
 func (w *Modal) SetPosition(x, y int) {
 	if w == nil {
@@ -93,6 +105,9 @@ func (w *Modal) Bounds(avail tui.Size) screen.Rect {
 	}
 	width := minInt(w.w, maxInt(avail.W, 0))
 	height := minInt(w.h, maxInt(avail.H, 0))
+	if w.collapsed {
+		height = minInt(1, maxInt(avail.H, 0))
+	}
 	x := w.x
 	y := w.y
 	if !w.explicitOrigin {

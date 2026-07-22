@@ -73,3 +73,26 @@ func TestPluginViewportDragKeepsMovedPositionAfterRender(t *testing.T) {
 		t.Fatalf("viewport y after refresh = %d, want preserved %d", got, want)
 	}
 }
+
+func TestPluginViewportCollapseShrinksBoundsAndStopsClaimingOldArea(t *testing.T) {
+	runtime, shell, _, _ := newVimFocusHarness(t, vimTestConfig())
+	shell.OpenPluginViewport("AutoBot", []string{"running", "still running"}, nil, nil)
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+	viewport := shell.popup.(*pluginViewport)
+	start := viewport.last
+
+	if !runtime.Handle(input.MouseEvent{X: start.X + start.W - 2, Y: start.Y, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("collapse press was not handled")
+	}
+	runtime.Render(shell, tui.Size{W: 80, H: 24})
+
+	if got, want := viewport.last.H, 1; got != want {
+		t.Fatalf("collapsed viewport height = %d, want %d", got, want)
+	}
+	if got, want := viewport.last.W, start.W; got != want {
+		t.Fatalf("collapsed viewport width = %d, want preserved %d", got, want)
+	}
+	if shell.OverlayAt(start.X+1, start.Y+start.H-1) != nil {
+		t.Fatal("collapsed viewport still claimed its old content area")
+	}
+}
