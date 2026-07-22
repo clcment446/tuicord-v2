@@ -5,9 +5,32 @@ import (
 
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
+	"github.com/diamondburned/ningen/v3/states/read"
 )
 
 func (a *App) registerGatewayLifecycleHandlers() {
+	a.handle.AddHandler(func(e *gateway.ChannelUnreadUpdateEvent) {
+		if a.handle.ReadState != nil {
+			for _, update := range e.ChannelUnreadUpdates {
+				a.handle.ReadState.MarkUnread(update.ID, update.LastMessageID, 0)
+			}
+		}
+		a.ui.Post(func() {
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
+	a.handle.AddHandler(func(e *read.UpdateEvent) {
+		// Ningen updates its read state before forwarding this event. Refresh
+		// both sidebars so server dots change immediately after an ack or
+		// CHANNEL_UNREAD_UPDATE.
+		a.ui.Post(func() {
+			if a.onChange != nil {
+				a.onChange()
+			}
+		})
+	})
 	a.handle.AddHandler(func(e *gateway.ReadyEvent) {
 		a.handleReady(e)
 	})

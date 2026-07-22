@@ -224,6 +224,11 @@ func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel
 	mv.SetLocalCommandHandler(s.runLocalCommand)
 	mv.SetChannelChangeHandler(s.channelChanged)
 	mv.chat.OnMessageAction(s.handleMessageAction)
+	mv.chat.OnMessageFocus(func(msg store.Message) {
+		if s.app != nil {
+			s.app.MarkRead(msg.ChannelID, msg.ID)
+		}
+	})
 	// ForumView is created lazily; MainView invokes this hook when it exists.
 	return s
 }
@@ -1170,6 +1175,9 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	}
 
 	if isKey {
+		if key.Key == input.KeyEsc && s.mv != nil && s.editor.phase == editorNormal && s.mv.composerMode == composerNormal && s.app != nil {
+			s.app.MarkChannelRead(s.app.ActiveChannel())
+		}
 		switch {
 		case s.cfg.Accessibility.VimNavigation && keyMatches(key, vimKey(s.cfg.Keys.Vim.ExitInput, "esc")) && s.editor.phase == editorInput:
 			s.leaveInputMode()

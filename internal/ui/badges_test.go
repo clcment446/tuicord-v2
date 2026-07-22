@@ -58,3 +58,23 @@ func TestChannelPrefixBadgeDMEmpty(t *testing.T) {
 		t.Errorf("text prefix = %q, want %q", got, "# ")
 	}
 }
+
+func TestServerUnreadBadgeUsesMentionPrecedence(t *testing.T) {
+	cases := []struct {
+		status serverUnreadStatus
+		want   string
+	}{
+		{serverRead, ""},
+		{serverUnread, serverUnreadDot},
+		{serverMentioned, serverUnreadDot},
+	}
+	for _, tc := range cases {
+		badge, kind := serverUnreadBadge(tc.status)
+		if badge != tc.want {
+			t.Errorf("serverUnreadBadge(%v) = %q, want %q", tc.status, badge, tc.want)
+		}
+		if tc.status == serverMentioned && kind != serverMentionBadge {
+			t.Errorf("mention status kind = %v, want mention", kind)
+		}
+	}
+}

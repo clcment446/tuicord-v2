@@ -2,6 +2,35 @@ package ui
 
 import "awesomeProject/internal/store"
 
+const serverUnreadDot = "●"
+
+type serverUnreadStatus uint8
+
+const (
+	serverRead serverUnreadStatus = iota
+	serverUnread
+	serverMentioned
+)
+
+type serverBadgeKind uint8
+
+const (
+	noServerBadge serverBadgeKind = iota
+	serverUnreadBadgeKind
+	serverMentionBadge
+)
+
+func serverUnreadBadge(status serverUnreadStatus) (string, serverBadgeKind) {
+	switch status {
+	case serverMentioned:
+		return serverUnreadDot, serverMentionBadge
+	case serverUnread:
+		return serverUnreadDot, serverUnreadBadgeKind
+	default:
+		return "", noServerBadge
+	}
+}
+
 // This file holds the pure channel-badge selection used by the sidebar. It maps
 // a channel's kind (and its rules-channel status) to the small glyph shown
 // before the name. Keeping it pure — kind + rules flag in, string out — makes
