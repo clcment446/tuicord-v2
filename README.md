@@ -26,8 +26,11 @@ and [`examples/plugins/README.md`](examples/plugins/README.md).
 Existing Lua files without `configure` continue to use defaults. When only a
 legacy `config.toml` exists, tuicord uses it and `colors.conf` for that launch,
 atomically generates an equivalent Lua migration, and leaves both legacy files
-untouched. Machine-managed accounts and auth-mode preference live in
-`~/.local/state/tuicord/ui.toml`; tokens remain in the OS keyring.
+untouched. Background GIF and role-gradient animations are disabled by default
+when an SSH session is detected; set `display.no_animations_over_ssh = false`
+in `tuicord.configure` to opt out. Machine-managed accounts and auth-mode
+preference live in `~/.local/state/tuicord/ui.toml`; tokens remain in the OS
+keyring.
 
 ## Testing
 

@@ -30,7 +30,7 @@ func TestLoadUsesXDGConfigHomeAndCreatesLuaFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read generated config: %v", err)
 	}
-	for _, want := range []string{"tuicord.configure", "tuicord.theme", "palette =", "styles =", "tuicord.use_theme"} {
+	for _, want := range []string{"tuicord.configure", "tuicord.theme", "palette =", "styles =", "no_animations_over_ssh = true", "tuicord.use_theme"} {
 		if !strings.Contains(string(template), want) {
 			t.Errorf("generated config.lua missing %q", want)
 		}
@@ -72,6 +72,9 @@ func TestLegacyTOMLMigratesAtomicallyWithoutExecutingOrRemovingInputs(t *testing
 	if !startup.Legacy || startup.ExecuteLua || cfg.Layout.ChannelsWidth != 37 || cfg.Colors.Accent != "#123456" {
 		t.Fatalf("legacy startup/cfg = %+v / %+v", startup, cfg)
 	}
+	if !cfg.Display.NoAnimationsOverSSH {
+		t.Fatal("legacy config without no_animations_over_ssh did not inherit the safe default")
+	}
 	if cfg.ColorOverrides == nil || !cfg.ColorOverrides.HasOverride("messages.author") {
 		t.Fatal("legacy colors.conf was not loaded")
 	}
@@ -79,7 +82,7 @@ func TestLegacyTOMLMigratesAtomicallyWithoutExecutingOrRemovingInputs(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"tuicord.configure", "channels_width = 37", "legacy-migrated", "messages.author", "tuicord.use_theme"} {
+	for _, want := range []string{"tuicord.configure", "channels_width = 37", "no_animations_over_ssh = true", "legacy-migrated", "messages.author", "tuicord.use_theme"} {
 		if !strings.Contains(string(generated), want) {
 			t.Errorf("migration missing %q", want)
 		}
@@ -111,6 +114,20 @@ func TestPrimaryAndLegacyPaths(t *testing.T) {
 		if got != filepath.Join(dir, AppName, check.base) {
 			t.Errorf("path = %q, want %s", got, check.base)
 		}
+	}
+}
+
+func TestGeneratedLegacyTOMLUsesSafeSSHAnimationDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := writeDefault(path); err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(contents), "no_animations_over_ssh = true") {
+		t.Fatalf("generated config.toml has unsafe SSH animation policy")
 	}
 }
 
