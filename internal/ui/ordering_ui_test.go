@@ -190,6 +190,9 @@ func TestOpenGuildMenuLabels(t *testing.T) {
 	if !bufferContains(buf, "Pin server") {
 		t.Fatal("unpinned guild menu should offer Pin server")
 	}
+	if !bufferContains(buf, "Create group") {
+		t.Fatal("server menu should offer Create group")
+	}
 	sh.closePopup()
 
 	sh.openGuildMenu(store.GuildRow{Folder: true, Name: "Work"}, 2, 1)

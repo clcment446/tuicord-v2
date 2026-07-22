@@ -44,12 +44,16 @@ type ItemList struct {
 	onSelect      func(int)
 	onHover       func(int)
 	onVimFocus    func(bool) bool
+	canDrag       func(int) bool
+	onDrag        func(int, int) int
+	onDrop        func(int, int)
 	vimNavigation bool
 	node          layout.Node
 	viewH         int
 
 	contextIndex int
 	contextSet   bool
+	dragItems    []Item
 }
 
 // NewItemList returns a list containing items.
@@ -166,6 +170,15 @@ func (w *ItemList) OnVimFocus(fn func(forward bool) bool) {
 	}
 }
 
+func (w *ItemList) SetDrag(can func(int) bool, drag func(int, int) int, drop func(int, int)) {
+	if w == nil {
+		return
+	}
+	w.canDrag = can
+	w.onDrag = drag
+	w.onDrop = drop
+}
+
 // SetVimNavigation opts this list into j/k and h/l navigation.
 func (w *ItemList) SetVimNavigation(enabled bool) {
 	if w != nil {
@@ -235,7 +248,11 @@ func (w *ItemList) Draw(r screen.Region) {
 }
 
 func (w *ItemList) drawRow(r screen.Region, y, index int) {
-	item := w.items[index]
+	items := w.items
+	if w.dragItems != nil {
+		items = w.dragItems
+	}
+	item := items[index]
 	selected := index == w.selected
 	rowStyle := w.style
 	if item.Style != (screen.Style{}) {
@@ -353,11 +370,7 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 			if index < 0 || index >= len(w.items) {
 				return false
 			}
-			same := index == w.selected
-			w.SetSelected(index)
-			if same && w.onSelect != nil {
-				w.onSelect(index)
-			}
+			w.click(index)
 			return true
 		case input.MouseWheel:
 			switch ev.Btn {
@@ -371,6 +384,88 @@ func (w *ItemList) Handle(ev tui.Event) bool {
 		}
 	}
 	return false
+}
+
+func (w *ItemList) DragStart(x, y int) (tui.DragOp, bool) {
+	if w == nil || w.onDrop == nil || x < 0 || y < 0 {
+		return nil, false
+	}
+	index := w.offset + y
+	if index < 0 || index >= len(w.items) || w.canDrag != nil && !w.canDrag(index) {
+		return nil, false
+	}
+	drag := &listDrag{list: w, from: index, to: index, visual: index, startY: y, offset: w.offset, selected: w.selected}
+	drag.items = append([]Item(nil), w.items...)
+	w.dragItems = dragItems(drag.items, index, index)
+	return drag, true
+}
+
+func (w *ItemList) click(index int) {
+	same := index == w.selected
+	w.SetSelected(index)
+	if same && w.onSelect != nil {
+		w.onSelect(index)
+	}
+}
+
+type listDrag struct {
+	list     *ItemList
+	from     int
+	to       int
+	visual   int
+	startY   int
+	offset   int
+	selected int
+	moved    bool
+	items    []Item
+}
+
+func (d *listDrag) DragMove(dx, dy int) {
+	if d == nil || d.list == nil || len(d.list.items) == 0 {
+		return
+	}
+	if dx != 0 || dy != 0 {
+		d.moved = true
+	}
+	d.to = clampInt(d.offset+d.startY+dy, 0, len(d.list.items)-1)
+	d.visual = d.to
+	if d.list.onDrag != nil {
+		d.visual = d.list.onDrag(d.from, d.to)
+	}
+	d.visual = clampInt(d.visual, 0, len(d.list.items)-1)
+	d.list.dragItems = dragItems(d.items, d.from, d.visual)
+	d.list.SetSelectedSilent(d.visual)
+}
+
+func (d *listDrag) DragEnd(commit bool) {
+	if d == nil || d.list == nil {
+		return
+	}
+	d.list.dragItems = nil
+	if !commit {
+		d.list.SetSelectedSilent(d.selected)
+		return
+	}
+	if !d.moved {
+		d.list.click(d.from)
+		return
+	}
+	if d.list.onDrop != nil {
+		d.list.onDrop(d.from, d.to)
+	}
+}
+
+func dragItems(items []Item, from, to int) []Item {
+	out := append([]Item(nil), items...)
+	item := out[from]
+	if from < to {
+		copy(out[from:to], out[from+1:to+1])
+	} else if from > to {
+		copy(out[to+1:from+1], out[to:from])
+	}
+	item.Label = "> " + item.Label
+	out[to] = item
+	return out
 }
 
 // TakeContext returns and clears the row index most recently right-clicked. The

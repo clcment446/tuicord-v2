@@ -74,7 +74,7 @@ func (d *DragManager) HandleMouse(ev input.MouseEvent, hits HitIndex) bool {
 			return true
 		}
 	}
-	if ev.Kind != input.MousePress {
+	if ev.Kind != input.MousePress || ev.Btn != input.ButtonLeft {
 		return false
 	}
 	path := hits.Path(ev.X, ev.Y)
