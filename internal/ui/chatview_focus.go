@@ -267,8 +267,17 @@ func (w *ChatView) moveFocus(delta int) {
 	stop := w.focusStops[next]
 	start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
 	end := min(start+w.viewportHeight, w.renderLineCount)
-	if stop.line < start || stop.line >= end {
-		w.bottomScroll.SetOffset(max(w.renderLineCount-w.viewportHeight-stop.line-1, 0))
+	// The offset is measured from the bottom: line L is the top visible row when
+	// offset == renderLineCount-viewportHeight-L, and the bottom visible row when
+	// offset == renderLineCount-1-L. The old formula used one-less-than-top, which
+	// left the target one row above the viewport — hence the "scrolls one past"
+	// bug. Reveal a target above the viewport at the top and one below at the
+	// bottom; SetOffset clamps the result.
+	switch {
+	case stop.line < start:
+		w.bottomScroll.SetOffset(w.renderLineCount - w.viewportHeight - stop.line)
+	case stop.line >= end:
+		w.bottomScroll.SetOffset(w.renderLineCount - 1 - stop.line)
 	}
 }
 
