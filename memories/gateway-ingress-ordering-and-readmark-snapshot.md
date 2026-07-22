@@ -27,6 +27,18 @@ scope: internal/app
   `read.UpdateEvent` (embeds a value copy). Pruned in `removeCachedReadState`,
   rebuilt via `replaceReadMarks` on READY.
 
+## ningen's two handlers (non-obvious)
+
+`ningen.State` embeds BOTH `*state.State` (whose session Handler is the
+"prehandler") AND its own `*handler.Handler`. ningen's per-state handlers
+(MutedState, ReadState, ...) register on the prehandler; a forwarding sync
+handler on the prehandler calls `ningen.Handler.Call(v)`. `a.handle.AddSyncHandler`
+resolves to the depth-1 embedded `ningen.Handler`, so OUR app handlers live there
+and run (in order) when the prehandler forwards. In tests, dispatch state-level
+events (READY, USER_GUILD_SETTINGS_UPDATE) via `ning.State.Handler.Call(ev)` to
+reach ningen's prehandlers; `ning.Call(ev)` only hits ningen.Handler. Mute maps
+are nil until a READY is dispatched.
+
 ## Gotchas
 
 - ningen does NOT emit `read.UpdateEvent` for READY-seeded states, only for

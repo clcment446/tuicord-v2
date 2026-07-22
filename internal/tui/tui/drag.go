@@ -105,7 +105,9 @@ func (d *DragManager) HandleMouse(ev input.MouseEvent, hits HitIndex) bool {
 // the retained hit index. The component decides whether the press hit its drag
 // or resize handle; callers never duplicate that geometry.
 func (d *DragManager) HandleWidgetMouse(ev input.MouseEvent, w Widget) bool {
-	if d == nil || w == nil || d.op != nil || ev.Kind != input.MousePress {
+	// Only the left button starts a drag, matching HandleMouse. Without this a
+	// right-click press on a transient widget (a plugin viewport) began dragging.
+	if d == nil || w == nil || d.op != nil || ev.Kind != input.MousePress || ev.Btn != input.ButtonLeft {
 		return false
 	}
 	var op DragOp
