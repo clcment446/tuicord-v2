@@ -82,7 +82,8 @@ type Shell struct {
 	popup          tui.Widget // small interactive layer drawn over current()
 	toasts         []*Toast
 	notifier       desktopNotifier
-	dispatch       func(func())
+	dispatch       func(func()) bool
+	notifyTimeout  time.Duration
 	post           func(func())
 	tryPost        func(func()) bool
 	unfocused      bool
@@ -210,14 +211,22 @@ end run`
 // unfocused burst of pings must not spawn unbounded goroutines and processes.
 const maxConcurrentDesktopNotifications = 4
 
+// notifyDispatchTimeout bounds a single notifier.Notify call so a stalled
+// notify-send/osascript cannot hold its concurrency slot forever and
+// permanently saturate the cap. It is slightly longer than the notifier's own
+// process timeout so a well-behaved notifier reports its own error first.
+const notifyDispatchTimeout = desktopNotificationTimeout + time.Second
+
 // boundedNotificationDispatch runs notification work on a bounded set of
-// goroutines, dropping work once the cap is saturated rather than spawning one
-// goroutine (and OS process) per ping during a burst.
-func boundedNotificationDispatch() func(func()) {
+// goroutines, reporting whether the work was accepted. Once the cap is
+// saturated it drops the work (returns false) rather than spawning one
+// goroutine (and OS process) per ping during a burst; the caller then falls
+// back to an in-app toast so the ping is never lost silently.
+func boundedNotificationDispatch() func(func()) bool {
 	sem := make(chan struct{}, maxConcurrentDesktopNotifications)
-	return func(fn func()) {
+	return func(fn func()) bool {
 		if fn == nil {
-			return
+			return false
 		}
 		select {
 		case sem <- struct{}{}:
@@ -225,8 +234,34 @@ func boundedNotificationDispatch() func(func()) {
 				defer func() { <-sem }()
 				fn()
 			}()
+			return true
 		default:
+			return false
 		}
+	}
+}
+
+// notify runs the configured notifier with a hard timeout so a stalled notifier
+// process cannot block the dispatch goroutine (and hold its concurrency slot)
+// indefinitely. A timeout is reported as an error so the caller shows the in-app
+// toast fallback rather than losing the ping.
+func (s *Shell) notify(title, body string) error {
+	if s == nil || s.notifier == nil {
+		return errors.New("no desktop notifier configured")
+	}
+	timeout := s.notifyTimeout
+	if timeout <= 0 {
+		timeout = notifyDispatchTimeout
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.notifier.Notify(title, body) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(timeout):
+		// The Notify goroutine leaks until its own process timeout releases it,
+		// but the slot is freed now so later notifications are not starved.
+		return fmt.Errorf("desktop notification timed out after %s", timeout)
 	}
 }
 
@@ -2270,11 +2305,17 @@ func (s *Shell) notifyIncoming(message store.Message, beforeNav func()) {
 	}
 	body = tuitext.Truncate(body, 240, tuitext.Ellipsis)
 	if s.unfocused && s.notifier != nil {
-		s.dispatchNotification(func() {
-			if err := s.notifier.Notify(title, body); err != nil {
+		dispatched := s.dispatchNotification(func() {
+			if err := s.notify(title, body); err != nil {
 				s.postNotification(func() { s.showIncomingMessageToast(message, title, body, beforeNav) })
 			}
 		})
+		if !dispatched {
+			// The concurrency cap is saturated (a ping burst, or a hung notifier
+			// holding every slot). Never drop the ping silently: fall back to the
+			// in-app toast so the user still sees it.
+			s.postNotification(func() { s.showIncomingMessageToast(message, title, body, beforeNav) })
+		}
 		return
 	}
 	s.showIncomingMessageToast(message, title, body, beforeNav)
@@ -2293,12 +2334,15 @@ func (s *Shell) NotifyAccountMessage(account string, activate func(), message st
 	s.notifyIncoming(message, activate)
 }
 
-func (s *Shell) dispatchNotification(fn func()) {
+// dispatchNotification runs fn on the bounded notification pool, reporting
+// whether it was accepted (true) or dropped because the pool is saturated
+// (false). A nil dispatch (tests) runs fn inline and always reports accepted.
+func (s *Shell) dispatchNotification(fn func()) bool {
 	if s != nil && s.dispatch != nil {
-		s.dispatch(fn)
-		return
+		return s.dispatch(fn)
 	}
 	fn()
+	return true
 }
 
 func (s *Shell) postNotification(fn func()) {

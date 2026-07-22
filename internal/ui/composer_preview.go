@@ -120,18 +120,39 @@ func (mv *MainView) requestImagePreview(path string) {
 		return
 	}
 	mv.previewPending[path] = true
+	// Capture the decode epoch so a clear/re-stage that reuses this temp path can
+	// invalidate this in-flight decode when it posts back (see applyDecodedPreview).
+	epoch := mv.previewEpoch
 	go func() {
 		p, ok := decodeImagePreview(path, cellW, cellH, style)
 		mv.app.Post(func() {
-			delete(mv.previewPending, path)
-			// The attachment may have been unstaged (sent/cleared) while decoding.
-			if !ok || !mv.isStagedImage(path) {
-				return
-			}
-			mv.previewCache[path] = p
-			mv.updateComposerPreview()
+			mv.applyDecodedPreview(path, epoch, p, ok)
 		})
 	}()
+}
+
+// applyDecodedPreview installs a thumbnail decoded off the UI thread, but only if
+// it is still current. A clearAttachments/re-stage between the decode's start and
+// this callback bumps previewEpoch; a mismatch means the decode is stale — the
+// temp path may have been reused for different bytes — so the result is discarded
+// without touching the pending guard or cache the fresh decode now owns. The
+// isStagedImage check still covers a plain unstage (send/clear) with no re-stage.
+func (mv *MainView) applyDecodedPreview(path string, epoch int, p *imagePreview, ok bool) {
+	if mv == nil {
+		return
+	}
+	if epoch != mv.previewEpoch {
+		return
+	}
+	delete(mv.previewPending, path)
+	if !ok || !mv.isStagedImage(path) {
+		return
+	}
+	if mv.previewCache == nil {
+		mv.previewCache = map[string]*imagePreview{}
+	}
+	mv.previewCache[path] = p
+	mv.updateComposerPreview()
 }
 
 // isStagedImage reports whether path is still a staged image attachment.

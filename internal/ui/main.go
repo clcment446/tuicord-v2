@@ -76,6 +76,11 @@ type MainView struct {
 	// for the same path. Both are UI-goroutine-owned.
 	previewCache        map[string]*imagePreview
 	previewPending      map[string]bool
+	// previewEpoch is bumped whenever attachments are cleared/reset. An in-flight
+	// off-thread decode captures the epoch at request time; if it no longer matches
+	// when the decode posts back, the result is stale (its temp path may have been
+	// reused for different bytes) and is discarded rather than cached.
+	previewEpoch int
 	// syncPreviewDecode forces inline thumbnail decoding for tests with no event
 	// loop; production leaves it false so decodes run off the UI goroutine.
 	syncPreviewDecode bool
@@ -1578,8 +1583,13 @@ func (mv *MainView) clearAttachments() {
 	}
 	mv.attachments = nil
 	// Drop decoded thumbnails so a re-staged temp path cannot reuse a stale image
-	// and memory is released. In-flight decodes see isStagedImage return false.
+	// and memory is released. Also clear the pending guards and bump the decode
+	// epoch: a re-staged temp path must be free to decode again, and any in-flight
+	// decode that started before this clear must not post its (possibly stale) image
+	// back — isStagedImage alone is insufficient when the same temp path is reused.
 	mv.previewCache = nil
+	mv.previewPending = nil
+	mv.previewEpoch++
 	mv.updateAttachmentChips()
 }
 
