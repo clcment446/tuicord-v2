@@ -107,6 +107,17 @@ func (s *Store) RemoveReaction(channel ChannelID, id MessageID, emojiName string
 	return ring.removeReaction(id, emojiName, emojiID, me, s.nextRevision())
 }
 
+// RemoveReactionEmoji removes every reaction of one emoji from a message,
+// backing MESSAGE_REACTION_REMOVE_EMOJI. Returns true when the message and a
+// matching reaction entry were both found.
+func (s *Store) RemoveReactionEmoji(channel ChannelID, id MessageID, emojiName string, emojiID uint64) bool {
+	ring := s.messages[channel]
+	if ring == nil {
+		return false
+	}
+	return ring.removeReactionEmoji(id, emojiName, emojiID, s.nextRevision())
+}
+
 // MemberColor returns the effective display color for user in guild following
 // Discord's rule: the color of the highest-Position role among the member's
 // RoleIDs that has a non-zero Color. Returns 0 when the member is unknown or
