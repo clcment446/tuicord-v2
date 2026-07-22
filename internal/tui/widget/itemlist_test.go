@@ -88,6 +88,35 @@ func TestItemListDragDropsRows(t *testing.T) {
 	}
 }
 
+func TestItemListSetItemsInvalidatesActiveDrag(t *testing.T) {
+	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}, {Label: "c"}})
+	drops := 0
+	list.SetDrag(nil, nil, func(int, int) { drops++ })
+
+	op, ok := list.DragStart(0, 0)
+	if !ok {
+		t.Fatal("first row did not start drag")
+	}
+	op.DragMove(0, 2)
+	list.SetItems([]Item{{Label: "replacement"}})
+
+	// Pointer capture can still deliver motion and release after the owner has
+	// rebuilt the rows. Both events must ignore the stale drag indices.
+	op.DragMove(0, 10)
+	op.DragEnd(true)
+	if drops != 0 {
+		t.Fatalf("stale drag committed %d drops, want 0", drops)
+	}
+	if got := list.Selected(); got != 0 {
+		t.Fatalf("selected row after replacement = %d, want 0", got)
+	}
+	buf := screen.NewBuffer(16, 1)
+	list.Draw(buf.Clip(buf.Bounds()))
+	if got := bufferRow(buf, 0); got != "replacement     " {
+		t.Fatalf("row after replacement = %q", got)
+	}
+}
+
 func TestItemListDragWithoutMotionClicks(t *testing.T) {
 	list := NewItemList([]Item{{Label: "a"}, {Label: "b"}})
 	selected := -1

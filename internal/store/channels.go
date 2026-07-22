@@ -37,6 +37,7 @@ func (s *Store) RemoveChannel(id ChannelID) {
 		delete(s.messages, id)
 		delete(s.deletedMessages, id)
 		delete(s.prunedDeleteRevision, id)
+		delete(s.latestMessage, id)
 		delete(s.unread, id)
 		s.clearPing(id)
 		s.channelGeneration[id]++
@@ -55,6 +56,7 @@ func (s *Store) RemoveGuild(id GuildID) {
 	delete(s.roles, id)
 	delete(s.guildEmojis, id)
 	delete(s.guildStickers, id)
+	delete(s.guildPings, id)
 	delete(s.guilds, id)
 	s.guildGeneration[id]++
 	for i, guildID := range s.guildOrder {
@@ -97,12 +99,14 @@ func (s *Store) removeChannel(id ChannelID) bool {
 		return false
 	}
 	s.removeChannelOrder(c.GuildID, id)
+	// clearPing needs the channel's guild before the directory entry disappears.
+	s.clearPing(id)
 	delete(s.channels, id)
 	delete(s.messages, id)
 	delete(s.deletedMessages, id)
 	delete(s.prunedDeleteRevision, id)
+	delete(s.latestMessage, id)
 	delete(s.unread, id)
-	s.clearPing(id)
 	s.channelGeneration[id]++
 	s.touchMeta()
 	return true

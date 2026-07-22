@@ -32,7 +32,10 @@
 // needed.
 package store
 
-import "time"
+import (
+	"reflect"
+	"time"
+)
 
 // ID types mirror Discord snowflakes as opaque 64-bit identifiers.
 type (
@@ -336,6 +339,9 @@ type Store struct {
 
 	channelOrder map[GuildID][]ChannelID
 	channels     map[ChannelID]Channel
+	// latestMessage retains activity learned before channel hydration and keeps
+	// stale channel payloads from moving a conversation backwards.
+	latestMessage map[ChannelID]MessageID
 
 	messages map[ChannelID]*ring
 	// deletedMessages records MESSAGE_DELETE tombstones. A REST history response
@@ -411,6 +417,7 @@ func New(historyLimit int) *Store {
 		guildGeneration:      map[GuildID]uint64{},
 		channelOrder:         map[GuildID][]ChannelID{},
 		channels:             map[ChannelID]Channel{},
+		latestMessage:        map[ChannelID]MessageID{},
 		messages:             map[ChannelID]*ring{},
 		deletedMessages:      map[ChannelID]map[MessageID]uint64{},
 		prunedDeleteRevision: map[ChannelID]uint64{},
@@ -629,10 +636,20 @@ func (s *Store) Guild(id GuildID) (Guild, bool) {
 // UpsertChannel inserts or updates a channel. Channels are returned from
 // Channels sorted by Position then ID, so insertion order does not matter.
 func (s *Store) UpsertChannel(c Channel) {
-	if existing, ok := s.channels[c.ID]; ok {
-		if c.LastMessageID == 0 {
-			c.LastMessageID = existing.LastMessageID
-		}
+	existing, existed := s.channels[c.ID]
+	latest := s.latestMessage[c.ID]
+	if existing.LastMessageID > latest {
+		latest = existing.LastMessageID
+	}
+	if c.LastMessageID > latest {
+		latest = c.LastMessageID
+	}
+	c.LastMessageID = latest
+	if latest != 0 {
+		s.latestMessage[c.ID] = latest
+	}
+
+	if existed {
 		if existing.GuildID != c.GuildID {
 			s.removeChannelOrder(existing.GuildID, c.ID)
 			s.channelOrder[c.GuildID] = append(s.channelOrder[c.GuildID], c.ID)
@@ -642,7 +659,17 @@ func (s *Store) UpsertChannel(c Channel) {
 		s.channelGeneration[c.ID]++
 	}
 	s.channels[c.ID] = c
-	s.touchMeta()
+	// LastMessageID is directory activity, not presentation metadata consumed by
+	// ChatView. Activity-only upserts must not invalidate every open transcript.
+	if !existed || !sameChannelPresentation(existing, c) {
+		s.touchMeta()
+	}
+}
+
+func sameChannelPresentation(a, b Channel) bool {
+	a.LastMessageID = 0
+	b.LastMessageID = 0
+	return reflect.DeepEqual(a, b)
 }
 
 // ChannelGeneration identifies the current lifetime of a channel. It changes
@@ -693,16 +720,19 @@ func (s *Store) AppendMessage(m Message) {
 }
 
 func (s *Store) updateLastMessage(channel ChannelID, message MessageID) {
-	if message == 0 {
+	if message == 0 || message <= s.latestMessage[channel] {
 		return
 	}
+	s.latestMessage[channel] = message
 	c, ok := s.channels[channel]
 	if !ok || message <= c.LastMessageID {
 		return
 	}
 	c.LastMessageID = message
 	s.channels[channel] = c
-	s.touchMeta()
+	// Gateway message handlers already notify directory consumers through
+	// App.OnChange. Do not touch MetaRev: LastMessageID only affects directory
+	// ordering and is unrelated to ChatView presentation.
 }
 
 // SetMessages replaces a channel's history with messages in oldest-first order.

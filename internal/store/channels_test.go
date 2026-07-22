@@ -133,6 +133,9 @@ func TestRemoveChannelCascadesThreadAndNotificationState(t *testing.T) {
 	if s.Messages(100) != nil || s.Messages(10) != nil || s.Unread(100) != 0 || s.Pings(100) != 0 {
 		t.Fatal("channel-owned state was not removed")
 	}
+	if got := s.GuildPings(1); got != 0 {
+		t.Fatalf("guild pings after channel removal = %d, want 0", got)
+	}
 }
 
 func TestRemoveGuildCascadesAllOwnedState(t *testing.T) {
@@ -145,12 +148,13 @@ func TestRemoveGuildCascadesAllOwnedState(t *testing.T) {
 	s.SetGuildEmojis(1, []GuildEmoji{{ID: 4, Name: "emoji"}})
 	s.SetGuildStickers(1, []GuildSticker{{ID: 5, Name: "sticker"}})
 	s.SetGuildFolders([]GuildFolder{{ID: 6, GuildIDs: []GuildID{1}}})
+	s.IncrementPing(100)
 
 	s.RemoveGuild(1)
 
 	if _, ok := s.Guild(1); ok || len(s.Channels(1)) != 0 || s.Messages(100) != nil ||
 		len(s.Members(1)) != 0 || len(s.Roles(1)) != 0 || len(s.GuildEmojis(1)) != 0 ||
-		len(s.GuildStickers(1)) != 0 || len(s.GuildFolders()) != 0 {
+		len(s.GuildStickers(1)) != 0 || len(s.GuildFolders()) != 0 || s.GuildPings(1) != 0 {
 		t.Fatal("guild-owned state was not fully removed")
 	}
 }
