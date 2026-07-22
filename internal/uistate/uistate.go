@@ -45,9 +45,11 @@ type Accounts struct {
 // of machine-managed startup churn. Guild/channel/user IDs are Discord
 // snowflakes. The zero value is a valid, empty state.
 type State struct {
-	PinnedGuilds        []uint64      `toml:"pinned_guilds"`
-	PinnedChannels      []uint64      `toml:"pinned_channels"`
-	CollapsedFolders    []int64       `toml:"collapsed_folders"`
+	PinnedGuilds   []uint64 `toml:"pinned_guilds"`
+	PinnedChannels []uint64 `toml:"pinned_channels"`
+	// CollapsedFolders is retained only to decode pre-layout state. loadFrom
+	// migrates it into account-scoped GuildLayouts and clears it before save.
+	CollapsedFolders    []int64       `toml:"collapsed_folders,omitempty"`
 	CollapsedCategories []uint64      `toml:"collapsed_categories"`
 	GuildLayouts        []GuildLayout `toml:"guild_layouts"`
 	RecentStickers      []uint64      `toml:"recent_stickers"`
@@ -65,8 +67,12 @@ type GuildGroup struct {
 }
 
 type GuildLayout struct {
-	AccountID uint64       `toml:"account_id"`
-	Groups    []GuildGroup `toml:"groups"`
+	// AccountKey is the stable registry identity. AccountID remains so layouts
+	// written by older releases can be found and associated with their key.
+	AccountKey       string       `toml:"account_key,omitempty"`
+	AccountID        uint64       `toml:"account_id"`
+	CollapsedFolders []int64      `toml:"collapsed_folders,omitempty"`
+	Groups           []GuildGroup `toml:"groups"`
 }
 
 // AccountList returns a copy of the registry list, or nil when it has not been
@@ -188,6 +194,7 @@ func loadFrom(path string) (*State, error) {
 	if err := toml.Unmarshal(data, st); err != nil {
 		return st, err
 	}
+	st.migrateGuildLayouts()
 	return st, nil
 }
 
@@ -203,6 +210,10 @@ func (s *State) Save() error {
 }
 
 func (s *State) saveTo(path string) error {
+	// Accounts may have been seeded from legacy config after Load returned.
+	// Re-running the idempotent migration here associates any anonymous layout
+	// before it is written back.
+	s.migrateGuildLayouts()
 	return atomicfile.Write(path, 0o600, func(w io.Writer) error {
 		return toml.NewEncoder(w).Encode(s)
 	})
@@ -213,9 +224,6 @@ func (s *State) TogglePinnedGuild(id uint64) bool { return toggleU64(&s.PinnedGu
 
 // TogglePinnedChannel flips a channel's pinned status and returns the new value.
 func (s *State) TogglePinnedChannel(id uint64) bool { return toggleU64(&s.PinnedChannels, id) }
-
-// ToggleCollapsedFolder flips a folder's collapsed status and returns the new value.
-func (s *State) ToggleCollapsedFolder(id int64) bool { return toggleI64(&s.CollapsedFolders, id) }
 
 // ToggleCollapsedCategory flips a category's collapsed status and returns the new value.
 func (s *State) ToggleCollapsedCategory(id uint64) bool {
@@ -228,44 +236,173 @@ func (s *State) IsPinnedGuild(id uint64) bool { return hasU64(s.PinnedGuilds, id
 // IsPinnedChannel reports whether a channel is pinned.
 func (s *State) IsPinnedChannel(id uint64) bool { return hasU64(s.PinnedChannels, id) }
 
-// IsFolderCollapsed reports whether a folder is collapsed.
-func (s *State) IsFolderCollapsed(id int64) bool { return hasI64(s.CollapsedFolders, id) }
-
 // IsCategoryCollapsed reports whether a category is collapsed.
 func (s *State) IsCategoryCollapsed(id uint64) bool { return hasU64(s.CollapsedCategories, id) }
 
-// CollapsedFolderSet returns the collapsed folders as a set for store.OrderGuilds.
-func (s *State) CollapsedFolderSet() map[int64]bool {
-	out := make(map[int64]bool, len(s.CollapsedFolders))
-	for _, id := range s.CollapsedFolders {
+// ToggleCollapsedFolder flips a folder's collapsed status for one account and
+// returns the new value.
+func (s *State) ToggleCollapsedFolder(accountKey string, accountID uint64, id int64) bool {
+	layout := s.ensureGuildLayout(accountKey, accountID)
+	if layout == nil {
+		return false
+	}
+	return toggleI64(&layout.CollapsedFolders, id)
+}
+
+// IsFolderCollapsed reports whether a folder is collapsed for one account.
+func (s *State) IsFolderCollapsed(accountKey string, accountID uint64, id int64) bool {
+	layout := s.findGuildLayout(accountKey, accountID)
+	return layout != nil && hasI64(layout.CollapsedFolders, id)
+}
+
+// CollapsedFolderSet returns one account's collapsed folders as a set for
+// store.OrderGuilds.
+func (s *State) CollapsedFolderSet(accountKey string, accountID uint64) map[int64]bool {
+	layout := s.findGuildLayout(accountKey, accountID)
+	if layout == nil {
+		return map[int64]bool{}
+	}
+	out := make(map[int64]bool, len(layout.CollapsedFolders))
+	for _, id := range layout.CollapsedFolders {
 		out[id] = true
 	}
 	return out
 }
 
-func (s *State) GuildLayout(accountID uint64) ([]GuildGroup, bool) {
-	if s == nil {
+// GuildLayout returns a defensive copy of one account's custom guild groups.
+// A collapse-only layout has nil Groups and therefore does not override the
+// server-provided folder ordering.
+func (s *State) GuildLayout(accountKey string, accountID uint64) ([]GuildGroup, bool) {
+	layout := s.findGuildLayout(accountKey, accountID)
+	if layout == nil || layout.Groups == nil {
 		return nil, false
 	}
-	for _, layout := range s.GuildLayouts {
-		if layout.AccountID == accountID {
-			return copyGroups(layout.Groups), true
-		}
-	}
-	return nil, false
+	return copyGroups(layout.Groups), true
 }
 
-func (s *State) SetGuildLayout(accountID uint64, groups []GuildGroup) {
+func (s *State) SetGuildLayout(accountKey string, accountID uint64, groups []GuildGroup) {
+	layout := s.ensureGuildLayout(accountKey, accountID)
+	if layout != nil {
+		layout.Groups = copyGroups(groups)
+	}
+}
+
+// findGuildLayout gives the stable key precedence, then adopts an old ID-only
+// layout. AccountID zero is never used as an identity, which keeps multiple
+// accounts saved before READY distinct.
+func (s *State) findGuildLayout(accountKey string, accountID uint64) *GuildLayout {
+	if s == nil {
+		return nil
+	}
+	if accountKey != "" {
+		for i := range s.GuildLayouts {
+			if s.GuildLayouts[i].AccountKey == accountKey {
+				if accountID != 0 {
+					s.GuildLayouts[i].AccountID = accountID
+				}
+				return &s.GuildLayouts[i]
+			}
+		}
+	}
+	if accountID != 0 {
+		for i := range s.GuildLayouts {
+			layout := &s.GuildLayouts[i]
+			if layout.AccountKey == "" && layout.AccountID == accountID {
+				layout.AccountKey = accountKey
+				return layout
+			}
+		}
+	}
+	// Old layouts written before READY had neither a usable ID nor a key. A
+	// single anonymous layout can only belong to the account now opening it.
+	// Refuse to guess if malformed state contains more than one candidate.
+	anonymous := -1
+	for i := range s.GuildLayouts {
+		if s.GuildLayouts[i].AccountKey == "" && s.GuildLayouts[i].AccountID == 0 {
+			if anonymous >= 0 {
+				return nil
+			}
+			anonymous = i
+		}
+	}
+	if anonymous >= 0 && accountKey != "" {
+		s.GuildLayouts[anonymous].AccountKey = accountKey
+		s.GuildLayouts[anonymous].AccountID = accountID
+		return &s.GuildLayouts[anonymous]
+	}
+	return nil
+}
+
+func (s *State) ensureGuildLayout(accountKey string, accountID uint64) *GuildLayout {
+	if s == nil {
+		return nil
+	}
+	if layout := s.findGuildLayout(accountKey, accountID); layout != nil {
+		return layout
+	}
+	s.GuildLayouts = append(s.GuildLayouts, GuildLayout{AccountKey: accountKey, AccountID: accountID})
+	return &s.GuildLayouts[len(s.GuildLayouts)-1]
+}
+
+// migrateGuildLayouts associates old ID-keyed layouts with registry keys and
+// moves the former global collapse list into every account it previously
+// affected. An anonymous AccountID-zero layout is assigned to the active
+// registry account, which is the only sensible owner older state can identify.
+func (s *State) migrateGuildLayouts() {
 	if s == nil {
 		return
 	}
+	accounts := s.AccountList()
 	for i := range s.GuildLayouts {
-		if s.GuildLayouts[i].AccountID == accountID {
-			s.GuildLayouts[i].Groups = copyGroups(groups)
-			return
+		layout := &s.GuildLayouts[i]
+		if layout.AccountKey != "" {
+			continue
+		}
+		if layout.AccountID != 0 {
+			for _, account := range accounts {
+				if account.ID == layout.AccountID && account.Key != "" {
+					layout.AccountKey = account.Key
+					break
+				}
+			}
+			continue
+		}
+		if len(accounts) > 0 {
+			active := accounts[s.ActiveAccount()]
+			layout.AccountKey = active.Key
+			layout.AccountID = active.ID
 		}
 	}
-	s.GuildLayouts = append(s.GuildLayouts, GuildLayout{AccountID: accountID, Groups: copyGroups(groups)})
+
+	if len(s.CollapsedFolders) == 0 {
+		return
+	}
+	legacy := uniqueI64(s.CollapsedFolders)
+	for i := range s.GuildLayouts {
+		s.GuildLayouts[i].CollapsedFolders = mergeI64(s.GuildLayouts[i].CollapsedFolders, legacy)
+	}
+	for _, account := range accounts {
+		layout := s.ensureGuildLayout(account.Key, account.ID)
+		layout.CollapsedFolders = mergeI64(layout.CollapsedFolders, legacy)
+	}
+	if len(s.GuildLayouts) == 0 {
+		s.GuildLayouts = append(s.GuildLayouts, GuildLayout{CollapsedFolders: append([]int64(nil), legacy...)})
+	}
+	s.CollapsedFolders = nil
+}
+
+func uniqueI64(list []int64) []int64 {
+	return mergeI64(nil, list)
+}
+
+func mergeI64(dst, src []int64) []int64 {
+	out := append([]int64(nil), dst...)
+	for _, id := range src {
+		if !hasI64(out, id) {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func copyGroups(groups []GuildGroup) []GuildGroup {

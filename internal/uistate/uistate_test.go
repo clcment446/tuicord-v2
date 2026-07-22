@@ -3,6 +3,7 @@ package uistate
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -35,14 +36,30 @@ func TestToggleAndQuery(t *testing.T) {
 
 func TestToggleCollapsed(t *testing.T) {
 	st := &State{}
-	st.ToggleCollapsedFolder(7)
+	st.ToggleCollapsedFolder("acct-a", 7, -1)
 	st.ToggleCollapsedCategory(8)
-	if !st.IsFolderCollapsed(7) || !st.IsCategoryCollapsed(8) {
+	if !st.IsFolderCollapsed("acct-a", 7, -1) || !st.IsCategoryCollapsed(8) {
 		t.Fatal("collapse toggles not recorded")
 	}
-	set := st.CollapsedFolderSet()
-	if !set[7] || len(set) != 1 {
-		t.Fatalf("CollapsedFolderSet = %v, want {7:true}", set)
+	set := st.CollapsedFolderSet("acct-a", 7)
+	if !set[-1] || len(set) != 1 {
+		t.Fatalf("CollapsedFolderSet = %v, want {-1:true}", set)
+	}
+}
+
+func TestCollapsedFoldersAreAccountScoped(t *testing.T) {
+	st := &State{}
+	st.ToggleCollapsedFolder("acct-a", 0, -1)
+	if !st.IsFolderCollapsed("acct-a", 0, -1) {
+		t.Fatal("first account did not retain its local folder collapse")
+	}
+	if st.IsFolderCollapsed("acct-b", 0, -1) {
+		t.Fatal("same local folder ID leaked into second account")
+	}
+	st.ToggleCollapsedFolder("acct-b", 0, -1)
+	st.ToggleCollapsedFolder("acct-a", 0, -1)
+	if st.IsFolderCollapsed("acct-a", 0, -1) || !st.IsFolderCollapsed("acct-b", 0, -1) {
+		t.Fatalf("account collapse sets collided: %+v", st.GuildLayouts)
 	}
 }
 
@@ -79,16 +96,16 @@ func TestToggleFavorite(t *testing.T) {
 
 func TestToggleCollapsedFolderOffAndQuery(t *testing.T) {
 	st := &State{}
-	if st.IsFolderCollapsed(7) {
+	if st.IsFolderCollapsed("acct", 7, -1) {
 		t.Fatal("empty state should have no collapsed folders")
 	}
-	if !st.ToggleCollapsedFolder(7) {
+	if !st.ToggleCollapsedFolder("acct", 7, -1) {
 		t.Fatal("first toggle should collapse")
 	}
-	if st.ToggleCollapsedFolder(7) {
+	if st.ToggleCollapsedFolder("acct", 7, -1) {
 		t.Fatal("second toggle should expand")
 	}
-	if st.IsFolderCollapsed(7) {
+	if st.IsFolderCollapsed("acct", 7, -1) {
 		t.Fatal("folder should be expanded after second toggle")
 	}
 }
@@ -96,23 +113,48 @@ func TestToggleCollapsedFolderOffAndQuery(t *testing.T) {
 func TestGuildLayoutCopiesAndReplaces(t *testing.T) {
 	st := &State{}
 	groups := []GuildGroup{{ID: -1, Name: "Work", GuildIDs: []uint64{10, 20}}}
-	st.SetGuildLayout(7, groups)
+	st.SetGuildLayout("acct", 7, groups)
 	groups[0].GuildIDs[0] = 99
 
-	got, ok := st.GuildLayout(7)
+	got, ok := st.GuildLayout("acct", 7)
 	if !ok || len(got) != 1 || got[0].GuildIDs[0] != 10 {
 		t.Fatalf("GuildLayout = %+v,%v", got, ok)
 	}
 	got[0].GuildIDs[0] = 88
-	again, _ := st.GuildLayout(7)
+	again, _ := st.GuildLayout("acct", 7)
 	if again[0].GuildIDs[0] != 10 {
 		t.Fatalf("GuildLayout returned shared data: %+v", again)
 	}
 
-	st.SetGuildLayout(7, []GuildGroup{{ID: -2, Name: "Games", GuildIDs: []uint64{30}}})
-	got, _ = st.GuildLayout(7)
+	st.SetGuildLayout("acct", 7, []GuildGroup{{ID: -2, Name: "Games", GuildIDs: []uint64{30}}})
+	got, _ = st.GuildLayout("acct", 7)
 	if len(st.GuildLayouts) != 1 || got[0].ID != -2 {
 		t.Fatalf("SetGuildLayout did not replace account layout: %+v", st.GuildLayouts)
+	}
+}
+
+func TestGuildLayoutsUseKeysBeforeAccountHydration(t *testing.T) {
+	st := &State{}
+	st.SetGuildLayout("acct-a", 0, []GuildGroup{{ID: -1, Name: "A"}})
+	st.SetGuildLayout("acct-b", 0, []GuildGroup{{ID: -1, Name: "B"}})
+	if len(st.GuildLayouts) != 2 {
+		t.Fatalf("zero-ID layouts collided: %+v", st.GuildLayouts)
+	}
+	path := filepath.Join(t.TempDir(), "ui.toml")
+	if err := st.saveTo(path); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, okA := st.GuildLayout("acct-a", 0)
+	second, okB := st.GuildLayout("acct-b", 0)
+	if !okA || !okB || first[0].Name != "A" || second[0].Name != "B" {
+		t.Fatalf("keyed layouts = %+v / %+v", first, second)
+	}
+	if hydrated, ok := st.GuildLayout("acct-a", 77); !ok || hydrated[0].Name != "A" || st.GuildLayouts[0].AccountID != 77 {
+		t.Fatalf("layout disappeared after hydration: %+v,%v layouts=%+v", hydrated, ok, st.GuildLayouts)
 	}
 }
 
@@ -138,12 +180,12 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load empty: %v", err)
 	}
+	st.Accounts = &Accounts{Active: 1, List: []Account{{Key: "token", Label: "Alice", ID: 11}, {Key: "acct-2", Label: "Bob", ID: 22}}}
 	st.TogglePinnedGuild(100)
 	st.TogglePinnedChannel(200)
-	st.ToggleCollapsedFolder(-3)
+	st.ToggleCollapsedFolder("token", 11, -3)
 	st.ToggleCollapsedCategory(300)
-	st.SetGuildLayout(11, []GuildGroup{{ID: -1, Name: "Work", GuildIDs: []uint64{100, 200}}})
-	st.Accounts = &Accounts{Active: 1, List: []Account{{Key: "token", Label: "Alice", ID: 11}, {Key: "acct-2", Label: "Bob", ID: 22}}}
+	st.SetGuildLayout("token", 11, []GuildGroup{{ID: -1, Name: "Work", GuildIDs: []uint64{100, 200}}})
 	st.AuthPreferredMode = "browser"
 	if err := st.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -159,15 +201,99 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if !got.IsPinnedGuild(100) || !got.IsPinnedChannel(200) ||
-		!got.IsFolderCollapsed(-3) || !got.IsCategoryCollapsed(300) {
+		!got.IsFolderCollapsed("token", 11, -3) || !got.IsCategoryCollapsed(300) {
 		t.Fatalf("round-trip lost state: %+v", got)
 	}
 	if got.ActiveAccount() != 1 || len(got.AccountList()) != 2 || got.AccountList()[1].Label != "Bob" || got.AuthPreferredMode != "browser" {
 		t.Fatalf("machine startup state did not round-trip: %+v", got)
 	}
-	layout, ok := got.GuildLayout(11)
+	layout, ok := got.GuildLayout("token", 11)
 	if !ok || len(layout) != 1 || layout[0].Name != "Work" || len(layout[0].GuildIDs) != 2 {
 		t.Fatalf("guild layout did not round-trip: %+v,%v", layout, ok)
+	}
+}
+
+func TestLoadMigratesLegacyGuildLayoutState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ui.toml")
+	legacy := `collapsed_folders = [-1, -2]
+
+[[guild_layouts]]
+account_id = 42
+
+[[guild_layouts.groups]]
+id = -1
+name = "Work"
+guild_ids = [100]
+
+[accounts]
+active = 0
+
+[[accounts.list]]
+key = "acct-a"
+label = "Alice"
+id = 42
+`
+	if err := writeFile(t, path, legacy); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, ok := st.GuildLayout("acct-a", 42)
+	if !ok || len(groups) != 1 || groups[0].Name != "Work" {
+		t.Fatalf("legacy ID layout not found by key: %+v,%v", groups, ok)
+	}
+	if !st.IsFolderCollapsed("acct-a", 42, -1) || !st.IsFolderCollapsed("acct-a", 42, -2) {
+		t.Fatalf("legacy collapsed folders not migrated: %+v", st.GuildLayouts)
+	}
+	if len(st.CollapsedFolders) != 0 || st.GuildLayouts[0].AccountKey != "acct-a" {
+		t.Fatalf("legacy fields were not normalized: %+v", st)
+	}
+	if err := st.saveTo(path); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	layoutsAt := strings.Index(text, "[[guild_layouts]]")
+	if layoutsAt < 0 || strings.Contains(text[:layoutsAt], "collapsed_folders") {
+		t.Fatalf("save retained global collapsed_folders:\n%s", text)
+	}
+	if !strings.Contains(text, `account_key = "acct-a"`) {
+		t.Fatalf("save did not key-associate legacy layout:\n%s", text)
+	}
+}
+
+func TestLegacyCollapseMigratesAfterAccountsAreSeeded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ui.toml")
+	if err := writeFile(t, path, "collapsed_folders = [-1]\n"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Accounts = &Accounts{List: []Account{{Key: "acct-a", ID: 42}}}
+	if err := st.saveTo(path); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := loadFrom(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reloaded.IsFolderCollapsed("acct-a", 42, -1) {
+		t.Fatalf("late-seeded account lost legacy collapse: %+v", reloaded.GuildLayouts)
+	}
+}
+
+func TestIDOnlyGuildLayoutAssociatesWhenUsed(t *testing.T) {
+	st := &State{GuildLayouts: []GuildLayout{{AccountID: 99, Groups: []GuildGroup{{Name: "Old"}}}}}
+	groups, ok := st.GuildLayout("acct-old", 99)
+	if !ok || groups[0].Name != "Old" || st.GuildLayouts[0].AccountKey != "acct-old" {
+		t.Fatalf("ID-only layout was not adopted: groups=%+v layouts=%+v", groups, st.GuildLayouts)
 	}
 }
 

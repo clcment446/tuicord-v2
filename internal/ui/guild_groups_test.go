@@ -109,13 +109,13 @@ func TestCreateGroupPersistsLayout(t *testing.T) {
 		{GuildIDs: []store.GuildID{1}},
 		{GuildIDs: []store.GuildID{2}},
 	})
-	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{ID: 42}}}}
+	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{Key: "acct", ID: 42}}}}
 	a := app.New(discord.WrapSession(session.New("")), data, tui.New())
 	mv := &MainView{app: a, state: state, guildList: widget.NewItemList(nil)}
 
 	mv.CreateGroup(2, "Games")
 
-	layout, ok := state.GuildLayout(42)
+	layout, ok := state.GuildLayout("acct", 42)
 	if !ok || len(layout) != 2 || layout[1].Name != "Games" || !reflect.DeepEqual(layout[1].GuildIDs, []uint64{2}) {
 		t.Fatalf("saved layout = %+v,%v", layout, ok)
 	}
@@ -133,23 +133,88 @@ func TestDropGuildExpandsTargetGroup(t *testing.T) {
 		{ID: 10, Name: "Work", GuildIDs: []store.GuildID{1}},
 		{GuildIDs: []store.GuildID{2}},
 	})
-	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{ID: 42}}}}
-	state.ToggleCollapsedFolder(10)
+	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{Key: "acct", ID: 42}}}}
+	state.ToggleCollapsedFolder("acct", 42, 10)
 	a := app.New(discord.WrapSession(session.New("")), data, tui.New())
 	mv := &MainView{app: a, state: state, guildList: widget.NewItemList(nil)}
 	mv.rebuildGuilds()
 
 	mv.dropGuild(1, 0)
 
-	layout, ok := state.GuildLayout(42)
+	layout, ok := state.GuildLayout("acct", 42)
 	if !ok || len(layout) != 1 || !reflect.DeepEqual(layout[0].GuildIDs, []uint64{1, 2}) {
 		t.Fatalf("saved layout = %+v,%v", layout, ok)
 	}
-	if state.IsFolderCollapsed(10) {
+	if state.IsFolderCollapsed("acct", 42, 10) {
 		t.Fatal("target group stayed collapsed")
 	}
 	if len(mv.guildRows) != 3 || mv.guildRows[2].GuildID != 2 {
 		t.Fatalf("rendered rows = %+v", mv.guildRows)
+	}
+}
+
+func TestMainViewScopesSameNegativeFolderIDByAccount(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	firstStore := store.New(0)
+	firstStore.UpsertGuild(store.Guild{ID: 1, Name: "Alpha"})
+	firstStore.SetGuildFolders([]store.GuildFolder{{ID: -1, Name: "Local A", GuildIDs: []store.GuildID{1}}})
+	secondStore := store.New(0)
+	secondStore.UpsertGuild(store.Guild{ID: 2, Name: "Beta"})
+	secondStore.SetGuildFolders([]store.GuildFolder{{ID: -1, Name: "Local B", GuildIDs: []store.GuildID{2}}})
+	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{Key: "acct-a"}, {Key: "acct-b"}}}}
+	firstApp := app.New(discord.WrapSession(session.New("")), firstStore, tui.New())
+	secondApp := app.New(discord.WrapSession(session.New("")), secondStore, tui.New())
+	mv := &MainView{app: firstApp, state: state, guildList: widget.NewItemList(nil)}
+
+	mv.ToggleCollapseFolder(-1)
+	if !state.IsFolderCollapsed("acct-a", 0, -1) || state.IsFolderCollapsed("acct-b", 0, -1) {
+		t.Fatalf("first collapse leaked between accounts: %+v", state.GuildLayouts)
+	}
+
+	state.Accounts.Active = 1
+	mv.app = secondApp
+	mv.rebuildGuilds()
+	if len(mv.guildRows) != 2 || mv.guildRows[0].Collapsed {
+		t.Fatalf("second account inherited first collapse: %+v", mv.guildRows)
+	}
+	mv.ToggleCollapseFolder(-1)
+	state.Accounts.Active = 0
+	mv.app = firstApp
+	mv.ToggleCollapseFolder(-1)
+	if state.IsFolderCollapsed("acct-a", 0, -1) || !state.IsFolderCollapsed("acct-b", 0, -1) {
+		t.Fatalf("independent toggles collided: %+v", state.GuildLayouts)
+	}
+}
+
+func TestMainViewKeepsTwoUnhydratedLayoutsByAccountKey(t *testing.T) {
+	state := &uistate.State{Accounts: &uistate.Accounts{List: []uistate.Account{{Key: "acct-a"}, {Key: "acct-b"}}}}
+	firstStore := store.New(0)
+	firstStore.UpsertGuild(store.Guild{ID: 1, Name: "Alpha"})
+	secondStore := store.New(0)
+	secondStore.UpsertGuild(store.Guild{ID: 2, Name: "Beta"})
+	firstApp := app.New(discord.WrapSession(session.New("")), firstStore, tui.New())
+	secondApp := app.New(discord.WrapSession(session.New("")), secondStore, tui.New())
+	mv := &MainView{app: firstApp, state: state}
+	mv.saveGroups([]store.GuildFolder{{ID: -1, Name: "First", GuildIDs: []store.GuildID{1}}})
+
+	state.Accounts.Active = 1
+	mv.app = secondApp
+	mv.saveGroups([]store.GuildFolder{{ID: -1, Name: "Second", GuildIDs: []store.GuildID{2}}})
+	if len(state.GuildLayouts) != 2 {
+		t.Fatalf("unhydrated AccountID-zero layouts collided: %+v", state.GuildLayouts)
+	}
+	first, okFirst := state.GuildLayout("acct-a", 0)
+	second, okSecond := state.GuildLayout("acct-b", 0)
+	if !okFirst || !okSecond || first[0].Name != "First" || second[0].Name != "Second" {
+		t.Fatalf("saved keyed layouts = %+v / %+v", first, second)
+	}
+
+	state.Accounts.Active = 0
+	state.Accounts.List[0].ID = 77
+	mv.app = firstApp
+	groups := mv.currentGroups()
+	if len(groups) != 1 || groups[0].Name != "First" || state.GuildLayouts[0].AccountID != 77 {
+		t.Fatalf("first layout disappeared after ID hydration: groups=%+v layouts=%+v", groups, state.GuildLayouts)
 	}
 }
 

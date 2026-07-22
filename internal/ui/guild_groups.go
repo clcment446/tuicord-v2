@@ -185,19 +185,33 @@ func nextGroupID(groups []store.GuildFolder) int64 {
 	return id
 }
 
-func (mv *MainView) accountID() uint64 {
-	if mv == nil || mv.app == nil {
-		return 0
-	}
-	if id := uint64(mv.app.SelfID()); id != 0 {
-		return id
+func (mv *MainView) accountIdentity() (string, uint64) {
+	if mv == nil || mv.state == nil {
+		return "", 0
 	}
 	accounts := mv.state.AccountList()
 	index := mv.state.ActiveAccount()
+	var key string
+	var id uint64
 	if index >= 0 && index < len(accounts) {
-		return accounts[index].ID
+		key, id = accounts[index].Key, accounts[index].ID
 	}
-	return 0
+	if mv.app != nil {
+		if selfID := uint64(mv.app.SelfID()); selfID != 0 {
+			id = selfID
+		}
+	}
+	return key, id
+}
+
+func (mv *MainView) toggleCollapsedFolder(id int64) bool {
+	accountKey, accountID := mv.accountIdentity()
+	return mv.state.ToggleCollapsedFolder(accountKey, accountID, id)
+}
+
+func (mv *MainView) collapsedFolderSet() map[int64]bool {
+	accountKey, accountID := mv.accountIdentity()
+	return mv.state.CollapsedFolderSet(accountKey, accountID)
 }
 
 func (mv *MainView) currentGroups() []store.GuildFolder {
@@ -206,7 +220,8 @@ func (mv *MainView) currentGroups() []store.GuildFolder {
 	}
 	data := mv.app.Store()
 	groups := data.GuildFolders()
-	if saved, ok := mv.state.GuildLayout(mv.accountID()); ok {
+	accountKey, accountID := mv.accountIdentity()
+	if saved, ok := mv.state.GuildLayout(accountKey, accountID); ok {
 		groups = make([]store.GuildFolder, len(saved))
 		for i, group := range saved {
 			groups[i] = store.GuildFolder{ID: group.ID, Name: group.Name, Color: group.Color}
@@ -226,7 +241,8 @@ func (mv *MainView) saveGroups(groups []store.GuildFolder) {
 			saved[i].GuildIDs = append(saved[i].GuildIDs, uint64(id))
 		}
 	}
-	mv.state.SetGuildLayout(mv.accountID(), saved)
+	accountKey, accountID := mv.accountIdentity()
+	mv.state.SetGuildLayout(accountKey, accountID, saved)
 }
 
 func (mv *MainView) canDragGuild(index int) bool {
@@ -273,7 +289,7 @@ func (mv *MainView) dropGuild(from, to int) {
 		mv.state.TogglePinnedGuild(uint64(source.GuildID))
 	}
 	if target.Folder && target.Collapsed {
-		mv.state.ToggleCollapsedFolder(target.FolderID)
+		mv.toggleCollapsedFolder(target.FolderID)
 	}
 	mv.saveGroups(groups)
 	mv.persist()
