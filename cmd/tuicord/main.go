@@ -77,6 +77,7 @@ func run() error {
 	if _, selected, ok := luaManager.ConsumeStartupTheme(); ok {
 		config.ApplyTheme(&cfg, selected)
 	}
+	cfg = config.ApplySSHAnimationPolicy(cfg, os.Getenv)
 	if cfg.ColorOverrides == nil {
 		cfg.ColorOverrides = &config.ColorOverrides{Rules: map[string]config.ColorRule{}}
 	}

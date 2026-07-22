@@ -224,6 +224,9 @@ type Display struct {
 	// RoleGradientAnimations phase-shifts enabled role gradients on visible
 	// chat rows. It has no effect unless RoleGradients is also enabled.
 	RoleGradientAnimations bool `toml:"role_gradient_animations"`
+	// NoAnimationsOverSSH disables background GIF and role-gradient animation
+	// when the client is launched from an SSH session.
+	NoAnimationsOverSSH bool `toml:"no_animations_over_ssh"`
 	// StickyAnchor keeps the scrolled chat viewport anchored to the message at
 	// its top when content above or below changes height (component folds,
 	// async media loads, embed unfurls). Disable to fall back to plain
@@ -776,6 +779,8 @@ tty_colors = false
 role_gradients = false
 # Animate visible gradient role names (requires role_gradients = true).
 role_gradient_animations = false
+# Disable background animations when tuicord is launched over SSH.
+no_animations_over_ssh = false
 ascii = false
 
 [auth]
