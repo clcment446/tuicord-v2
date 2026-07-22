@@ -563,7 +563,7 @@ func (w *ChatView) playFocusedVideo() bool {
 	if !w.focusedMessageSet {
 		return false
 	}
-	prefix := messagePlacementPrefix(w.focusedMessage) + ":"
+	prefix := w.focusKey + ":"
 	for _, h := range w.videoHits {
 		if strings.HasPrefix(h.placementKey, prefix) {
 			return w.playVideoHit(h)
@@ -582,7 +582,7 @@ func (w *ChatView) openFocusedMedia() bool {
 	if w.playFocusedVideo() {
 		return true
 	}
-	prefix := messagePlacementPrefix(w.focusedMessage) + ":"
+	prefix := w.focusKey + ":"
 	for _, line := range w.visibleLines {
 		b := line.media
 		if b == nil || b.video() || b.img == nil {
@@ -1303,7 +1303,7 @@ func (w *ChatView) ensureInitialFocusedMessage() {
 	if !ok {
 		return
 	}
-	if w.focusedMessageSet && (w.focusedExplicit || messagePlacementPrefix(w.focusedMessage) == messagePlacementPrefix(latest)) {
+	if w.focusedMessageSet && (w.focusedExplicit || sameMsg(w.focusedMessage, latest)) {
 		return
 	}
 	previous := w.focusedMessage
@@ -1382,7 +1382,7 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 		}
 	}
 	if selected < 0 && w.focusedMessageSet {
-		messageKey := messagePlacementPrefix(w.focusedMessage)
+		messageKey := w.focusKey
 		for i := range w.focusStops {
 			if w.focusStops[i].messageKey == messageKey {
 				selected = i
@@ -1396,7 +1396,7 @@ func (w *ChatView) buildFocusIndex(lines []chatLine, height int) {
 	w.focusStopIndex = selected
 	w.focusStopKey = w.focusStops[selected].key
 	w.focusedMessage = w.msgAt(w.focusStops[selected].msg)
-	w.focusKey = messagePlacementPrefix(w.focusedMessage)
+	w.focusKey = w.focusStops[selected].messageKey
 	w.focusedMessageSet = true
 }
 
@@ -1961,6 +1961,10 @@ func sameMessageAuthor(a, b store.Message) bool {
 	return a.Author == b.Author
 }
 
+func sameMsg(a, b store.Message) bool {
+	return a.ChannelID == b.ChannelID && a.ID == b.ID && a.Nonce == b.Nonce
+}
+
 // renderThreadStarter emits a "⤷ thread-name (N messages)" line under a message
 // that started a thread. Discord gives a message-anchored thread the same
 // snowflake as its anchor message, so the thread is found by the message ID.
@@ -2494,7 +2498,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				if w.foldFocusedHeader() {
 					return true
 				}
-			case keyMatches(ev, w.vimKeys.Delete), keyMatches(ev, w.vimKeys.Reply), keyMatches(ev, w.vimKeys.Edit), keyMatches(ev, w.vimKeys.AddReaction), keyMatches(ev, w.vimKeys.Profile):
+			case vimAct(ev, w.vimKeys.Delete), vimAct(ev, w.vimKeys.Reply), vimAct(ev, w.vimKeys.Edit), vimAct(ev, w.vimKeys.AddReaction), vimAct(ev, w.vimKeys.Profile):
 				if w.keyboardFocused && w.focusedMessageSet && w.onMessageAction != nil {
 					action := unicode.ToLower(ev.Rune)
 					for _, candidate := range []struct {
@@ -2504,7 +2508,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 						{w.vimKeys.Delete, 'd'}, {w.vimKeys.Reply, 'r'}, {w.vimKeys.Edit, 'e'},
 						{w.vimKeys.AddReaction, 'a'}, {w.vimKeys.Profile, 'u'},
 					} {
-						if keyMatches(ev, candidate.spec) {
+						if vimAct(ev, candidate.spec) {
 							action = candidate.action
 							break
 						}
@@ -2635,7 +2639,8 @@ func (w *ChatView) focusAtVisible(x, y int) {
 	if w.visibleLines[y].author {
 		return
 	}
-	msg := w.msgAt(w.visibleLines[y].msg)
+	handle := w.visibleLines[y].msg
+	msg := w.msgAt(handle)
 	if msg.ID == 0 && msg.Nonce == "" {
 		return
 	}
@@ -2655,9 +2660,8 @@ func (w *ChatView) focusAtVisible(x, y int) {
 		}
 	}
 	if selected < 0 {
-		key := messagePlacementPrefix(msg)
 		for i := range w.focusStops {
-			if w.focusStops[i].messageKey == key {
+			if w.focusStops[i].msg == handle {
 				selected = i
 				break
 			}
@@ -2666,7 +2670,7 @@ func (w *ChatView) focusAtVisible(x, y int) {
 	if selected < 0 {
 		return
 	}
-	previous := messagePlacementPrefix(w.focusedMessage)
+	previous := w.focusKey
 	previousMessage := w.focusedMessage
 	stop := w.focusStops[selected]
 	nextMessage := w.msgAt(stop.msg)
@@ -2717,10 +2721,9 @@ func (w *ChatView) activateShortcut(shortcut rune) bool {
 	if w == nil || !w.keyboardFocused || !w.focusedMessageSet {
 		return false
 	}
-	focused := messagePlacementPrefix(w.focusedMessage)
 	for _, line := range w.visibleLines {
 		for _, hit := range line.actions {
-			if hit.action.shortcut == shortcut && messagePlacementPrefix(hit.action.message) == focused {
+			if hit.action.shortcut == shortcut && sameMsg(hit.action.message, w.focusedMessage) {
 				return w.setComponentAction(hit.action)
 			}
 		}
@@ -3062,7 +3065,6 @@ func (w *ChatView) moveFocus(delta int) {
 	if !w.focusedExplicit {
 		w.ensureInitialFocusedMessage()
 		w.focusLatestStop()
-		return
 	}
 	if len(w.focusStops) == 0 {
 		if delta < 0 {
@@ -3094,24 +3096,29 @@ func (w *ChatView) moveFocus(delta int) {
 	}
 }
 
-// focusLatestStop exits the passive "at latest" state into the newest
-// message. The first arrow establishes the navigation starting point; a later
-// arrow moves through the transcript.
-func (w *ChatView) focusLatestStop() {
+func (w *ChatView) focusLatestStop() bool {
 	if w == nil || len(w.focusStops) == 0 {
-		return
+		return false
 	}
-	messages := w.store.Messages(w.active())
-	if len(messages) == 0 {
-		return
+	key := w.focusKey
+	if key == "" {
+		return false
 	}
-	key := messagePlacementPrefix(messages[len(messages)-1])
+	index := -1
 	for i := len(w.focusStops) - 1; i >= 0; i-- {
-		if messagePlacementPrefix(w.msgAt(w.focusStops[i].msg)) == key {
-			w.setFocusStop(i)
-			return
+		if w.focusStops[i].messageKey == key {
+			index = i
+			continue
+		}
+		if index >= 0 {
+			break
 		}
 	}
+	if index < 0 {
+		return false
+	}
+	w.setFocusStop(index)
+	return true
 }
 
 func (w *ChatView) setFocusStop(index int) {
@@ -3119,7 +3126,7 @@ func (w *ChatView) setFocusStop(index int) {
 		return
 	}
 	previous := w.focusedMessage
-	previousMessage := messagePlacementPrefix(previous)
+	previousMessage := w.focusKey
 	stop := w.focusStops[index]
 	nextMessage := w.msgAt(stop.msg)
 	w.focusStopIndex = index

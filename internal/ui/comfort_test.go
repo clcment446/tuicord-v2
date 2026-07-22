@@ -22,6 +22,8 @@ func TestKeyMatches(t *testing.T) {
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'k', Mods: input.Ctrl}, "k", false}, // unwanted ctrl
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'n', Mods: input.Ctrl | input.Shift}, "ctrl+n", false},
 		{input.KeyEvent{Key: input.KeyRune, Rune: 'n', Mods: input.Ctrl | input.Shift}, "ctrl+shift+n", true},
+		{input.KeyEvent{Key: input.KeyRune, Rune: 'G', Mods: input.Shift}, "G", true},
+		{input.KeyEvent{Key: input.KeyRune, Rune: 'g'}, "G", false},
 		{input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}, "tab", false},
 		{input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}, "shift+tab", true},
 		{input.KeyEvent{Key: input.KeyEsc}, "esc", true},

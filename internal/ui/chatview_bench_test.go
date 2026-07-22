@@ -150,3 +150,16 @@ func BenchmarkChatViewDrawOneNewMessage(b *testing.B) {
 		view.Draw(r)
 	}
 }
+
+func BenchmarkChatViewFocusLatest(b *testing.B) {
+	st := benchStore(b, store.DefaultHistoryLimit)
+	view := benchView(st)
+	buf := screen.NewBuffer(benchWidth, 40)
+	r := buf.Clip(buf.Bounds())
+	view.Draw(r)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		view.focusLatestStop()
+	}
+}
