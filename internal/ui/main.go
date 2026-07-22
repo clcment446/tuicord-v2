@@ -469,7 +469,10 @@ func chatMediaConfig(appCfg config.Config) media.Config {
 		VideoAudio:           m.VideoAudio,
 	}
 	cfg = cfg.Bounded()
-	local := os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_TTY") == ""
+	// Use the same SSH detection as the animation policy (config.IsSSH also checks
+	// SSH_CLIENT). A mismatch left SHM enabled on SSH_CLIENT-only sessions, where
+	// the remote /dev/shm the terminal reads does not exist locally.
+	local := !config.IsSSH(os.Getenv)
 	switch strings.ToLower(strings.TrimSpace(m.VideoUseSHM)) {
 	case "true", "yes", "on":
 		cfg.VideoUseSHM = true
