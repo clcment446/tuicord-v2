@@ -7,3 +7,9 @@ for relevant terms and load only selected matches, ranking `CRITICAL` impact,
 exact relevance, and recency first. After resolving a non-obvious issue,
 persist it via the project-memory skill.
 <!-- project-memory:end -->
+
+## Feature and PR Workflow
+
+- Always keep one PR strictly scoped to one feature.
+- Divide commits by layer and keep PRs atomic.
+- If the user asks to put everything into one branch or one PR, explain that this is a poor workflow and suggest splitting the work into properly scoped feature branches and PRs.
