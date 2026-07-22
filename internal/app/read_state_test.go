@@ -208,6 +208,35 @@ func TestReadAcknowledgementClearsLocalPing(t *testing.T) {
 	}
 }
 
+func TestDMAckWithZeroGuildClearsSyntheticDMBadge(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: store.GuildID(DirectMessagesGuildID), Name: "Direct Messages"})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: DirectMessagesGuildID, Kind: store.ChannelDM})
+	st.IncrementUnread(42)
+	a := &App{store: st, ui: syncPoster{}, handle: ning}
+
+	// A DM is first observed as unread under the synthetic guild.
+	a.cacheReadState(42, DirectMessagesGuildID, Unread)
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Unread {
+		t.Fatalf("DM guild status = %v, want unread", got)
+	}
+
+	// The ack for a DM carries guild id 0; it must still clear the DM badge.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50},
+		GuildID:   0,
+		Unread:    false,
+	})
+
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Read {
+		t.Fatalf("DM guild status after ack = %v, want read", got)
+	}
+	if st.Unread(42) != 0 {
+		t.Fatalf("DM local unread survived ack: %d", st.Unread(42))
+	}
+}
+
 func TestReadStateCacheRemovedByDeletionPaths(t *testing.T) {
 	t.Run("channel and child thread", func(t *testing.T) {
 		a := newTestApp(&fakeSender{})
