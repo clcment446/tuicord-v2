@@ -22,21 +22,7 @@ func (a *App) registerGatewayLifecycleHandlers() {
 		})
 	})
 	a.handle.AddHandler(func(e *read.UpdateEvent) {
-		// Ningen updates its read state before forwarding this event. The event
-		// carries the affected channel and guild, so update the aggregate cache
-		// without rescanning every channel in the guild.
-		status := UnreadStatus(Read)
-		if e.ReadState.MentionCount > 0 {
-			status = Mentioned
-		} else if e.Unread {
-			status = Unread
-		}
-		a.cacheReadState(store.ChannelID(e.ChannelID), store.GuildID(e.GuildID), status)
-		a.ui.Post(func() {
-			if a.onReadStateChange != nil {
-				a.onReadStateChange()
-			}
-		})
+		a.handleReadStateUpdate(e)
 	})
 	a.handle.AddHandler(func(e *gateway.ReadyEvent) {
 		a.handleReady(e)
@@ -85,6 +71,36 @@ func (a *App) registerGatewayLifecycleHandlers() {
 				a.onChange()
 			}
 		})
+	})
+}
+
+func (a *App) handleReadStateUpdate(e *read.UpdateEvent) {
+	if a == nil || e == nil {
+		return
+	}
+	channel := store.ChannelID(e.ChannelID)
+	guild := store.GuildID(e.GuildID)
+	// Ningen updates its state before forwarding this event. Prefer its
+	// effective result so muted or inaccessible channels do not inherit the
+	// raw event's Unread bit; retain the raw fields only as a defensive fallback.
+	status, authoritative := a.authoritativeChannelUnread(channel)
+	if !authoritative {
+		if e.ReadState.MentionCount > 0 {
+			status = Mentioned
+		} else if e.Unread {
+			status = Unread
+		}
+	}
+	a.cacheReadState(channel, guild, status)
+	a.ui.Post(func() {
+		if authoritative && status == Read && a.store != nil {
+			// Retire local message counters when Discord acknowledges the
+			// channel; otherwise GuildPings would override the cache forever.
+			a.store.ClearUnread(channel)
+		}
+		if a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 	})
 }
 

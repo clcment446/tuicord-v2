@@ -53,10 +53,17 @@ func (a *App) handleThreadListSync(e *gateway.ThreadListSyncEvent) {
 			}
 		}
 		removed := a.store.SyncActiveThreads(guildID, parents, threads)
+		readStateChanged := false
 		for _, id := range removed {
 			a.invalidateChannelLoads(id)
+			if a.removeCachedReadState(id, guildID) {
+				readStateChanged = true
+			}
 		}
 		a.repairActiveChannel()
+		if readStateChanged && a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 		a.markThreadsLoaded(guildID)
 		if a.onChange != nil {
 			a.onChange()
@@ -129,6 +136,10 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 			channel.GuildID = discord.GuildID(DirectMessagesGuildID)
 			ingestPrivateChannel(a.store, channel)
 		}
+		// READY is authoritative for the connection's read-state generation.
+		// Rebuild from the directory already in memory so startup is seeded and
+		// a reconnect cannot retain entries from the previous session.
+		a.resetReadStateCache()
 		if a.onReady != nil {
 			a.onReady()
 		}
@@ -186,6 +197,7 @@ func (a *App) handleGuildDelete(e *gateway.GuildDeleteEvent) {
 			for _, channel := range a.store.Channels(id) {
 				a.invalidateChannelLoads(channel.ID)
 			}
+			a.removeGuildReadState(id)
 			a.store.RemoveGuild(id)
 			if a.activeGuild == id {
 				a.SetActive(0, 0)
@@ -234,16 +246,23 @@ func (a *App) handleChannelDelete(e *gateway.ChannelDeleteEvent) {
 			}
 		}
 		a.invalidateGuildChannelLoads(guildID)
+		readStateChanged := a.removeCachedReadState(id, guildID)
 		for _, guild := range a.store.Guilds() {
 			for _, channel := range a.store.Channels(guild.ID) {
 				if channel.ID == id || channel.ParentID == id {
 					a.invalidateChannelLoads(channel.ID)
+					if channel.ParentID == id && a.removeCachedReadState(channel.ID, channel.GuildID) {
+						readStateChanged = true
+					}
 				}
 			}
 		}
 		a.invalidateChannelLoads(id)
 		a.store.RemoveChannel(id)
 		a.repairActiveChannel()
+		if readStateChanged && a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 		if a.onChange != nil {
 			a.onChange()
 		}
@@ -266,8 +285,12 @@ func (a *App) handleThreadDelete(e *gateway.ThreadDeleteEvent) {
 		a.invalidateThreadLoad(guildID)
 		a.invalidateArchivedLoad(parentID)
 		a.invalidateChannelLoads(id)
+		readStateChanged := a.removeCachedReadState(id, guildID)
 		a.store.RemoveThread(id)
 		a.repairActiveChannel()
+		if readStateChanged && a.onReadStateChange != nil {
+			a.onReadStateChange()
+		}
 		if a.onChange != nil {
 			a.onChange()
 		}
