@@ -208,6 +208,41 @@ func TestReadAcknowledgementClearsLocalPing(t *testing.T) {
 	}
 }
 
+func TestMuteSettingChangeRefreshesCachedBadges(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7, LastMessageID: 100})
+	changes := 0
+	a := &App{store: st, ui: syncPoster{}, handle: ning, onReadStateChange: func() { changes++ }}
+
+	// Channel 42 is unread (read watermark behind the latest message).
+	a.putReadMark(42, readMark{lastRead: 50})
+	a.resetReadStateCache()
+	if got := a.GuildUnread(7); got != Unread {
+		t.Fatalf("pre-mute status = %v, want unread", got)
+	}
+
+	// Mute the channel through ningen, then deliver the settings update to App.
+	event := &gateway.UserGuildSettingsUpdateEvent{UserGuildSetting: gateway.UserGuildSetting{
+		GuildID:          7,
+		ChannelOverrides: []gateway.UserChannelOverride{{ChannelID: 42, Muted: true}},
+	}}
+	// ningen registers its MutedState on the embedded state handler (the
+	// prehandler), so dispatch there. READY initializes the mute maps; the
+	// settings update then applies the mute before App recomputes.
+	ning.State.Handler.Call(&gateway.ReadyEvent{})
+	ning.State.Handler.Call(event)
+	a.handleGuildSettingsUpdate(event)
+
+	if got := a.GuildUnread(7); got != Read {
+		t.Fatalf("muted channel status = %v, want read", got)
+	}
+	if changes == 0 {
+		t.Fatal("mute change did not fire a read-state refresh")
+	}
+}
+
 func TestDMAckWithZeroGuildClearsSyntheticDMBadge(t *testing.T) {
 	ning := appdiscord.WrapSession(session.New(""))
 	st := store.New(0)
