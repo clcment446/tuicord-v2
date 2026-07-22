@@ -41,12 +41,14 @@ func newBootstrapPluginManager(cfg *config.Config) (*plugin.Manager, *os.File, e
 // attachAndLoadPlugins preserves config.lua registrations by populating the
 // manager's bootstrap Host in place, then loads ordinary plugins under the
 // Lua-derived policy. Plugin startup side effects Post to the now-live UI Host.
-func attachAndLoadPlugins(mgr *plugin.Manager, orch *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles, activeTheme config.Theme) []error {
+func attachAndLoadPlugins(mgr *plugin.Manager, active func() *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles, activeTheme config.Theme) []error {
 	if mgr == nil {
 		return nil
 	}
-	mgr.AttachHost(newPluginHost(orch, uiApp, shell, cfg.ColorOverrides, styles, activeTheme))
-	orch.SetEventSink(mgr)
+	mgr.AttachHost(newPluginHost(active, uiApp, shell, cfg.ColorOverrides, styles, activeTheme))
+	// The event sink is bound to whichever account is active by accounts.Manager
+	// (see Options.EventSink), so plugins observe the active account rather than
+	// the launch account.
 	shell.SetPluginHost(mgr)
 
 	var disabled []string
@@ -63,9 +65,12 @@ func attachAndLoadPlugins(mgr *plugin.Manager, orch *app.App, uiApp *tui.App, sh
 }
 
 // newPluginHost builds the live side-effecting Host. Every UI/store mutation is
-// posted; synchronous accessors use app's immutable atomic snapshot and never
-// wait for an event loop that may not be running.
-func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, styles ui.Styles, activeTheme config.Theme) *plugin.Host {
+// posted; synchronous accessors use the account's immutable atomic snapshot and
+// never wait for an event loop that may not be running. Action and accessor
+// closures resolve the active account through `active` at call time, so a plugin
+// always acts through the currently selected Discord account rather than the one
+// wired at launch.
+func newPluginHost(active func() *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, styles ui.Styles, activeTheme config.Theme) *plugin.Host {
 	install := func(theme config.Theme) {
 		activeTheme = theme
 		overrides.Replace(theme.Styles)
@@ -115,24 +120,43 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 			})
 		},
 		Send: func(content string) {
-			uiApp.Post(func() { orch.Send(content) })
+			uiApp.Post(func() {
+				if orch := active(); orch != nil {
+					orch.Send(content)
+				}
+			})
 		},
 		SendTo: func(channelID uint64, content string) {
-			uiApp.Post(func() { orch.SendToChannel(store.ChannelID(channelID), content) })
+			uiApp.Post(func() {
+				if orch := active(); orch != nil {
+					orch.SendToChannel(store.ChannelID(channelID), content)
+				}
+			})
 		},
 		Reply: func(channelID, messageID uint64, content string, mention bool) {
 			uiApp.Post(func() {
-				msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID))
-				if ok {
+				orch := active()
+				if orch == nil {
+					return
+				}
+				if msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID)); ok {
 					orch.Reply(content, msg, mention)
 				}
 			})
 		},
 		React: func(channelID, messageID uint64, emoji string) {
-			uiApp.Post(func() { orch.AddReaction(store.ChannelID(channelID), store.MessageID(messageID), emoji) })
+			uiApp.Post(func() {
+				if orch := active(); orch != nil {
+					orch.AddReaction(store.ChannelID(channelID), store.MessageID(messageID), emoji)
+				}
+			})
 		},
 		SubmitComponent: func(channelID, messageID uint64, componentType int, customID string, values []string) {
 			uiApp.Post(func() {
+				orch := active()
+				if orch == nil {
+					return
+				}
 				msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID))
 				if !ok {
 					return
@@ -150,10 +174,19 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 				}
 			})
 		},
-		ActiveChannel: func() uint64 { return uint64(orch.Snapshot().ActiveChannel) },
-		ActiveGuild:   func() uint64 { return uint64(orch.Snapshot().ActiveGuild) },
-		SelfID:        func() uint64 { return uint64(orch.Snapshot().SelfID) },
+		ActiveChannel: func() uint64 { return uint64(activeSnapshot(active).ActiveChannel) },
+		ActiveGuild:   func() uint64 { return uint64(activeSnapshot(active).ActiveGuild) },
+		SelfID:        func() uint64 { return uint64(activeSnapshot(active).SelfID) },
 	}
+}
+
+// activeSnapshot returns the active account's immutable state snapshot, or a
+// zero snapshot when no account is currently built/active.
+func activeSnapshot(active func() *app.App) app.StateSnapshot {
+	if orch := active(); orch != nil {
+		return orch.Snapshot()
+	}
+	return app.StateSnapshot{}
 }
 
 func findMessage(st *store.Store, channel store.ChannelID, id store.MessageID) (store.Message, bool) {
