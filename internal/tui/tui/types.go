@@ -57,6 +57,25 @@ type EventOverlay interface {
 	HandleOverlay(Event) bool
 }
 
+// OverlayHitTester exposes a transient component painted outside the retained
+// tree. The runtime routes pointer drag and input directly to that component,
+// leaving its hit regions and interaction handles component-owned.
+type OverlayHitTester interface {
+	OverlayAt(x, y int) Widget
+}
+
+// OverlayHit is implemented by a transient component that owns pointer input
+// within its currently drawn bounds.
+type OverlayHit interface {
+	OverlayHit(x, y int) bool
+}
+
+// Resizable is implemented by components that own a resize handle. Resize
+// operations use the same capture lifecycle as drags.
+type Resizable interface {
+	ResizeStart(x, y int) (DragOp, bool)
+}
+
 // EventBubbler handles an event while it bubbles from a focused descendant
 // toward the root. Retained containers that normally forward Handle to their
 // children implement this separately so bubbling never broadcasts an event

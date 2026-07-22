@@ -80,9 +80,35 @@ func TestDragIgnoresRightButton(t *testing.T) {
 	}
 }
 
+func TestTransientOverlayOwnsDragWithoutRootGeometry(t *testing.T) {
+	op := &recordDragOp{}
+	target := &dragWidget{testWidget: *newTestWidget("floating", false), op: op}
+	root := &overlayHitRoot{testWidget: *newTestWidget("root", false), target: target}
+	app := New()
+	app.Render(root, Size{W: 30, H: 10})
+	if !app.Handle(input.MouseEvent{X: 12, Y: 3, Btn: input.ButtonLeft, Kind: input.MousePress}) {
+		t.Fatal("transient overlay press was not handled")
+	}
+	if !app.Drag.Active() {
+		t.Fatal("transient overlay did not start drag capture")
+	}
+}
+
 type dragWidget struct {
 	testWidget
 	op *recordDragOp
+}
+
+type overlayHitRoot struct {
+	testWidget
+	target Widget
+}
+
+func (w *overlayHitRoot) OverlayAt(x, y int) Widget {
+	if x == 12 && y == 3 {
+		return w.target
+	}
+	return nil
 }
 
 func (w *dragWidget) DragStart(x, y int) (DragOp, bool) {

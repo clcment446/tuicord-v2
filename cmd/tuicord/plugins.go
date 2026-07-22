@@ -106,6 +106,14 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 				uiApp.Invalidate()
 			})
 		},
+		OpenViewport: func(title string, lines []string, actions []plugin.ViewportAction, onAction func(string)) {
+			uiApp.Post(func() {
+				if shell != nil {
+					shell.OpenPluginViewport(title, lines, actions, onAction)
+				}
+				uiApp.Invalidate()
+			})
+		},
 		Send: func(content string) {
 			uiApp.Post(func() { orch.Send(content) })
 		},
@@ -122,6 +130,18 @@ func newPluginHost(orch *app.App, uiApp *tui.App, shell *ui.Shell, overrides *co
 		},
 		React: func(channelID, messageID uint64, emoji string) {
 			uiApp.Post(func() { orch.AddReaction(store.ChannelID(channelID), store.MessageID(messageID), emoji) })
+		},
+		SubmitComponent: func(channelID, messageID uint64, componentType int, customID string, values []string) {
+			uiApp.Post(func() {
+				msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID))
+				if !ok {
+					return
+				}
+				orch.SubmitComponent(app.ComponentSubmit{
+					Message: msg, ComponentType: componentType, CustomID: customID,
+					Values: append([]string(nil), values...),
+				})
+			})
 		},
 		Notify: func(title, body string) {
 			uiApp.Post(func() {

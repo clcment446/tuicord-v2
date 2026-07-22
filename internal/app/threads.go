@@ -41,12 +41,11 @@ func (a *App) loadActiveThreads(guild store.GuildID) {
 func (a *App) loadActiveThreadsFrom(guild store.GuildID, generation, version uint64) {
 	active, err := a.threads.ActiveThreads(discord.GuildID(guild))
 	if err != nil {
-		a.ui.Post(func() {
-			if a.store.GuildGeneration(guild) != generation || !a.threadLoadCurrent(guild, version) {
-				return
-			}
+		a.postIfCurrent(func() bool {
+			return a.store.GuildGeneration(guild) == generation && a.threadLoadCurrent(guild, version)
+		}, func() {
 			a.finishThreadLoad(guild, false)
-			a.reportError(err)
+			a.reportErrorOnUI(err)
 		})
 		return
 	}
@@ -59,10 +58,9 @@ func (a *App) loadActiveThreadsFrom(guild store.GuildID, generation, version uin
 	for _, m := range active.Members {
 		joined[store.ChannelID(m.ID)] = true
 	}
-	a.ui.Post(func() {
-		if a.store.GuildGeneration(guild) != generation || !a.threadLoadCurrent(guild, version) {
-			return
-		}
+	a.postIfCurrent(func() bool {
+		return a.store.GuildGeneration(guild) == generation && a.threadLoadCurrent(guild, version)
+	}, func() {
 		for _, t := range threads {
 			if t.Thread != nil && joined[t.ID] {
 				t.Thread.Joined = true
@@ -100,12 +98,11 @@ func (a *App) loadArchivedThreads(channel store.ChannelID, parentGuild store.Gui
 func (a *App) loadArchivedThreadsFrom(channel store.ChannelID, parentGuild store.GuildID, generation, version uint64, before discord.Timestamp) {
 	page, err := a.threads.PublicArchivedThreads(discord.ChannelID(channel), before, archivedPageLimit)
 	if err != nil {
-		a.ui.Post(func() {
-			if a.store.ChannelGeneration(channel) != generation || !a.archivedLoadCurrent(channel, version) {
-				return
-			}
+		a.postIfCurrent(func() bool {
+			return a.store.ChannelGeneration(channel) == generation && a.archivedLoadCurrent(channel, version)
+		}, func() {
 			a.finishArchivedLoad(channel, false, false, discord.Timestamp{})
-			a.reportError(err)
+			a.reportErrorOnUI(err)
 		})
 		return
 	}
@@ -116,10 +113,9 @@ func (a *App) loadArchivedThreadsFrom(channel store.ChannelID, parentGuild store
 		}
 		threads = append(threads, convertChannel(t))
 	}
-	a.ui.Post(func() {
-		if a.store.ChannelGeneration(channel) != generation || !a.archivedLoadCurrent(channel, version) {
-			return
-		}
+	a.postIfCurrent(func() bool {
+		return a.store.ChannelGeneration(channel) == generation && a.archivedLoadCurrent(channel, version)
+	}, func() {
 		for _, t := range threads {
 			a.store.UpsertChannel(t)
 		}
@@ -174,19 +170,15 @@ func (a *App) SetThreadArchived(thread store.ChannelID, archived bool) {
 	if a == nil || a.handle == nil || thread == 0 {
 		return
 	}
-	go func() {
+	a.runMutation(func() error {
 		data := api.ModifyChannelData{Archived: option.Bool(&archived)}
-		if err := a.handle.ModifyChannel(discord.ChannelID(thread), data); err != nil {
-			a.reportError(err)
-			return
+		return a.handle.ModifyChannel(discord.ChannelID(thread), data)
+	}, func() {
+		a.store.SetArchived(thread, archived)
+		if a.onChange != nil {
+			a.onChange()
 		}
-		a.ui.Post(func() {
-			a.store.SetArchived(thread, archived)
-			if a.onChange != nil {
-				a.onChange()
-			}
-		})
-	}()
+	})
 }
 
 // Publish crossposts an announcement-channel message to following servers.

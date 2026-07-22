@@ -131,6 +131,7 @@ func TestCompletionToken(t *testing.T) {
 	}{
 		{value: "hello :ptb", wantTrigger: ':', wantStart: len("hello "), wantQuery: "ptb", wantOK: true},
 		{value: "#general", wantTrigger: '#', wantStart: 0, wantQuery: "general", wantOK: true},
+		{value: ";sett", wantTrigger: ';', wantStart: 0, wantQuery: "sett", wantOK: true},
 		{value: "hello world", wantOK: false},
 		{value: "hello :two words", wantOK: false},
 	}

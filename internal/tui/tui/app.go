@@ -414,12 +414,27 @@ func (a *App) handleMouse(ev input.MouseEvent) bool {
 	a.mu.Lock()
 	root := a.root
 	a.mu.Unlock()
-	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
-		return true
-	}
 	a.mu.Lock()
 	hits := a.hits
 	a.mu.Unlock()
+	if a.Drag.Active() && a.Drag.HandleMouse(ev, hits) {
+		a.Invalidate()
+		return true
+	}
+	if overlays, ok := root.(OverlayHitTester); ok {
+		if target := overlays.OverlayAt(ev.X, ev.Y); target != nil {
+			if a.Drag.HandleWidgetMouse(ev, target) {
+				a.Invalidate()
+				return true
+			}
+			if target.Handle(ev) {
+				return true
+			}
+		}
+	}
+	if overlay, ok := root.(EventOverlay); ok && overlay.HandleOverlay(ev) {
+		return true
+	}
 
 	if ev.Kind == input.MousePress {
 		if hit, ok := hits.Hit(ev.X, ev.Y); ok {

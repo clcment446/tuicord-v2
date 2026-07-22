@@ -19,6 +19,7 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
+	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
@@ -156,6 +157,25 @@ func (s *Shell) OpenPluginOverlay(title string, lines []string) {
 	s.setIndependentOverlay(border)
 }
 
+// OpenPluginViewport shows a compact interactive plugin panel over the active
+// view. Reopening it replaces only the previous floating panel, never chat.
+func (s *Shell) OpenPluginViewport(title string, lines []string, actions []plugin.ViewportAction, onAction func(string)) {
+	if s == nil {
+		return
+	}
+	// This status surface is intentionally non-modal: opening it must preserve
+	// Vim INSERT mode and leave the composer focused.
+	viewport := newPluginViewport(title, lines, actions, onAction, s.styles)
+	if previous, ok := s.popup.(*pluginViewport); ok && previous.last.W > 0 && previous.last.H > 0 {
+		// Plugins commonly refresh a viewport by opening it again. Retain its
+		// rendered geometry so a data update never recenters a dragged/resized
+		// panel under the user's pointer.
+		viewport.modal.SetSize(previous.last.W, previous.last.H)
+		viewport.modal.SetPosition(previous.last.X, previous.last.Y)
+	}
+	s.popup = viewport
+}
+
 type desktopNotifier interface {
 	Notify(title, body string) error
 }
@@ -286,6 +306,13 @@ func (s *Shell) focusComposer() {
 func (s *Shell) beginComposerInput(allowReplacement bool) bool {
 	if s == nil || !s.cfg.Accessibility.VimNavigation || !s.composerWritable() || s.overlay != nil {
 		return false
+	}
+	// A plugin viewport is a non-modal popup and may be refreshed while the
+	// focus ring is being rebuilt. In that case the rebuild can briefly choose
+	// chat before the pending composer request is applied; tolerate that single
+	// replacement so pressing Vim's insert key still reaches the composer.
+	if _, ok := s.popup.(*pluginViewport); ok {
+		allowReplacement = true
 	}
 	s.bindEditorState()
 	s.cancelFocusRequest()
@@ -965,10 +992,24 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 		if s.handleToastPointer(mouse) {
 			return true
 		}
+		if _, ok := s.popup.(*pluginViewport); ok {
+			// tui.OverlayHitTester dispatches viewport pointer input directly so
+			// its component-owned drag/resize handles win without Shell geometry.
+			return false
+		}
 		return s.popup != nil && s.popup.Handle(mouse)
 	}
 	if s.popup != nil {
-		return s.popup.Handle(ev)
+		if s.popup.Handle(ev) {
+			return true
+		}
+		// Plugin viewports are non-modal status surfaces. If they do not handle
+		// an event, continue through Shell's normal/global routing so Vim mode
+		// can still enter INSERT while the panel is visible. Other popups keep
+		// their modal event barrier.
+		if _, ok := s.popup.(*pluginViewport); !ok {
+			return false
+		}
 	}
 	key, isKey := ev.(input.KeyEvent)
 	if !isKey || key.Release {
@@ -1011,6 +1052,15 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 		return true
 	}
 	return false
+}
+
+// OverlayAt returns a component-owned floating hit target. Shell manages only
+// z-order; each component owns its bounds and interaction geometry.
+func (s *Shell) OverlayAt(x, y int) tui.Widget {
+	if hit, ok := s.popup.(tui.OverlayHit); ok && hit.OverlayHit(x, y) {
+		return s.popup
+	}
+	return nil
 }
 
 func (s *Shell) handleToastPointer(mouse input.MouseEvent) bool {
@@ -1067,7 +1117,16 @@ func (s *Shell) Handle(ev tui.Event) bool {
 	}
 
 	if s.popup != nil {
-		return s.popup.Handle(ev)
+		if s.popup.Handle(ev) {
+			return true
+		}
+		// Plugin viewports are non-modal status surfaces. If they do not handle
+		// an event, continue through Shell's normal/global routing so Vim mode
+		// can still enter INSERT while the panel is visible. Other popups keep
+		// their modal event barrier.
+		if _, ok := s.popup.(*pluginViewport); !ok {
+			return false
+		}
 	}
 	if mouse, ok := ev.(input.MouseEvent); ok && mouse.Kind == input.MousePress {
 		s.forumPreview = nil
@@ -1483,9 +1542,17 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	}
 	trigger, start, query, ok := completionToken(value, cursor)
 	if !ok {
-		if _, inline := s.overlay.(*InlinePicker); inline {
+		switch s.overlay.(type) {
+		case *InlinePicker, *CommandPicker, *LocalCommandPicker:
 			s.closeOverlay()
 		}
+		return
+	}
+	if trigger == ';' {
+		if _, picker := s.overlay.(*LocalCommandPicker); picker {
+			return
+		}
+		s.openLocalCommandPicker(query, start)
 		return
 	}
 	if trigger == '/' {
@@ -1571,6 +1638,39 @@ func (s *Shell) openCommandPicker(query string) {
 	}()
 }
 
+func (s *Shell) openLocalCommandPicker(query string, start int) {
+	if s == nil || s.mv == nil {
+		return
+	}
+	var picker *LocalCommandPicker
+	picker = NewLocalCommandPicker(s.localCommandSpecs(), s.styles, query, func(name string) {
+		end := start + len(picker.Query()) + 1
+		s.completionSync = true
+		s.mv.ReplaceComposerRange(start, end, ";"+name+" ")
+		s.completionSync = false
+		s.closeOverlay()
+	}, s.closeOverlay)
+	s.setComposerOverlay(picker)
+}
+
+func (s *Shell) localCommandSpecs() []localCommandSpec {
+	commands := []localCommandSpec{
+		{Name: "help", Description: "Show local commands"},
+		{Name: "quit", Description: "Exit Tuicord"},
+		{Name: "switch", Description: "Switch channel"},
+		{Name: "settings", Description: "Open server settings"},
+		{Name: "theme", Description: "Change theme"},
+		{Name: "paste", Description: "Paste an image"},
+		{Name: "img", Description: "Paste an image"},
+	}
+	if s.plugins != nil {
+		for _, name := range s.plugins.CommandNames() {
+			commands = append(commands, localCommandSpec{Name: name, Description: "Plugin command"})
+		}
+	}
+	return commands
+}
+
 func (s *Shell) replaceCompletion(start int, insert string) {
 	if p, ok := s.overlay.(*InlinePicker); ok {
 		startEnd := start + len(p.query) + 1
@@ -1602,7 +1702,7 @@ func completionToken(value string, cursor int) (rune, int, string, bool) {
 		return 0, 0, "", false
 	}
 	trigger, size := utf8.DecodeRuneInString(value[start:])
-	if !strings.ContainsRune("/:%#@&+", trigger) {
+	if !strings.ContainsRune("/;:%#@&+", trigger) {
 		return 0, 0, "", false
 	}
 	return trigger, start, value[start+size : cursor], true

@@ -191,6 +191,22 @@ func (w *Modal) DragStart(x, y int) (DragOp, bool) {
 	return &modalDrag{modal: w, startX: rect.X, startY: rect.Y}, true
 }
 
+// ResizeStart starts a resize from the bottom-right corner. Modal owns size
+// clamping, so callers only need to expose this component to pointer routing.
+func (w *Modal) ResizeStart(x, y int) (DragOp, bool) {
+	if w == nil {
+		return nil, false
+	}
+	rect := w.last
+	if rect.W == 0 || rect.H == 0 {
+		rect = screen.Rect{X: w.x, Y: w.y, W: w.w, H: w.h}
+	}
+	if x != rect.X+rect.W-1 || y != rect.Y+rect.H-1 {
+		return nil, false
+	}
+	return &modalResize{modal: w, width: w.w, height: w.h}, true
+}
+
 func (w *Modal) rebuild() {
 	w.node = layout.Node{
 		Dir:     layout.Column,
@@ -205,6 +221,25 @@ func (w *Modal) rebuild() {
 type modalDrag struct {
 	modal          *Modal
 	startX, startY int
+}
+
+type modalResize struct {
+	modal         *Modal
+	width, height int
+}
+
+func (op *modalResize) DragMove(dx, dy int) {
+	if op == nil || op.modal == nil {
+		return
+	}
+	op.modal.SetSize(op.width+dx, op.height+dy)
+}
+
+func (op *modalResize) DragEnd(commit bool) {
+	if op == nil || op.modal == nil || commit {
+		return
+	}
+	op.modal.SetSize(op.width, op.height)
 }
 
 func (op *modalDrag) DragMove(dx, dy int) {

@@ -35,4 +35,3 @@ the guild avatar before the global avatar.
 
 Regression coverage is in `internal/ui/richblocks_test.go`; package checks
 passed for `./internal/ui ./internal/store ./internal/media ./internal/tui/tui`.
-`internal/app` tests are currently blocked by unrelated missing AutoBot members.

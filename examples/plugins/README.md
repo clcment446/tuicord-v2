@@ -77,7 +77,11 @@ A global `tuicord` table is available to every plugin.
 | `tuicord.send_to(channel_id, content)` | Send to a specific channel. |
 | `tuicord.reply(channel_id, message_id, content, mention)` | Reply to a message. |
 | `tuicord.react(channel_id, message_id, emoji)` | Add a reaction. |
+| `tuicord.click(channel_id, message_id, custom_id)` | Click a button component from an event payload. |
+| `tuicord.select(channel_id, message_id, custom_id, values)` | Submit values for a string-select component. |
 | `tuicord.notify(title, body)` | Show a transient notice. |
+| `tuicord.every(milliseconds, fn)` | Run a callback periodically on the plugin runtime. |
+| `tuicord.now_ms()` | Read the current Unix time in milliseconds. |
 | `tuicord.style(selector, opts)` | Recolor a semantic surface at runtime; `opts` is `{fg=, bg=, attrs=, bold=true, ...}`. Selectors mirror `colors.conf`. |
 | `tuicord.configure(opts)` | Strict typed config overlay; available only in config.lua. |
 | `tuicord.theme(name, definition)` | Register a validated flat or `{palette=, styles=}` theme. |
@@ -89,8 +93,9 @@ A global `tuicord` table is available to every plugin.
 ### Events
 
 `ready`, `message.create`, `message.update`, `message.delete`, `reaction.add`,
-`reaction.remove`, `channel.switch`, `error`. Payloads are tables; see the
-constants in `internal/plugin/events.go` for each shape.
+`reaction.remove`, `channel.switch`, `error`. Message payloads include normalized
+`components` (buttons, selects, text, and nested children) and `embeds`, so a
+plugin can safely react to the exact component IDs Discord sent.
 
 ### Identifiers
 

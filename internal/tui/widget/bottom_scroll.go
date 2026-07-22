@@ -28,6 +28,22 @@ func (s *BottomScroll) Update(content, viewport int) {
 	s.offset = clampOffset(s.offset, s.maxOffset())
 }
 
+// UpdateAnchored records a content change while keeping the requested top row
+// at the same position. Interactive lists use this when an explicitly focused
+// item is a stronger anchor than the newest content.
+func (s *BottomScroll) UpdateAnchored(content, viewport, top int) {
+	if s == nil {
+		return
+	}
+	content = maxInt(content, 0)
+	viewport = maxInt(viewport, 0)
+	top = maxInt(top, 0)
+	s.content = content
+	s.viewport = viewport
+	s.known = true
+	s.offset = clampOffset(content-viewport-top, s.maxOffset())
+}
+
 // UpdatePrepend records content that was added before the existing content.
 // The bottom-relative offset must stay unchanged so the previously visible
 // messages remain in place while older history becomes available above them.
