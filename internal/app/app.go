@@ -335,6 +335,16 @@ type App struct {
 	sessionID string
 }
 
+// UnreadStatus is the server-authoritative attention state for a guild or
+// channel. Mentions take precedence over ordinary unread messages.
+type UnreadStatus uint8
+
+const (
+	Read UnreadStatus = iota
+	Unread
+	Mentioned
+)
+
 // New returns an orchestrator over the given ningen state, store, and UI
 // runtime. The REST interface slices are backed by the embedded arikawa
 // session (ningen does not change the REST surface), while gateway handler
@@ -2201,4 +2211,88 @@ func (a *App) Unread() (unread bool, mentions int) {
 		unread = true
 	}
 	return unread, mentions
+}
+
+// ChannelUnread reports a channel's unread state from Discord's read state.
+// A local store fallback keeps the sidebar useful before READY has populated
+// read states and in tests that do not have a connected gateway.
+func (a *App) ChannelUnread(channel store.ChannelID) UnreadStatus {
+	if a == nil || a.store == nil || channel == 0 {
+		return Read
+	}
+	if a.handle != nil && a.handle.ReadState != nil {
+		id := discord.ChannelID(channel)
+		if state := a.handle.ReadState.ReadState(id); state != nil {
+			if state.MentionCount > 0 {
+				return Mentioned
+			}
+			if a.handle.ChannelIsUnread(id, ningen.UnreadOpts{}) == ningen.ChannelUnread {
+				return Unread
+			}
+			return Read
+		}
+	}
+	if a.store.Pings(channel) > 0 {
+		return Mentioned
+	}
+	if a.store.Unread(channel) > 0 {
+		return Unread
+	}
+	return Read
+}
+
+// GuildUnread returns the strongest read state among a guild's channels.
+func (a *App) GuildUnread(guild store.GuildID) UnreadStatus {
+	if a == nil || a.store == nil || guild == 0 {
+		return Read
+	}
+	status := Read
+	for _, channel := range a.store.Channels(guild) {
+		if next := a.ChannelUnread(channel.ID); next > status {
+			status = next
+		}
+	}
+	return status
+}
+
+// MarkRead acknowledges a message with Discord and clears the local fallback.
+// Read positions never move backwards when the focus bar visits an older row.
+func (a *App) MarkRead(channel store.ChannelID, message store.MessageID) {
+	if a == nil || a.store == nil || channel == 0 {
+		return
+	}
+	if latest, ok := a.store.LastMsg(channel); ok && latest.ID > message {
+		message = latest.ID
+	}
+	if message == 0 {
+		return
+	}
+	if a.handle != nil && a.handle.ReadState != nil {
+		a.handle.ReadState.MarkRead(discord.ChannelID(channel), discord.MessageID(message))
+	}
+	a.store.ClearUnread(channel)
+	if a.onChange != nil {
+		a.onChange()
+	}
+}
+
+// MarkChannelRead acknowledges the newest locally known message in a channel.
+func (a *App) MarkChannelRead(channel store.ChannelID) {
+	if a == nil || a.store == nil {
+		return
+	}
+	if latest, ok := a.store.LastMsg(channel); ok {
+		a.MarkRead(channel, latest.ID)
+		return
+	}
+	if a.handle != nil {
+		message := store.MessageID(a.handle.LastMessage(discord.ChannelID(channel)))
+		if message != 0 {
+			a.MarkRead(channel, message)
+		} else {
+			a.store.ClearUnread(channel)
+		}
+		return
+	}
+	a.store.ClearUnread(channel)
 }
