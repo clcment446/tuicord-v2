@@ -127,6 +127,10 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 		a.sessionID = sessionID
 		a.store.SetNitro(hasNitro)
 		a.store.SetGuildFolders(folders)
+		// READY guilds are not reconciled here: a user-session READY does not
+		// reliably deliver the full guild/channel directory (hence the REST pull in
+		// connect), so pruning against it would drop live entities. Per-guild
+		// reconciliation happens on the authoritative GUILD_CREATE that follows.
 		for i := range guilds {
 			ingestGuild(a.store, &guilds[i])
 			a.markRolesLoaded(store.GuildID(guilds[i].ID))
@@ -158,6 +162,10 @@ func (a *App) handleGuildCreate(e *gateway.GuildCreateEvent) {
 	a.ui.Post(func() {
 		ingestGuild(a.store, &guild)
 		if !guild.Unavailable {
+			// A fresh GUILD_CREATE (notably on reconnect) is the authoritative
+			// snapshot of this guild's channels and roles. Prune anything the store
+			// still holds that the snapshot dropped while we were disconnected.
+			a.reconcileGuildFromSnapshot(&guild)
 			a.markRolesLoaded(store.GuildID(guild.ID))
 			if len(guild.Channels) > 0 {
 				a.markChannelsLoaded(store.GuildID(guild.ID))
@@ -365,6 +373,61 @@ func (a *App) invalidateChannelLoads(id store.ChannelID) {
 	// Guild/DM directory hydration can contain this channel. Let a fresh load
 	// start, while its generation snapshot rejects the old completion.
 	a.guildsGate.invalidate()
+}
+
+// reconcileGuildFromSnapshot prunes channels and roles the store still holds for
+// a guild that a fresh GUILD_CREATE snapshot no longer lists — entities deleted
+// while the client was disconnected, which never produce a delete event. Threads
+// are intentionally left alone: the guild snapshot carries only active threads,
+// so they are reconciled separately via THREAD_LIST_SYNC. A snapshot with no
+// channels is treated as partial and never prunes channels.
+func (a *App) reconcileGuildFromSnapshot(g *gateway.GuildCreateEvent) {
+	if a == nil || a.store == nil || g == nil || g.Unavailable {
+		return
+	}
+	guildID := store.GuildID(g.ID)
+	readStateChanged := false
+	if len(g.Channels) > 0 {
+		channels := make(map[store.ChannelID]struct{}, len(g.Channels))
+		for _, c := range g.Channels {
+			channels[store.ChannelID(c.ID)] = struct{}{}
+		}
+		for _, c := range a.store.Channels(guildID) {
+			if c.Thread != nil {
+				continue
+			}
+			if _, ok := channels[c.ID]; ok {
+				continue
+			}
+			a.invalidateChannelLoads(c.ID)
+			if a.removeCachedReadState(c.ID, guildID) {
+				readStateChanged = true
+			}
+			// RemoveChannel cascades this channel's child threads.
+			a.store.RemoveChannel(c.ID)
+		}
+	}
+	if len(g.Roles) > 0 {
+		roles := make(map[store.RoleID]struct{}, len(g.Roles))
+		for _, r := range g.Roles {
+			roles[store.RoleID(r.ID)] = struct{}{}
+		}
+		rolesInvalidated := false
+		for _, r := range a.store.Roles(guildID) {
+			if _, ok := roles[r.ID]; ok {
+				continue
+			}
+			if !rolesInvalidated {
+				a.invalidateRoleLoad(guildID)
+				rolesInvalidated = true
+			}
+			a.store.RemoveRole(guildID, r.ID)
+		}
+	}
+	if readStateChanged && a.onReadStateChange != nil {
+		a.onReadStateChange()
+	}
+	a.repairActiveChannel()
 }
 
 // repairActiveChannel clears a selection removed by channel or thread
