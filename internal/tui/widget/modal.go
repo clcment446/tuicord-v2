@@ -113,7 +113,8 @@ func (w *Modal) Bounds(avail tui.Size) screen.Rect {
 		return screen.Rect{}
 	}
 	width := minInt(w.w, maxInt(avail.W, 0))
-	height := minInt(w.h, maxInt(avail.H, 0))
+	expandedHeight := minInt(w.h, maxInt(avail.H, 0))
+	height := expandedHeight
 	if w.collapsed {
 		height = minInt(1, maxInt(avail.H, 0))
 	}
@@ -121,7 +122,9 @@ func (w *Modal) Bounds(avail tui.Size) screen.Rect {
 	y := w.y
 	if !w.explicitOrigin {
 		x = maxInt((avail.W-width)/2, 0)
-		y = maxInt((avail.H-height)/2, 0)
+		// Keep an implicitly centered modal's title bar anchored where it was
+		// while expanded instead of re-centering the one-row presentation.
+		y = maxInt((avail.H-expandedHeight)/2, 0)
 	}
 	x = clampInt(x, 0, maxInt(avail.W-width, 0))
 	y = clampInt(y, 0, maxInt(avail.H-height, 0))
@@ -173,16 +176,26 @@ func (w *Modal) Draw(r screen.Region) {
 	w.last = rect
 	for x := rect.X; x < rect.X+rect.W; x++ {
 		r.Set(x, rect.Y, styled("─", w.style))
-		r.Set(x, rect.Y+rect.H-1, styled("─", w.style))
+		if rect.H > 1 {
+			r.Set(x, rect.Y+rect.H-1, styled("─", w.style))
+		}
 	}
-	for y := rect.Y; y < rect.Y+rect.H; y++ {
-		r.Set(rect.X, y, styled("│", w.style))
-		r.Set(rect.X+rect.W-1, y, styled("│", w.style))
+	if rect.W > 1 {
+		for y := rect.Y; y < rect.Y+rect.H; y++ {
+			r.Set(rect.X, y, styled("│", w.style))
+			r.Set(rect.X+rect.W-1, y, styled("│", w.style))
+		}
 	}
 	r.Set(rect.X, rect.Y, styled("┌", w.style))
-	r.Set(rect.X+rect.W-1, rect.Y, styled("┐", w.style))
-	r.Set(rect.X, rect.Y+rect.H-1, styled("└", w.style))
-	r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled("┘", w.style))
+	if rect.W > 1 {
+		r.Set(rect.X+rect.W-1, rect.Y, styled("┐", w.style))
+	}
+	if rect.H > 1 {
+		r.Set(rect.X, rect.Y+rect.H-1, styled("└", w.style))
+		if rect.W > 1 {
+			r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled("┘", w.style))
+		}
+	}
 	if w.title != "" && rect.W > 4 {
 		title := " " + text.Truncate(w.title, rect.W-4, text.Ellipsis) + " "
 		drawText(r, rect.X+1, rect.Y, title, w.style)
@@ -191,7 +204,7 @@ func (w *Modal) Draw(r screen.Region) {
 
 // Handle forwards events to the child when one is present.
 func (w *Modal) Handle(ev tui.Event) bool {
-	if w == nil || w.child == nil {
+	if w == nil || w.child == nil || w.collapsed {
 		return false
 	}
 	return w.child.Handle(ev)

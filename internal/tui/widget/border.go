@@ -185,16 +185,26 @@ func (w *Border) drawFrame(r screen.Region) {
 	lastY := r.Height() - 1
 	for x := 0; x < r.Width(); x++ {
 		r.Set(x, 0, styled(w.chars.Horizontal, style))
-		r.Set(x, lastY, styled(w.chars.Horizontal, style))
+		if lastY > 0 {
+			r.Set(x, lastY, styled(w.chars.Horizontal, style))
+		}
 	}
-	for y := 0; y < r.Height(); y++ {
-		r.Set(0, y, styled(w.chars.Vertical, style))
-		r.Set(lastX, y, styled(w.chars.Vertical, style))
+	if lastX > 0 {
+		for y := 0; y < r.Height(); y++ {
+			r.Set(0, y, styled(w.chars.Vertical, style))
+			r.Set(lastX, y, styled(w.chars.Vertical, style))
+		}
 	}
 	r.Set(0, 0, styled(w.chars.TopLeft, style))
-	r.Set(lastX, 0, styled(w.chars.TopRight, style))
-	r.Set(0, lastY, styled(w.chars.BottomLeft, style))
-	r.Set(lastX, lastY, styled(w.chars.BottomRight, style))
+	if lastX > 0 {
+		r.Set(lastX, 0, styled(w.chars.TopRight, style))
+	}
+	if lastY > 0 {
+		r.Set(0, lastY, styled(w.chars.BottomLeft, style))
+		if lastX > 0 {
+			r.Set(lastX, lastY, styled(w.chars.BottomRight, style))
+		}
+	}
 	if w.title == "" || r.Width() <= 4 {
 		return
 	}

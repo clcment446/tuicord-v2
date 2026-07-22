@@ -21,3 +21,16 @@ func TestBorderUsesFocusStyleWhenFocused(t *testing.T) {
 		t.Fatalf("focused border style = %+v, want %+v", got, focused)
 	}
 }
+
+func TestBorderOneRowFrameUsesTopCorners(t *testing.T) {
+	border := NewBorder(nil)
+	buf := screen.NewBuffer(8, 1)
+	border.Draw(buf.Clip(buf.Bounds()))
+
+	if got := buf.Cell(0, 0).Content; got != "┌" {
+		t.Fatalf("one-row left corner = %q, want ┌", got)
+	}
+	if got := buf.Cell(7, 0).Content; got != "┐" {
+		t.Fatalf("one-row right corner = %q, want ┐", got)
+	}
+}
