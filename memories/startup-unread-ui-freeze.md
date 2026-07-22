@@ -34,7 +34,18 @@ full guild and generic refresh callbacks.
 - Avoid duplicate generic refresh after `GUILD_CREATE` and duplicate member
   refresh inside `MainView.Refresh`.
 
+## Follow-up crash
+
+The local mute helper added by this fix initially checked `App` and ningen state
+but dereferenced `a.store` without a nil guard. A read update delivered to a
+partially initialized App panicked in `Store.Channel`. `channelMutedLocal` now
+treats a missing store as unmuted, and `app.New` establishes the stronger
+invariant that its store is always non-nil (`259a3f8`). Regression tests cover
+both the callback and constructor paths.
+
 ## Invariant
 
 Notification badges must never perform REST or permission hydration. Bulk
 Discord dispatches must remain bulk through cache update and UI invalidation.
+Gateway callbacks must tolerate partial lifecycle state; constructors should
+establish non-nil core dependencies where possible.
