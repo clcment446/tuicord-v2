@@ -1,7 +1,7 @@
 # Maintainer: Styly <claudiotorresptpt@gmail.com>
 _pkgname=tuicord
 pkgname=tuicord-git
-pkgver=v0.1.1
+pkgver=v0.1.2
 pkgrel=1
 pkgdesc="A Discord client that runs in your terminal, written in Go"
 arch=('x86_64' 'aarch64')
