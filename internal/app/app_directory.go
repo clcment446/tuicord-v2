@@ -3,9 +3,24 @@ package app
 
 import (
 	"awesomeProject/internal/store"
+	"errors"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"sync"
+	"time"
 )
+
+// Directory self-retry bounds. A guild/channel delete landing during each REST
+// round trip re-invalidates the directory generation; without a cap the load
+// would retry forever (REST livelock / rate-limit). maxDirectoryLoadRetries
+// bounds the self-retries, each spaced by defaultDirectoryRetryBackoff.
+const (
+	maxDirectoryLoadRetries      = 3
+	defaultDirectoryRetryBackoff = 250 * time.Millisecond
+)
+
+// errDirectoryUnsettled is surfaced when a directory load keeps being
+// invalidated by concurrent deletions until the retry budget is exhausted.
+var errDirectoryUnsettled = errors.New("directory load kept being invalidated by concurrent changes")
 
 // LoadRoles fetches role definitions for a guild once per session. READY and
 // GUILD_CREATE usually include roles, so this is primarily a guarded fallback.
@@ -78,9 +93,10 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 			// version is still current, meaning the rejection was a generation
 			// change (a deletion mid-load) with no newer request to replace it —
 			// retry so the directory is not silently dropped. A false result means
-			// a newer request already supersedes this one.
+			// a newer request already supersedes this one. The retry is bounded and
+			// backed off so a delete landing on every round trip cannot livelock REST.
 			if a.finishGuildLoadVersion(snapshot.gateVersion, false) {
-				a.LoadGuilds(limit)
+				a.scheduleGuildLoadRetry(limit, snapshot.attempt)
 			}
 			return
 		}
@@ -115,6 +131,36 @@ func (a *App) loadGuildsFrom(limit uint, snapshot directoryRequestSnapshot) {
 		if a.onReady != nil {
 			a.onReady()
 		}
+	})
+}
+
+// scheduleGuildLoadRetry re-runs a directory load that was invalidated by a
+// mid-flight generation change. It runs on the UI goroutine (from loadGuildsFrom's
+// Post). Rather than re-invoke synchronously, it reserves a fresh gate version,
+// snapshots the current generations, and re-issues after a short backoff with an
+// incremented attempt counter. Once the budget is spent it gives up: leave the
+// gate unloaded (retryable on the next connect) and surface a clear error.
+func (a *App) scheduleGuildLoadRetry(limit uint, attempt int) {
+	if attempt >= maxDirectoryLoadRetries {
+		a.finishGuildLoad(false)
+		if a.onError != nil {
+			a.onError(errDirectoryUnsettled)
+		}
+		return
+	}
+	version, ok := a.beginGuildLoad()
+	if !ok {
+		return
+	}
+	next := a.directoryRequestSnapshot()
+	next.gateVersion = version
+	next.attempt = attempt + 1
+	backoff := a.directoryRetryBackoff
+	if backoff <= 0 {
+		backoff = defaultDirectoryRetryBackoff
+	}
+	time.AfterFunc(backoff, func() {
+		a.loadGuildsFrom(limit, next)
 	})
 }
 

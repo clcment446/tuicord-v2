@@ -60,6 +60,8 @@ type fakeSender struct {
 	reaction             discord.APIEmoji
 	err                  error
 	sendResult           *discord.Message
+	editResult           *discord.Message
+	guildsHook           func()
 	done                 chan struct{}
 	history              []discord.Message
 	historyBefore        []discord.Message
@@ -107,6 +109,9 @@ func (f *fakeSender) EditText(_ discord.ChannelID, _ discord.MessageID, content 
 	f.mu.Unlock()
 	if f.done != nil {
 		close(f.done)
+	}
+	if f.editResult != nil {
+		return f.editResult, f.err
 	}
 	return &discord.Message{}, f.err
 }
@@ -199,6 +204,9 @@ func (f *fakeSender) Guilds(uint) ([]discord.Guild, error) {
 	f.mu.Lock()
 	f.guildsN++
 	f.mu.Unlock()
+	if f.guildsHook != nil {
+		f.guildsHook()
+	}
 	return append([]discord.Guild(nil), f.guilds...), f.guildsErr
 }
 
@@ -461,6 +469,105 @@ func TestDeleteMessageRemovesOnRESTSuccess(t *testing.T) {
 	<-applied
 	if got := len(a.store.Messages(42)); got != 0 {
 		t.Fatalf("messages after REST delete = %d, want 0 (removed without a gateway echo)", got)
+	}
+}
+
+func TestEditMessageAppliesRESTResponseContent(t *testing.T) {
+	fs := &fakeSender{editResult: &discord.Message{ID: 9, ChannelID: 42, Content: "authoritative"}}
+	a := newTestApp(fs)
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "original"})
+	applied := make(chan struct{})
+	a.OnChange(func() { close(applied) })
+
+	// The user typed "typed" but the store must reflect the server's committed body.
+	a.EditMessage(42, 9, "typed")
+	<-applied
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 || msgs[0].Content != "authoritative" {
+		t.Fatalf("edited content = %+v, want \"authoritative\" from the REST response", msgs)
+	}
+}
+
+func TestEditConfirmationsConvergeOnServerLastWrite(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "original"})
+
+	base := time.Now()
+	// Two edits complete REST out of order: the newer edit (base+1s) applies first,
+	// then the older edit (base) applies late. The store must keep the newer content
+	// rather than letting the last goroutine to reach the UI win.
+	a.applyEditConfirmation(42, 9, "second", base.Add(time.Second))
+	a.applyEditConfirmation(42, 9, "first", base)
+
+	msgs := a.store.Messages(42)
+	if len(msgs) != 1 {
+		t.Fatalf("store holds %d messages, want 1", len(msgs))
+	}
+	if msgs[0].Content != "second" {
+		t.Fatalf("message content = %q, want \"second\" (server's last write must win)", msgs[0].Content)
+	}
+}
+
+func TestDeleteThenEditDoesNotResurrectMessage(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{ID: 9, ChannelID: 42, Content: "bye"})
+
+	// The delete lands first, removing the message; a late edit confirmation for the
+	// removed message must not bring it back.
+	a.store.RemoveMessage(42, 9)
+	a.applyEditConfirmation(42, 9, "edited", time.Now())
+
+	if got := len(a.store.Messages(42)); got != 0 {
+		t.Fatalf("messages after delete-then-edit = %d, want 0 (edit must not resurrect)", got)
+	}
+}
+
+func TestDirectoryLoadRetryStormIsBounded(t *testing.T) {
+	fs := &fakeSender{guilds: []discord.Guild{{ID: 1, Name: "g"}}}
+	a := newTestApp(fs)
+	a.directoryRetryBackoff = time.Millisecond
+	// Every REST round trip mutates the store generation, so directorySnapshotCurrent
+	// rejects each completion and forces another retry — the storm the cap must stop.
+	var extra store.GuildID = 1000
+	fs.guildsHook = func() {
+		a.store.UpsertGuild(store.Guild{ID: extra, Name: "x"})
+		extra++
+	}
+	errCh := make(chan error, 1)
+	a.OnError(func(err error) {
+		select {
+		case errCh <- err:
+		default:
+		}
+	})
+
+	a.LoadGuilds(100)
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, errDirectoryUnsettled) {
+			t.Fatalf("directory retry error = %v, want errDirectoryUnsettled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("directory load retried without ever stopping (no error after the cap)")
+	}
+
+	// The gate is left unloaded so a later connect can retry, and REST was hit a
+	// bounded number of times, not forever.
+	a.resourceMu.Lock()
+	loaded := a.guildsGate.loaded
+	pending := a.guildsGate.pending
+	a.resourceMu.Unlock()
+	if loaded || pending {
+		t.Fatalf("directory gate loaded=%v pending=%v, want unloaded and not pending", loaded, pending)
+	}
+	fs.mu.Lock()
+	calls := fs.guildsN
+	fs.mu.Unlock()
+	if calls != maxDirectoryLoadRetries+1 {
+		t.Fatalf("guild REST calls = %d, want %d (initial + %d bounded retries)",
+			calls, maxDirectoryLoadRetries+1, maxDirectoryLoadRetries)
 	}
 }
 

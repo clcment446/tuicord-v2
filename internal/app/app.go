@@ -332,6 +332,16 @@ type App struct {
 	// markers are fed only from value copies (READY entries and read.UpdateEvent)
 	// under unreadMu, so no reader ever touches ningen's live struct.
 	readMarks map[store.ChannelID]readMark
+	// editApplied records, per message, the edit timestamp of the last REST edit
+	// response applied to the store. Two EditMessage REST calls can complete out
+	// of order; comparing against this makes them converge on the server's last
+	// write instead of whichever goroutine reaches the UI last. It is mutated only
+	// on the UI goroutine (inside EditMessage's Post), so it needs no lock.
+	editApplied map[store.ChannelID]map[store.MessageID]time.Time
+	// directoryRetryBackoff delays each self-retry of a directory load that was
+	// invalidated mid-flight. Zero uses defaultDirectoryRetryBackoff; tests set it
+	// small to keep the bounded-retry path fast.
+	directoryRetryBackoff time.Duration
 	// sessionID is the gateway session identifier from READY; Discord requires
 	// it on user-originated interaction payloads.
 	sessionID string
@@ -576,6 +586,9 @@ type directoryRequestSnapshot struct {
 	guilds      map[store.GuildID]uint64
 	channels    map[store.ChannelID]uint64
 	gateVersion uint64
+	// attempt counts how many times this directory load has already been retried
+	// after a mid-flight generation change, so the self-retry can be capped.
+	attempt int
 }
 
 // dmHydrationConcurrency bounds how many DM channel-detail requests run at once

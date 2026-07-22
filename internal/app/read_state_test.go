@@ -272,6 +272,78 @@ func TestDMAckWithZeroGuildClearsSyntheticDMBadge(t *testing.T) {
 	}
 }
 
+func TestReadAckAfterReadySurvivesReplaceReadMarks(t *testing.T) {
+	ui := &queuedPoster{}
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
+	a := &App{store: st, ui: ui}
+
+	// READY snapshots the connection's markers and enqueues replaceReadMarks.
+	ready := &gateway.ReadyEvent{}
+	ready.ReadStates = []gateway.ReadState{{ChannelID: 42, LastMessageID: 60}}
+	a.handleReady(ready)
+	// A live read ack for the same channel lands before READY's Post drains.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 90},
+		GuildID:   7,
+	})
+	// FIFO drain runs replaceReadMarks (from READY) before the ack's putReadMark, so
+	// the ack's newer watermark must survive rather than being wiped as a lost ack.
+	ui.run()
+
+	mark, ok := a.lookupReadMark(42)
+	if !ok || mark.lastRead != 90 {
+		t.Fatalf("read mark = %+v ok=%v, want lastRead 90 (the ack must survive READY)", mark, ok)
+	}
+}
+
+func TestLateReadAckDoesNotSynchronouslyResurrectDeletedMark(t *testing.T) {
+	ui := &queuedPoster{}
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 7})
+	st.UpsertChannel(store.Channel{ID: 42, GuildID: 7})
+	a := &App{store: st, ui: ui}
+	a.putReadMark(42, readMark{lastRead: 50})
+
+	// The channel is deleted; draining its Post drops the cached mark.
+	a.handleChannelDelete(&gateway.ChannelDeleteEvent{Channel: discord.Channel{ID: 42, GuildID: 7}})
+	ui.run()
+	if _, ok := a.lookupReadMark(42); ok {
+		t.Fatal("channel delete did not drop the read mark")
+	}
+
+	// A read ack for the just-deleted channel arrives late. Because putReadMark now
+	// runs on the UI queue rather than synchronously on the ingest goroutine, it
+	// cannot inject an orphaned mark ahead of the ordered delete cleanup.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 90},
+		GuildID:   7,
+	})
+	if _, ok := a.lookupReadMark(42); ok {
+		t.Fatal("late read ack synchronously resurrected a mark for the deleted channel")
+	}
+}
+
+func TestDMAckForUnhydratedChannelResolvesToDMGuild(t *testing.T) {
+	// The DM channel is not yet stored (still hydrating) when its ack arrives.
+	a := &App{store: store.New(0), ui: syncPoster{}}
+
+	// A DM ack carries guild id 0; with no store entry to resolve it, the update
+	// must still be routed to the synthetic DM guild rather than dropped.
+	a.handleReadStateUpdate(&read.UpdateEvent{
+		ReadState: gateway.ReadState{ChannelID: 42, LastMessageID: 50, MentionCount: 1},
+		GuildID:   0,
+	})
+
+	if got := a.GuildUnread(DirectMessagesGuildID); got != Mentioned {
+		t.Fatalf("unhydrated DM ack guild status = %v, want mentioned under the DM guild", got)
+	}
+	if got := a.ChannelUnread(42); got != Mentioned {
+		t.Fatalf("unhydrated DM channel status = %v, want mentioned", got)
+	}
+}
+
 func TestReadStateCacheRemovedByDeletionPaths(t *testing.T) {
 	t.Run("channel and child thread", func(t *testing.T) {
 		a := newTestApp(&fakeSender{})

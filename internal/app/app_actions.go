@@ -9,6 +9,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Send posts content to the active channel with optimistic local echo.
@@ -244,19 +245,55 @@ func (a *App) EditMessage(channel store.ChannelID, id store.MessageID, content s
 		return
 	}
 	go func() {
-		if _, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content); err != nil {
+		resp, err := a.send.EditText(discord.ChannelID(channel), discord.MessageID(id), content)
+		if err != nil {
 			a.reportAsyncError(err)
 			return
 		}
-		// Apply the content we just committed rather than waiting for the
-		// MESSAGE_UPDATE echo, which may be missed.
+		if resp == nil {
+			return
+		}
+		// Confirm from the authoritative REST response, mirroring deliver: the body
+		// carries the server's committed content and edit timestamp, so two rapid
+		// edits whose REST calls complete out of order still converge on the server's
+		// last write instead of whichever goroutine reaches the UI last.
+		confirmed := convertMessage(*resp)
+		edited := resp.EditedTimestamp.Time()
 		a.ui.Post(func() {
-			a.store.UpdateMessage(channel, id, func(m *store.Message) { m.Content = content })
-			if a.onChange != nil {
-				a.onChange()
-			}
+			a.applyEditConfirmation(channel, id, confirmed.Content, edited)
 		})
 	}()
+}
+
+// applyEditConfirmation writes an authoritative edit response into the store on
+// the UI goroutine. The HasMessage guard prevents a delete that already landed
+// from being undone (delete-then-edit must not resurrect the message). The
+// edit-timestamp check keeps the store monotonic: when two edits complete out of
+// order, a response older than the last one applied is dropped, so both paths
+// settle on the server's final content. editApplied is UI-goroutine owned, so it
+// needs no lock.
+func (a *App) applyEditConfirmation(channel store.ChannelID, id store.MessageID, content string, edited time.Time) {
+	if a == nil || a.store == nil || !a.store.HasMessage(channel, id) {
+		return
+	}
+	if a.editApplied == nil {
+		a.editApplied = make(map[store.ChannelID]map[store.MessageID]time.Time)
+	}
+	applied := a.editApplied[channel]
+	if applied == nil {
+		applied = make(map[store.MessageID]time.Time)
+		a.editApplied[channel] = applied
+	}
+	// A response that omitted the edit timestamp (zero) still applies the first
+	// time; only a stamp strictly older than one already applied is rejected.
+	if prev, ok := applied[id]; ok && !edited.IsZero() && edited.Before(prev) {
+		return
+	}
+	applied[id] = edited
+	a.store.UpdateMessage(channel, id, func(m *store.Message) { m.Content = content })
+	if a.onChange != nil {
+		a.onChange()
+	}
 }
 
 // DeleteMessage deletes a message. The local removal is applied on REST success
