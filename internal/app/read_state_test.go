@@ -1,6 +1,7 @@
 package app
 
 import (
+	"sync"
 	"testing"
 
 	appdiscord "awesomeProject/internal/discord"
@@ -134,6 +135,28 @@ func TestChannelUnreadDispatchBatchesBeforeNingenHydration(t *testing.T) {
 	if state := ning.ReadState.ReadState(42); state != nil {
 		t.Fatalf("bulk dispatch was mirrored through ningen MarkUnread: %+v", state)
 	}
+}
+
+func TestMuteLookupDoesNotReadUIOwnedStore(t *testing.T) {
+	ning := appdiscord.WrapSession(session.New(""))
+	ning.ChannelSet(&discord.Channel{ID: 42, GuildID: 7, Type: discord.GuildText}, true)
+	st := store.New(0)
+	a := New(ning, st, nil)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			st.UpsertChannel(store.Channel{ID: 42, GuildID: 7, Position: i})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			_ = a.channelMutedLocal(42)
+		}
+	}()
+	wg.Wait()
 }
 
 func TestReadUpdateToleratesMissingStore(t *testing.T) {

@@ -667,22 +667,13 @@ func (a *App) localReadState(channel store.ChannelID) (UnreadStatus, bool) {
 }
 
 func (a *App) channelMutedLocal(channel store.ChannelID) bool {
-	if a == nil || a.store == nil || a.handle == nil || a.handle.MutedState == nil {
+	if a == nil || a.handle == nil || a.handle.MutedState == nil || channel == 0 {
 		return false
 	}
-	// Discord parent chains are shallow (channel → category). Keep a defensive
-	// bound without allocating a visited map for every startup channel.
-	for depth := 0; channel != 0 && depth < 8; depth++ {
-		if a.handle.MutedState.Channel(discord.ChannelID(channel)) {
-			return true
-		}
-		entry, ok := a.store.Channel(channel)
-		if !ok {
-			break
-		}
-		channel = entry.ParentID
-	}
-	return false
+	// This helper runs from Arikawa handler goroutines as well as the UI thread.
+	// App.store is UI-owned and must not be read here. Ningen's mute/cabinet
+	// states are independently synchronized and this helper performs no REST.
+	return a.handle.ChannelIsMuted(discord.ChannelID(channel), ningen.UnreadOpts{})
 }
 
 // cachedChannelUnread returns event-derived attention state for channels that
