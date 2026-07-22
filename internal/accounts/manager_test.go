@@ -27,6 +27,7 @@ type fakeSurface struct {
 func (f *fakeSurface) Activate(a *Account)                { f.activated = append(f.activated, a) }
 func (f *fakeSurface) Refresh()                           { f.refresh++ }
 func (f *fakeSurface) RefreshChannels()                   { f.refreshChan++ }
+func (f *fakeSurface) RefreshGuildBadges()                {}
 func (f *fakeSurface) Notify(a *Account, _ store.Message) { f.notifies = append(f.notifies, a) }
 func (f *fakeSurface) ShowError(_ *Account, err error)    { f.errors = append(f.errors, err) }
 func (f *fakeSurface) Badges(b []Badge)                   { f.lastBadges = b }

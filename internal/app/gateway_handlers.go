@@ -22,12 +22,19 @@ func (a *App) registerGatewayLifecycleHandlers() {
 		})
 	})
 	a.handle.AddHandler(func(e *read.UpdateEvent) {
-		// Ningen updates its read state before forwarding this event. Refresh
-		// both sidebars so server dots change immediately after an ack or
-		// CHANNEL_UNREAD_UPDATE.
+		// Ningen updates its read state before forwarding this event. The event
+		// carries the affected channel and guild, so update the aggregate cache
+		// without rescanning every channel in the guild.
+		status := UnreadStatus(Read)
+		if e.ReadState.MentionCount > 0 {
+			status = Mentioned
+		} else if e.Unread {
+			status = Unread
+		}
+		a.cacheReadState(store.ChannelID(e.ChannelID), store.GuildID(e.GuildID), status)
 		a.ui.Post(func() {
-			if a.onChange != nil {
-				a.onChange()
+			if a.onReadStateChange != nil {
+				a.onReadStateChange()
 			}
 		})
 	})
