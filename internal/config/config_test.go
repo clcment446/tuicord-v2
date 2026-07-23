@@ -378,6 +378,26 @@ func TestLoadFromTTYColorsDisplayOption(t *testing.T) {
 	}
 }
 
+func TestLoadFromBorderStyleDisplayOption(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[display]\nborder_style = \"double\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if cfg.Display.BorderStyle != "double" {
+		t.Fatalf("display.border_style = %q, want double", cfg.Display.BorderStyle)
+	}
+}
+
+func TestDefaultBorderStyleIsRounded(t *testing.T) {
+	if got := Default().Display.BorderStyle; got != "rounded" {
+		t.Fatalf("default display.border_style = %q, want rounded", got)
+	}
+}
+
 func TestLoadFromRoleGradientDisplayOptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[display]\nrole_gradients = true\nrole_gradient_animations = true\n"), 0o644); err != nil {

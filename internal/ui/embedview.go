@@ -9,6 +9,7 @@ import (
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 	uitext "awesomeProject/internal/tui/text"
+	"awesomeProject/internal/tui/widget"
 )
 
 // renderEmbeds renders a message's embeds as chat blocks.
@@ -135,7 +136,7 @@ func (w *ChatView) renderEmbed(m store.Message, e store.Embed, index int, width 
 	if len(content) == 0 {
 		content = append(content, embedPlainLines("[embed]", inner, mergeStyle(contentBase, w.styles.Cell("embeds.footer")))...)
 	}
-	return frameEmbedLines(content, inner, borderStyle, contentBase)
+	return frameEmbedLines(content, inner, borderStyle, contentBase, w.borderChars)
 }
 
 func embedOpenURL(e store.Embed) string {
@@ -228,9 +229,9 @@ func embedPlainLines(s string, width int, style screen.Style) []chatLine {
 	return lines
 }
 
-func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentStyle screen.Style) []chatLine {
-	top := chatLine{segments: []chatSegment{{text: "╭" + strings.Repeat("─", innerWidth) + "╮", style: borderStyle}}, restrictHighlight: true}
-	bottom := chatLine{segments: []chatSegment{{text: "╰" + strings.Repeat("─", innerWidth) + "╯", style: borderStyle}}, restrictHighlight: true}
+func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentStyle screen.Style, chars widget.BorderChars) []chatLine {
+	top := chatLine{segments: []chatSegment{{text: chars.TopLeft + strings.Repeat(chars.Horizontal, innerWidth) + chars.TopRight, style: borderStyle}}, restrictHighlight: true}
+	bottom := chatLine{segments: []chatSegment{{text: chars.BottomLeft + strings.Repeat(chars.Horizontal, innerWidth) + chars.BottomRight, style: borderStyle}}, restrictHighlight: true}
 	lines := []chatLine{top}
 	for _, line := range content {
 		framed := translateChatLine(line, 1)
@@ -242,14 +243,14 @@ func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentSty
 			// the frame in the cell layer so the graphic cannot cover either
 			// border, and give the image one cell of horizontal inset.
 			framed.segments = []chatSegment{
-				{text: "│", style: borderStyle},
+				{text: chars.Vertical, style: borderStyle},
 				{text: strings.Repeat(" ", innerWidth), style: contentStyle},
-				{text: "│", style: borderStyle},
+				{text: chars.Vertical, style: borderStyle},
 			}
 			lines = append(lines, framed)
 			continue
 		}
-		framed.segments = []chatSegment{{text: "│", style: borderStyle}}
+		framed.segments = []chatSegment{{text: chars.Vertical, style: borderStyle}}
 		used := 0
 		if framed.text != "" && len(framed.segments) == 1 {
 			framed.segments = append(framed.segments, chatSegment{text: framed.text, style: framed.style})
@@ -262,7 +263,7 @@ func frameEmbedLines(content []chatLine, innerWidth int, borderStyle, contentSty
 		if pad := innerWidth - used; pad > 0 {
 			framed.segments = append(framed.segments, chatSegment{text: strings.Repeat(" ", pad), style: contentStyle})
 		}
-		framed.segments = append(framed.segments, chatSegment{text: "│", style: borderStyle})
+		framed.segments = append(framed.segments, chatSegment{text: chars.Vertical, style: borderStyle})
 		lines = append(lines, framed)
 	}
 	lines = append(lines, bottom)
