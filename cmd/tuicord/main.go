@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"awesomeProject/internal/accounts"
@@ -19,6 +20,8 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/discord"
 	"awesomeProject/internal/keyring"
+	"awesomeProject/internal/matrix"
+	"awesomeProject/internal/matrixapp"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
@@ -123,25 +126,25 @@ func run() error {
 		fmt.Fprintln(os.Stderr, "tuicord: warning:", err)
 	}
 	loginPrompt := func(ctx context.Context) (string, error) {
-		return ui.RunLogin(ctx, styles, tuiTheme(cfg.Colors, cfg.ColorOverrides), state.AuthPreferredMode, cfg.Accessibility, func(mode string) {
+		result, err := ui.RunLogin(ctx, styles, tuiTheme(cfg.Colors, cfg.ColorOverrides), state.AuthPreferredMode, cfg.Accessibility, func(mode string) {
 			state.AuthPreferredMode = mode
 			if err := state.Save(); err != nil {
 				fmt.Fprintln(os.Stderr, "tuicord: warning: save auth preference:", err)
 			}
-		})
+		}, matrixAuthenticator{})
+		if err != nil {
+			return "", err
+		}
+		return result.KeyringValue()
 	}
 
-	token, err := auth.ResolveToken(ctx, auth.Options{
+	rawValue, err := auth.ResolveToken(ctx, auth.Options{
 		Store:        auth.KeyringStore{Key: activeKey},
 		OnStoreError: warnStore,
 		Prompt:       loginPrompt,
 	})
 	if err != nil {
 		return fmt.Errorf("resolve token: %w", err)
-	}
-	ning, err := discord.NewNingen(token)
-	if err != nil {
-		return fmt.Errorf("create session: %w", err)
 	}
 
 	uiApp := tui.New(
@@ -151,38 +154,40 @@ func run() error {
 		tui.WithTTYColors(cfg.Display.TTYColors),
 		tui.WithVimKeys(cfg.Keys.Vim.FocusPrev, cfg.Keys.Vim.FocusNext, cfg.Keys.Vim.PanelPrev, cfg.Keys.Vim.PanelNext),
 	)
-	st := store.New(0)
-	orch := app.New(ning, st, uiApp)
-	mv := ui.NewMainViewWithState(orch, cfg, styles, state)
-	shell = ui.NewShell(orch, mv, cfg, styles, stop)
+	launchBackend, err := newBackendFromValue(activeKey, rawValue, uiApp)
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
+	}
+	st := launchBackend.Store()
+	mv := ui.NewMainViewWithState(launchBackend, cfg, styles, state)
+	shell = ui.NewShell(launchBackend, mv, cfg, styles, stop)
 	mv.OnPersistError(func(err error) { shell.ShowToast("View state", err) })
 
 	surface := &uiSurface{mv: mv, shell: shell}
 	seeds := make([]accounts.Seed, len(registry))
 	for i, account := range registry {
-		seeds[i] = accounts.Seed{Key: account.Key, Label: account.Label, ID: account.ID}
+		seeds[i] = accounts.Seed{Key: account.Key, Label: account.Label, ID: account.ID, Protocol: account.Protocol, Remote: account.Remote}
 	}
-	seeds[activeIdx].Backend = orch
+	seeds[activeIdx].Backend = launchBackend
 	seeds[activeIdx].Store = st
+	if creds, ok := auth.Decode(rawValue); ok {
+		seeds[activeIdx].Protocol = creds.Protocol
+		seeds[activeIdx].Remote = creds.UserID
+	}
 
 	accountManager := accounts.New(accounts.Options{
 		UI:      uiApp,
 		Ctx:     ctx,
 		Surface: surface,
 		Build: func(key string) (backend.Backend, error) {
-			token, err := keyring.GetTokenFor(key)
+			raw, err := keyring.GetTokenFor(key)
 			if err != nil {
 				return nil, fmt.Errorf("read token for account %q: %w", key, err)
 			}
-			token = strings.TrimSpace(token)
-			if token == "" {
-				return nil, fmt.Errorf("no saved token for account %q", key)
+			if strings.TrimSpace(raw) == "" {
+				return nil, fmt.Errorf("no saved credentials for account %q", key)
 			}
-			ning, err := discord.NewNingen(token)
-			if err != nil {
-				return nil, err
-			}
-			return app.New(ning, store.New(0), uiApp), nil
+			return newBackendFromValue(key, raw, uiApp)
 		},
 		Persist: func(reg config.Accounts) {
 			state.Accounts = stateAccounts(reg)
@@ -218,6 +223,78 @@ func run() error {
 		return fmt.Errorf("start accounts: %w", err)
 	}
 	return uiApp.RunContext(ctx, shell)
+}
+
+// matrixAuthenticator adapts the Matrix transport's login helpers to the
+// ui.MatrixAuthenticator interface, keeping mautrix out of the ui package.
+type matrixAuthenticator struct{}
+
+func (matrixAuthenticator) Password(ctx context.Context, homeserver, user, password string) (auth.Credentials, error) {
+	base, err := matrix.Discover(ctx, homeserver)
+	if err != nil {
+		return auth.Credentials{}, err
+	}
+	return matrix.LoginPassword(ctx, base, user, password)
+}
+
+func (matrixAuthenticator) Token(ctx context.Context, homeserver, token string) (auth.Credentials, error) {
+	base, err := matrix.Discover(ctx, homeserver)
+	if err != nil {
+		return auth.Credentials{}, err
+	}
+	return matrix.LoginToken(ctx, base, token)
+}
+
+// newBackendFromValue builds the protocol backend for one account from its
+// keyring value. A Matrix credentials blob builds a Matrix orchestrator; any
+// other value is treated as a bare Discord token. Each backend owns its own
+// store, so the account manager stays protocol-neutral.
+func newBackendFromValue(key, rawValue string, uiApp *tui.App) (backend.Backend, error) {
+	if creds, ok := auth.Decode(rawValue); ok && creds.Protocol == auth.ProtocolMatrix {
+		dir, err := matrixDataDir(key)
+		if err != nil {
+			return nil, err
+		}
+		persist := func(c auth.Credentials) error {
+			enc, err := c.Encode()
+			if err != nil {
+				return err
+			}
+			return keyring.SetTokenFor(key, enc)
+		}
+		client, err := matrix.New(creds, dir, persist)
+		if err != nil {
+			return nil, err
+		}
+		return matrixapp.New(client, store.New(0), uiApp, filepath.Join(dir, "idmap.json")), nil
+	}
+	ning, err := discord.NewNingen(strings.TrimSpace(rawValue))
+	if err != nil {
+		return nil, err
+	}
+	return app.New(ning, store.New(0), uiApp), nil
+}
+
+// matrixDataDir returns the per-account private directory holding the E2EE
+// crypto/state store and the id-interning table, under XDG_DATA_HOME.
+func matrixDataDir(key string) (string, error) {
+	base := os.Getenv("XDG_DATA_HOME")
+	if base == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		base = filepath.Join(home, ".local", "share")
+	}
+	return filepath.Join(base, uistate.AppName, "matrix", sanitizeKey(key)), nil
+}
+
+// sanitizeKey makes an account key safe as a single path segment.
+func sanitizeKey(key string) string {
+	if key == "" {
+		return "default"
+	}
+	return strings.NewReplacer("/", "_", "\\", "_", ":", "_", "@", "_").Replace(key)
 }
 
 // uiSurface adapts MainView + Shell to accounts.Surface. The accounts package
@@ -339,7 +416,7 @@ func seedLegacyState(state *uistate.State, cfg config.Config) bool {
 func stateAccounts(reg config.Accounts) *uistate.Accounts {
 	out := &uistate.Accounts{Active: reg.Active, List: make([]uistate.Account, len(reg.List))}
 	for i, account := range reg.List {
-		out.List[i] = uistate.Account{Key: account.Key, Label: account.Label, ID: account.ID}
+		out.List[i] = uistate.Account{Key: account.Key, Label: account.Label, ID: account.ID, Protocol: account.Protocol, Remote: account.Remote}
 	}
 	return out
 }

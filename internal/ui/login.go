@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"awesomeProject/internal/auth"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
@@ -16,13 +17,37 @@ import (
 // ErrLoginAborted is returned when the login screen closes without a token.
 var ErrLoginAborted = errors.New("login aborted")
 
+// LoginResult is the outcome of the login screen. Exactly one of the Discord
+// token or the Matrix credentials is set. KeyringValue returns the string to
+// persist under the account's keyring key.
+type LoginResult struct {
+	token  string
+	matrix *auth.Credentials
+}
+
+// KeyringValue returns the value to store in the keyring: a bare Discord token,
+// or the encoded Matrix credentials blob.
+func (r LoginResult) KeyringValue() (string, error) {
+	if r.matrix != nil {
+		return r.matrix.Encode()
+	}
+	return r.token, nil
+}
+
+// MatrixAuthenticator performs the network side of Matrix login. It is injected
+// by the caller (cmd) so this package needs no Matrix/mautrix dependency.
+type MatrixAuthenticator interface {
+	// Password resolves homeserver via .well-known and logs in with a password.
+	Password(ctx context.Context, homeserver, user, password string) (auth.Credentials, error)
+	// Token validates an existing access token against a homeserver.
+	Token(ctx context.Context, homeserver, token string) (auth.Credentials, error)
+}
+
 // RunLogin shows the interactive login screen and blocks until the user
-// provides a token — either by pasting one or by completing the QR remote-auth
-// flow — or aborts. It runs its own tui runtime, separate from the main app.
-//
-// It satisfies auth.PromptFunc when wrapped: the returned token is persisted by
-// auth.ResolveToken.
-func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode string, accessibility config.Accessibility, onModeSelected func(string)) (string, error) {
+// provides Discord or Matrix credentials, or aborts. It runs its own tui
+// runtime, separate from the main app. matrixAuth may be nil to disable the
+// Matrix panel.
+func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode string, accessibility config.Accessibility, onModeSelected func(string), matrixAuth MatrixAuthenticator) (LoginResult, error) {
 	loginCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -32,29 +57,34 @@ func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode
 		tui.WithFocusableSplits(accessibility.FocusSplits),
 	)
 
-	var token string
+	var result LoginResult
 	setToken := func(t string) {
 		t = strings.TrimSpace(t)
 		if t == "" {
 			return
 		}
-		token = t
+		result = LoginResult{token: t}
+		cancel()
+	}
+	setMatrix := func(c auth.Credentials) {
+		creds := c
+		result = LoginResult{matrix: &creds}
 		cancel()
 	}
 
-	root := buildLogin(loginCtx, app, styles, setToken, cancel, preferredMode, onModeSelected)
+	root := buildLogin(loginCtx, app, styles, setToken, setMatrix, cancel, preferredMode, onModeSelected, matrixAuth)
 	if err := app.RunContext(loginCtx, root); err != nil {
-		return "", err
+		return LoginResult{}, err
 	}
-	if token == "" {
-		return "", ErrLoginAborted
+	if result.token == "" && result.matrix == nil {
+		return LoginResult{}, ErrLoginAborted
 	}
-	return token, nil
+	return result, nil
 }
 
-// buildLogin composes the login layout: a token entry on the left and the QR
-// remote-auth panel on the right.
-func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), cancel context.CancelFunc, preferredMode string, onModeSelected func(string)) tui.Widget {
+// buildLogin composes the login layout: Discord (token + QR) stacked over the
+// Matrix panel.
+func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), setMatrix func(auth.Credentials), cancel context.CancelFunc, preferredMode string, onModeSelected func(string), matrixAuth MatrixAuthenticator) tui.Widget {
 	tokenInput := widget.NewTextInput("Paste token, press Enter")
 	tokenInput.SetStyle(styles.Cell("login.input"))
 	tokenInput.SetPlaceholderStyle(styles.Cell("login.placeholder"))
@@ -72,10 +102,20 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 
 	qr := NewQRPanel(ctx, app, styles, setToken, preferredMode, onModeSelected)
 
-	root := widget.NewSplit(titled(styles, "Login", tokenPanel), titled(styles, "QR Code", qr)).
+	discord := widget.NewSplit(titled(styles, "Discord", tokenPanel), titled(styles, "QR Code", qr)).
 		Basis(36).
 		MinFirst(30).
 		Vertical()
+	discord.SetBorderChars(styles.BorderCharsOrDefault())
+
+	if matrixAuth == nil {
+		return newCancelRoot(discord, cancel)
+	}
+
+	matrixPanel := buildMatrixLogin(ctx, app, styles, setMatrix, matrixAuth)
+	root := widget.NewSplit(discord, titled(styles, "Matrix", matrixPanel)).
+		Basis(0).
+		Horizontal()
 	root.SetBorderChars(styles.BorderCharsOrDefault())
 	return newCancelRoot(root, cancel)
 }

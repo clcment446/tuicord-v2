@@ -33,6 +33,14 @@ type Account struct {
 	Key   string `toml:"key"`
 	Label string `toml:"label"`
 	ID    uint64 `toml:"id"`
+	// Protocol is the chat backend this account speaks ("discord" or "matrix").
+	// Empty decodes as Discord so registries written before Matrix support load
+	// unchanged.
+	Protocol string `toml:"protocol,omitempty"`
+	// Remote is the protocol-native account identity (a Matrix user ID like
+	// "@alice:example.org"), kept for display and de-duplication. Empty for
+	// Discord.
+	Remote string `toml:"remote,omitempty"`
 }
 
 // Accounts is the machine-managed multi-account registry.

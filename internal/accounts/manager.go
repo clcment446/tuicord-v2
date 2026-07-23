@@ -77,19 +77,23 @@ type BuildFunc func(key string) (backend.Backend, error)
 // Backend and Store to that prebuilt runtime. Lazy accounts leave them nil and
 // are built via BuildFunc on first activation.
 type Seed struct {
-	Key     string
-	Label   string
-	ID      uint64
-	Backend backend.Backend
-	Store   *store.Store
+	Key      string
+	Label    string
+	ID       uint64
+	Protocol string
+	Remote   string
+	Backend  backend.Backend
+	Store    *store.Store
 }
 
 // Account is one managed account: its saved identity plus, once built, its
 // live orchestrator/store.
 type Account struct {
-	key   string
-	label string
-	id    store.UserID
+	key      string
+	label    string
+	id       store.UserID
+	protocol string
+	remote   string
 
 	backend backend.Backend
 	store   *store.Store
@@ -175,11 +179,13 @@ func New(opts Options) *Manager {
 	}
 	for _, s := range opts.Seeds {
 		m.accounts = append(m.accounts, &Account{
-			key:     s.Key,
-			label:   s.Label,
-			id:      store.UserID(s.ID),
-			backend: s.Backend,
-			store:   s.Store,
+			key:      s.Key,
+			label:    s.Label,
+			id:       store.UserID(s.ID),
+			protocol: s.Protocol,
+			remote:   s.Remote,
+			backend:  s.Backend,
+			store:    s.Store,
 		})
 	}
 	if m.active < 0 || m.active >= len(m.accounts) {
@@ -433,9 +439,11 @@ func (m *Manager) persistRegistry() {
 	reg := config.Accounts{Active: m.active}
 	for _, acc := range m.accounts {
 		reg.List = append(reg.List, config.Account{
-			Key:   acc.key,
-			Label: acc.label,
-			ID:    uint64(acc.id),
+			Key:      acc.key,
+			Label:    acc.label,
+			ID:       uint64(acc.id),
+			Protocol: acc.protocol,
+			Remote:   acc.remote,
 		})
 	}
 	m.persist(reg)

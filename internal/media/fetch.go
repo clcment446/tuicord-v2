@@ -189,6 +189,15 @@ func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, bool, error)
 	if err != nil {
 		return nil, false, fmt.Errorf("media: build request for %s: %w", url, err)
 	}
+	// Protocol authorizers (e.g. Matrix authenticated media) may add auth headers
+	// and/or a body transform (encrypted-attachment decryption). Non-matching
+	// URLs (Discord) are unaffected.
+	authHeader, authTransform := resolveAuth(url)
+	for key, values := range authHeader {
+		for _, v := range values {
+			req.Header.Add(key, v)
+		}
+	}
 	doer := Doer(defaultHTTPClient)
 	if f.HTTP != nil {
 		doer = f.HTTP
@@ -210,6 +219,12 @@ func (f *Fetcher) httpGet(ctx context.Context, url string) ([]byte, bool, error)
 	}
 	if int64(len(raw)) > limits.MaxResponseBytes {
 		return nil, false, fmt.Errorf("media: response for %s exceeds %d bytes", url, limits.MaxResponseBytes)
+	}
+	if authTransform != nil {
+		raw, err = authTransform(raw)
+		if err != nil {
+			return nil, false, fmt.Errorf("media: transform %s: %w", url, err)
+		}
 	}
 	return raw, responseCacheable(resp.Header), nil
 }

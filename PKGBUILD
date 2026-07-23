@@ -36,7 +36,9 @@ build() {
 	export CGO_CXXFLAGS="${CXXFLAGS}"
 	export CGO_LDFLAGS="${LDFLAGS}"
 	export GOFLAGS="-buildmode=pie -trimpath -mod=readonly -modcacherw"
-	go build -ldflags "-linkmode=external -compressdwarf=false" -o build/tuicord ./cmd/tuicord
+	# -tags goolm selects the pure-Go olm implementation for Matrix E2EE, so no
+	# system libolm is required. cgo is still used for the SQLite crypto store.
+	go build -tags goolm -ldflags "-linkmode=external -compressdwarf=false" -o build/tuicord ./cmd/tuicord
 }
 
 package() {

@@ -256,6 +256,11 @@ type Account struct {
 	Label string `toml:"label"`
 	// ID is the Discord user ID, 0 until first connect.
 	ID uint64 `toml:"id"`
+	// Protocol is the chat backend ("discord" or "matrix"); empty means Discord.
+	Protocol string `toml:"protocol,omitempty"`
+	// Remote is the protocol-native account identity (Matrix user ID); empty for
+	// Discord.
+	Remote string `toml:"remote,omitempty"`
 }
 
 // Accounts is the legacy config.toml registry used to seed uistate. It remains
