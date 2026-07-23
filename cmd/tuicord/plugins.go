@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 
 	"awesomeProject/internal/app"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/plugin"
 	"awesomeProject/internal/store"
@@ -41,7 +42,7 @@ func newBootstrapPluginManager(cfg *config.Config) (*plugin.Manager, *os.File, e
 // attachAndLoadPlugins preserves config.lua registrations by populating the
 // manager's bootstrap Host in place, then loads ordinary plugins under the
 // Lua-derived policy. Plugin startup side effects Post to the now-live UI Host.
-func attachAndLoadPlugins(mgr *plugin.Manager, active func() *app.App, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles, activeTheme config.Theme) []error {
+func attachAndLoadPlugins(mgr *plugin.Manager, active func() backend.Backend, uiApp *tui.App, shell *ui.Shell, cfg config.Config, styles ui.Styles, activeTheme config.Theme) []error {
 	if mgr == nil {
 		return nil
 	}
@@ -70,7 +71,7 @@ func attachAndLoadPlugins(mgr *plugin.Manager, active func() *app.App, uiApp *tu
 // closures resolve the active account through `active` at call time, so a plugin
 // always acts through the currently selected Discord account rather than the one
 // wired at launch.
-func newPluginHost(active func() *app.App, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, styles ui.Styles, activeTheme config.Theme) *plugin.Host {
+func newPluginHost(active func() backend.Backend, uiApp *tui.App, shell *ui.Shell, overrides *config.ColorOverrides, styles ui.Styles, activeTheme config.Theme) *plugin.Host {
 	install := func(theme config.Theme) {
 		activeTheme = theme
 		overrides.Replace(theme.Styles)
@@ -157,11 +158,16 @@ func newPluginHost(active func() *app.App, uiApp *tui.App, shell *ui.Shell, over
 				if orch == nil {
 					return
 				}
+				// Message components are Discord-only; skip on other protocols.
+				discordOrch, ok := orch.(*app.App)
+				if !ok {
+					return
+				}
 				msg, ok := findMessage(orch.Store(), store.ChannelID(channelID), store.MessageID(messageID))
 				if !ok {
 					return
 				}
-				orch.SubmitComponent(app.ComponentSubmit{
+				discordOrch.SubmitComponent(app.ComponentSubmit{
 					Message: msg, ComponentType: componentType, CustomID: customID,
 					Values: append([]string(nil), values...),
 				})
@@ -182,7 +188,7 @@ func newPluginHost(active func() *app.App, uiApp *tui.App, shell *ui.Shell, over
 
 // activeSnapshot returns the active account's immutable state snapshot, or a
 // zero snapshot when no account is currently built/active.
-func activeSnapshot(active func() *app.App) app.StateSnapshot {
+func activeSnapshot(active func() backend.Backend) app.StateSnapshot {
 	if orch := active(); orch != nil {
 		return orch.Snapshot()
 	}

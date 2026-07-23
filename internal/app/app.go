@@ -2,6 +2,7 @@
 package app
 
 import (
+	"awesomeProject/internal/backend"
 	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
@@ -33,12 +34,12 @@ type poster interface {
 
 // EventSink receives client events for out-of-tree consumers (the Lua plugin
 // system). It is an optional seam: App calls it via emit only when one is set,
-// so this package never depends on the plugin package. Emit must not block —
-// implementations are expected to enqueue and return. Payload snowflake fields
-// are uint64.
-type EventSink interface {
-	Emit(name string, data map[string]any)
-}
+// so this package never depends on the plugin package. Aliased from backend so
+// the concrete type is shared across protocol orchestrators.
+type EventSink = backend.EventSink
+
+// Ensure App satisfies the protocol-neutral orchestrator interface.
+var _ backend.Backend = (*App)(nil)
 
 // sender is the slice of the arikawa client used to send messages.
 type sender interface {
@@ -123,8 +124,8 @@ func (s restGIFSearcher) SearchGIFs(query string) ([]clientdiscord.GIFResult, er
 }
 
 // DirectMessagesGuildID is the synthetic guild that owns private channels in
-// the UI. It avoids overloading guild ID 0, which App uses as "not selected".
-const DirectMessagesGuildID store.GuildID = ^store.GuildID(0)
+// the UI. Aliased from backend so every protocol shares the same sentinel.
+const DirectMessagesGuildID = backend.DirectMessagesGuildID
 
 // messageComponentInteractionType is Discord's interaction type for component
 // presses (INTERACTION_TYPE 3).
@@ -353,13 +354,13 @@ type App struct {
 }
 
 // UnreadStatus is the server-authoritative attention state for a guild or
-// channel. Mentions take precedence over ordinary unread messages.
-type UnreadStatus uint8
+// channel. Aliased from backend so orchestrators share one type.
+type UnreadStatus = backend.UnreadStatus
 
 const (
-	Read UnreadStatus = iota
-	Unread
-	Mentioned
+	Read      = backend.Read
+	Unread    = backend.Unread
+	Mentioned = backend.Mentioned
 )
 
 // New returns an orchestrator over the given ningen state, store, and UI
@@ -485,13 +486,10 @@ func (a *App) Self() (store.Member, bool) {
 }
 
 // StateSnapshot is an immutable, concurrently readable view of the small piece
-// of UI-owned state exposed to integrations. Call App.Snapshot instead of
-// reading ActiveGuild, ActiveChannel, or SelfID from a background goroutine.
-type StateSnapshot struct {
-	ActiveGuild   store.GuildID
-	ActiveChannel store.ChannelID
-	SelfID        store.UserID
-}
+// of UI-owned state exposed to integrations. Aliased from backend. Call
+// App.Snapshot instead of reading ActiveGuild/ActiveChannel/SelfID from a
+// background goroutine.
+type StateSnapshot = backend.StateSnapshot
 
 // Snapshot returns the latest published app state without waiting for the UI
 // event loop. Before READY/selection it returns zero values.

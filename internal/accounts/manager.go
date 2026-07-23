@@ -1,7 +1,9 @@
-// Package accounts manages multiple Discord accounts within a single tuicord
-// process. Each account owns its own ningen state, normalized store, and
-// orchestrator (app.App); all of them post onto the one shared tui runtime, so
-// the single-UI-goroutine concurrency model is unchanged. The Manager tracks
+// Package accounts manages multiple chat accounts within a single tuicord
+// process. Each account owns its own protocol backend (backend.Backend, e.g.
+// the Discord orchestrator app.App) and normalized store; all of them post onto
+// the one shared tui runtime, so the single-UI-goroutine concurrency model is
+// unchanged. The package depends only on backend.Backend, never a concrete
+// protocol library. The Manager tracks
 // which account is active, connects accounts lazily (only on first activation,
 // then keeps them connected), routes each account's callbacks — panel refreshes
 // only for the active account, badges and notifications for every connected
@@ -14,12 +16,10 @@ import (
 	"errors"
 	"fmt"
 
-	"awesomeProject/internal/app"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
-
-	"github.com/diamondburned/ningen/v3"
 )
 
 // ErrNoAccounts is returned by Start when the registry is empty.
@@ -55,8 +55,8 @@ type Badge struct {
 	Label string
 	// Unread is true when the account has any unread or attention messages.
 	Unread bool
-	// Mentions is the account's total mention count (authoritative from ningen
-	// ReadState).
+	// Mentions is the account's total mention count (authoritative from the
+	// backend's read state).
 	Mentions int
 	// Active marks the currently selected account.
 	Active bool
@@ -64,45 +64,43 @@ type Badge struct {
 	Failed bool
 }
 
-// BuildFunc constructs a ningen state for the given account keyring key,
-// resolving that key's token. It must not prompt interactively — lazy builds
-// happen while the UI event loop owns the terminal. The initial active account
-// is built before the loop starts and passed in prebuilt (see Seed.Ning).
-type BuildFunc func(key string) (*ningen.State, error)
+// BuildFunc constructs a protocol backend for the given account keyring key,
+// resolving that key's credentials and owning its store. It must not prompt
+// interactively — lazy builds happen while the UI event loop owns the terminal.
+// The initial active account is built before the loop starts and passed in
+// prebuilt (see Seed.Backend).
+type BuildFunc func(key string) (backend.Backend, error)
 
 // Seed describes one saved account at construction time. For the launch account
-// — whose interactive login, ningen, store, and orchestrator are all built
+// — whose interactive login, backend, store, and orchestrator are all built
 // before the Manager exists (so MainView/Shell can be constructed from it) — set
-// App, Store, and Ning to that prebuilt runtime. Lazy accounts leave them nil
-// and are built via BuildFunc on first activation.
+// Backend and Store to that prebuilt runtime. Lazy accounts leave them nil and
+// are built via BuildFunc on first activation.
 type Seed struct {
-	Key   string
-	Label string
-	ID    uint64
-	Ning  *ningen.State
-	App   *app.App
-	Store *store.Store
+	Key     string
+	Label   string
+	ID      uint64
+	Backend backend.Backend
+	Store   *store.Store
 }
 
 // Account is one managed account: its saved identity plus, once built, its
-// live orchestrator/store/state.
+// live orchestrator/store.
 type Account struct {
-	key      string
-	label    string
-	id       store.UserID
-	seedNing *ningen.State
+	key   string
+	label string
+	id    store.UserID
 
-	app   *app.App
-	store *store.Store
-	ning  *ningen.State
+	backend backend.Backend
+	store   *store.Store
 
 	built      bool
 	connecting bool
 	err        error
 }
 
-// App returns the account's orchestrator, or nil before it is built.
-func (a *Account) App() *app.App { return a.app }
+// Backend returns the account's orchestrator, or nil before it is built.
+func (a *Account) Backend() backend.Backend { return a.backend }
 
 // Store returns the account's normalized store, or nil before it is built.
 func (a *Account) Store() *store.Store { return a.store }
@@ -132,7 +130,7 @@ type Options struct {
 	UI      *tui.App
 	Ctx     context.Context
 	Surface Surface
-	// Build constructs a ningen state for a lazy account's key.
+	// Build constructs a protocol backend for a lazy account's key.
 	Build BuildFunc
 	// Persist saves the registry after a mutation (active index, discovered
 	// label/id, or a new account). May be nil in tests.
@@ -140,7 +138,7 @@ type Options struct {
 	// EventSink, if set, receives client events (the Lua plugin system). The
 	// Manager binds it to whichever account is active so plugins observe and act
 	// on the active account rather than the launch account they were wired to.
-	EventSink app.EventSink
+	EventSink backend.EventSink
 	// Seeds is the ordered set of saved accounts.
 	Seeds []Seed
 	// Active is the initial active index.
@@ -160,7 +158,7 @@ type Manager struct {
 	autoConnect bool
 	accounts    []*Account
 	active      int
-	eventSink   app.EventSink
+	eventSink   backend.EventSink
 }
 
 // New builds a Manager from options. It does not connect anything; call Start.
@@ -177,13 +175,11 @@ func New(opts Options) *Manager {
 	}
 	for _, s := range opts.Seeds {
 		m.accounts = append(m.accounts, &Account{
-			key:      s.Key,
-			label:    s.Label,
-			id:       store.UserID(s.ID),
-			seedNing: s.Ning,
-			app:      s.App,
-			store:    s.Store,
-			ning:     s.Ning,
+			key:     s.Key,
+			label:   s.Label,
+			id:      store.UserID(s.ID),
+			backend: s.Backend,
+			store:   s.Store,
 		})
 	}
 	if m.active < 0 || m.active >= len(m.accounts) {
@@ -244,13 +240,13 @@ func (m *Manager) bindEventSink(active *Account) {
 		return
 	}
 	for _, acc := range m.accounts {
-		if acc.app == nil {
+		if acc.backend == nil {
 			continue
 		}
 		if acc == active {
-			acc.app.SetEventSink(m.eventSink)
+			acc.backend.SetEventSink(m.eventSink)
 		} else {
-			acc.app.SetEventSink(nil)
+			acc.backend.SetEventSink(nil)
 		}
 	}
 }
@@ -286,27 +282,24 @@ func (m *Manager) ensureBuilt(acc *Account) error {
 	}
 	// Prebuilt launch account: its orchestrator/store were constructed before
 	// the Manager (so MainView/Shell could bind to them). Just wire callbacks.
-	if acc.app != nil {
+	if acc.backend != nil {
+		if acc.store == nil {
+			acc.store = acc.backend.Store()
+		}
 		m.wire(acc)
 		acc.built = true
 		return nil
 	}
-	ning := acc.seedNing
-	if ning == nil {
-		if m.build == nil {
-			return errors.New("accounts: no builder configured")
-		}
-		built, err := m.build(acc.key)
-		if err != nil {
-			acc.err = err
-			return err
-		}
-		ning = built
+	if m.build == nil {
+		return errors.New("accounts: no builder configured")
 	}
-	st := store.New(0)
-	acc.ning = ning
-	acc.store = st
-	acc.app = app.New(ning, st, m.ui)
+	built, err := m.build(acc.key)
+	if err != nil {
+		acc.err = err
+		return err
+	}
+	acc.backend = built
+	acc.store = built.Store()
 	acc.err = nil
 	m.wire(acc)
 	acc.built = true
@@ -316,32 +309,32 @@ func (m *Manager) ensureBuilt(acc *Account) error {
 // wire installs the account's callbacks. Panel refreshes fire only for the
 // active account; badges and notifications fire for every account.
 func (m *Manager) wire(acc *Account) {
-	acc.app.OnReady(func() {
+	acc.backend.OnReady(func() {
 		m.hydrate(acc)
 		if m.isActive(acc) {
 			m.surface.Refresh()
 		}
 		m.pushBadges()
 	})
-	acc.app.OnGuildChange(func() {
+	acc.backend.OnGuildChange(func() {
 		if m.isActive(acc) {
 			m.surface.Refresh()
 		}
 	})
-	acc.app.OnChange(func() {
+	acc.backend.OnChange(func() {
 		if m.isActive(acc) {
 			m.surface.RefreshChannels()
 		}
 		m.pushBadges()
 	})
-	acc.app.OnReadStateChange(func() {
+	acc.backend.OnReadStateChange(func() {
 		m.readStateChanged(acc)
 	})
-	acc.app.OnIncomingMessage(func(msg store.Message) {
+	acc.backend.OnIncomingMessage(func(msg store.Message) {
 		m.surface.Notify(acc, msg)
 		m.pushBadges()
 	})
-	acc.app.OnError(func(err error) {
+	acc.backend.OnError(func(err error) {
 		acc.err = err
 		m.surface.ShowError(acc, err)
 	})
@@ -351,18 +344,18 @@ func (m *Manager) wire(acc *Account) {
 // the connect goroutine must run exactly once per account, so the connecting
 // flag guards re-entry from repeated switches.
 func (m *Manager) connect(acc *Account) {
-	if !m.autoConnect || acc.connecting || acc.app == nil {
+	if !m.autoConnect || acc.connecting || acc.backend == nil {
 		return
 	}
 	acc.connecting = true
-	acc.app.RegisterHandlers()
+	acc.backend.RegisterHandlers()
 	// The user-session gateway READY does not reliably deliver the guild/DM
 	// directory, so this pre-connect REST pull is load-bearing (its DM
 	// hydration is bounded). Lazy connect means only the accounts the user
 	// actually visits pull at all, avoiding a synchronized startup burst.
-	acc.app.LoadGuilds(100)
+	acc.backend.LoadGuilds(100)
 	go func() {
-		err := acc.app.Connect(m.ctx)
+		err := acc.backend.Connect(m.ctx)
 		if err == nil || m.ctx.Err() != nil {
 			return
 		}
@@ -374,22 +367,23 @@ func (m *Manager) connect(acc *Account) {
 	}()
 }
 
-// hydrate learns the account's display name and ID from ningen once READY has
-// populated the self user, persisting them for display before the next connect.
+// hydrate learns the account's display name and ID from the backend's self user
+// once READY has populated it, persisting them for display before the next
+// connect.
 func (m *Manager) hydrate(acc *Account) {
-	if acc.ning == nil {
+	if acc.backend == nil {
 		return
 	}
-	me, err := acc.ning.Me()
-	if err != nil || me == nil {
+	me, ok := acc.backend.Self()
+	if !ok {
 		return
 	}
 	changed := false
-	if label := me.DisplayOrUsername(); label != "" && label != acc.label {
+	if label := me.Name; label != "" && label != acc.label {
 		acc.label = label
 		changed = true
 	}
-	if id := store.UserID(me.ID); id != 0 && id != acc.id {
+	if id := me.ID; id != 0 && id != acc.id {
 		acc.id = id
 		changed = true
 	}
@@ -422,8 +416,8 @@ func (m *Manager) pushBadges() {
 			Active: i == m.active,
 			Failed: acc.err != nil,
 		}
-		if acc.app != nil {
-			b.Unread, b.Mentions = acc.app.Unread()
+		if acc.backend != nil {
+			b.Unread, b.Mentions = acc.backend.Unread()
 		}
 		badges[i] = b
 	}

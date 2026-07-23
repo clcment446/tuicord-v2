@@ -2,6 +2,7 @@
 package app
 
 import (
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/store"
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
@@ -27,7 +28,7 @@ func (a *App) Send(content string) {
 // completed (whether it succeeds or fails), and also runs immediately when a
 // send cannot be started. It is intended for closing opened files and removing
 // managed temporary clipboard uploads.
-func (a *App) SendFiles(content string, files []sendpart.File, optimistic []store.Attachment, cleanup func()) {
+func (a *App) SendFiles(content string, files []backend.UploadFile, optimistic []store.Attachment, cleanup func()) {
 	if a == nil || (strings.TrimSpace(content) == "" && len(files) == 0) || a.activeChannel == 0 {
 		if cleanup != nil {
 			cleanup()
@@ -37,7 +38,10 @@ func (a *App) SendFiles(content string, files []sendpart.File, optimistic []stor
 
 	channel := a.activeChannel
 	nonce := newNonce()
-	fileCopy := append([]sendpart.File(nil), files...)
+	fileCopy := make([]sendpart.File, len(files))
+	for i, f := range files {
+		fileCopy[i] = sendpart.File{Name: f.Name, Reader: f.Reader}
+	}
 	attachmentCopy := append([]store.Attachment(nil), optimistic...)
 	a.store.AppendMessage(store.Message{
 		ChannelID:   channel,

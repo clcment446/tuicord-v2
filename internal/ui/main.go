@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"awesomeProject/internal/app"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
@@ -27,8 +27,6 @@ import (
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
-
-	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // Sidebar row glyphs: collapse arrows and the local-pin marker.
@@ -48,7 +46,7 @@ const (
 // MainView owns the widget tree and the index→ID maps needed to translate list
 // selections back into store identifiers.
 type MainView struct {
-	app      *app.App
+	app      backend.Backend
 	cfg      config.Config
 	styles   Styles
 	mediaCfg media.Config
@@ -128,7 +126,7 @@ const (
 )
 
 // NewMainView assembles the four-panel layout and wires selection callbacks.
-func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
+func NewMainView(a backend.Backend, cfg config.Config, styles Styles) *MainView {
 	state, _ := uistate.Load()
 	return NewMainViewWithState(a, cfg, styles, state)
 }
@@ -136,7 +134,7 @@ func NewMainView(a *app.App, cfg config.Config, styles Styles) *MainView {
 // NewMainViewWithState uses the caller's shared machine state. Main uses this
 // so account/auth writes and view-preference writes cannot overwrite one
 // another through independent stale State snapshots.
-func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *uistate.State) *MainView {
+func NewMainViewWithState(a backend.Backend, cfg config.Config, styles Styles, state *uistate.State) *MainView {
 	if state == nil {
 		state = &uistate.State{}
 	}
@@ -669,7 +667,7 @@ func accountRowBadge(r AccountBadge) string {
 // SetActiveAccount rebinds the visible panels to a different account's
 // orchestrator and store, resetting the transcript and restoring that account's
 // own active guild/channel selection. Call on the UI goroutine.
-func (mv *MainView) SetActiveAccount(a *app.App) {
+func (mv *MainView) SetActiveAccount(a backend.Backend) {
 	if mv == nil || a == nil {
 		return
 	}
@@ -731,7 +729,7 @@ func (mv *MainView) rebuildGuilds() {
 
 func moveDMFirst(rows []store.GuildRow) []store.GuildRow {
 	for i, row := range rows {
-		if row.Folder || row.GuildID != app.DirectMessagesGuildID {
+		if row.Folder || row.GuildID != backend.DirectMessagesGuildID {
 			continue
 		}
 		copy(rows[1:i+1], rows[:i])
@@ -865,7 +863,7 @@ func (mv *MainView) refreshChannelsWithChrome(updateChrome bool) {
 		selectedChannel = mv.channelRows[i].ChannelID
 	}
 	channels := st.Channels(guild)
-	if guild == app.DirectMessagesGuildID {
+	if guild == backend.DirectMessagesGuildID {
 		sort.SliceStable(channels, func(i, j int) bool {
 			if channels[i].LastMessageID != channels[j].LastMessageID {
 				return channels[i].LastMessageID > channels[j].LastMessageID
@@ -875,13 +873,13 @@ func (mv *MainView) refreshChannelsWithChrome(updateChrome bool) {
 	}
 	if mv.channelBorder != nil {
 		title := "Channels"
-		if guild == app.DirectMessagesGuildID {
+		if guild == backend.DirectMessagesGuildID {
 			title = "Direct Messages"
 		}
 		mv.channelBorder.SetTitle(title)
 	}
 	priority := st.PingedChannels()
-	if guild == app.DirectMessagesGuildID {
+	if guild == backend.DirectMessagesGuildID {
 		priority = nil
 	}
 	mv.channelRows = store.GroupChannelsWithPriority(channels, mv.pinnedChannelIDs(), mv.collapsedCategorySet(), priority)
@@ -1116,7 +1114,7 @@ func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
 	if !ok {
 		return false
 	}
-	if c.GuildID == app.DirectMessagesGuildID || c.GuildID == 0 {
+	if c.GuildID == backend.DirectMessagesGuildID || c.GuildID == 0 {
 		return false
 	}
 	if c.Kind == store.ChannelForum {
@@ -1522,8 +1520,8 @@ func (mv *MainView) hasAttachment(path string) bool {
 	return false
 }
 
-func (mv *MainView) openAttachments() ([]sendpart.File, []store.Attachment, func(), error) {
-	files := make([]sendpart.File, 0, len(mv.attachments))
+func (mv *MainView) openAttachments() ([]backend.UploadFile, []store.Attachment, func(), error) {
+	files := make([]backend.UploadFile, 0, len(mv.attachments))
 	optimistic := make([]store.Attachment, 0, len(mv.attachments))
 	closers := make([]*os.File, 0, len(mv.attachments))
 	for _, attachment := range mv.attachments {
@@ -1535,7 +1533,7 @@ func (mv *MainView) openAttachments() ([]sendpart.File, []store.Attachment, func
 			return nil, nil, nil, fmt.Errorf("open %q: %w", attachment.meta.Filename, err)
 		}
 		closers = append(closers, file)
-		files = append(files, sendpart.File{Name: attachment.meta.Filename, Reader: file})
+		files = append(files, backend.UploadFile{Name: attachment.meta.Filename, Reader: file})
 		optimistic = append(optimistic, attachment.meta)
 	}
 	cleanup := func() {

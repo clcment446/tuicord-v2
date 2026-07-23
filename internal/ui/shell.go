@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"awesomeProject/internal/app"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
@@ -73,8 +74,12 @@ type editorInteraction struct {
 // Children returns whichever subtree is active, so focus, hit-testing, and
 // drawing all follow.
 type Shell struct {
-	mv             *MainView
-	app            *app.App
+	mv  *MainView
+	app backend.Backend
+	// discord is the active account's orchestrator when it is a Discord account,
+	// nil otherwise. It gates protocol-specific UI (slash commands, message
+	// components, GIF search) that only Discord exposes.
+	discord        *app.App
 	cfg            config.Config
 	styles         Styles
 	plugins        PluginHost
@@ -264,10 +269,11 @@ func (s *Shell) notify(title, body string) error {
 }
 
 // NewShell wraps a MainView with overlay handling.
-func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
+func NewShell(a backend.Backend, mv *MainView, cfg config.Config, styles Styles, cancel context.CancelFunc) *Shell {
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	mediaCfg := chatMediaConfig(cfg)
-	s := &Shell{mv: mv, app: a, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: boundedNotificationDispatch(), post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
+	discord, _ := a.(*app.App)
+	s := &Shell{mv: mv, app: a, discord: discord, cfg: cfg, styles: styles, cancel: cancel, lifecycleCtx: lifecycleCtx, lifecycleCancel: lifecycleCancel, mediaCfg: mediaCfg, lastActivity: time.Now(), now: time.Now, notifier: systemDesktopNotifier{}, dispatch: boundedNotificationDispatch(), post: a.Post, tryPost: a.TryPost, node: layout.Node{Grow: 1}}
 	if mediaCfg.Enabled && mediaCfg.Prefetch {
 		s.prefetch = newIdleMediaPrefetcher(newChatMediaFetcher(mediaCfg))
 	}
@@ -326,7 +332,7 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 // multi-account switch. Every s.app read is dynamic, and post/tryPost forward to
 // the shared tui runtime (identical across accounts), so swapping the pointer is
 // sufficient. Call on the UI goroutine.
-func (s *Shell) SetActiveAccount(a *app.App) {
+func (s *Shell) SetActiveAccount(a backend.Backend) {
 	if s == nil || a == nil {
 		return
 	}
@@ -350,6 +356,7 @@ func (s *Shell) SetActiveAccount(a *app.App) {
 	s.popup = nil
 	s.exitEditor(nil)
 	s.app = a
+	s.discord, _ = a.(*app.App)
 }
 
 func (s *Shell) bindEditorState() {
@@ -1562,7 +1569,10 @@ func (s *Shell) dispatchComponentAction(action ComponentAction) {
 	}
 	switch action.Kind {
 	case store.ComponentButton, store.ComponentSelect:
-		s.app.SubmitComponent(app.ComponentSubmit{
+		if s.discord == nil {
+			return
+		}
+		s.discord.SubmitComponent(app.ComponentSubmit{
 			Message:       action.Message,
 			ComponentType: action.RawType,
 			CustomID:      action.CustomID,
@@ -1623,7 +1633,9 @@ func (s *Shell) openPicker() {
 		func(text string) { s.mv.InsertIntoComposer(text) },
 		s.closeOverlay,
 	)
-	p.SetGIFSearch(s.app.SearchGIFs)
+	if s.discord != nil {
+		p.SetGIFSearch(s.discord.SearchGIFs)
+	}
 	p.SetRecentStickers(s.mv.recentStickers())
 	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers(), s.mv.toggleFavorite)
 	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
@@ -1716,13 +1728,13 @@ func (s *Shell) composerChanged(value string, cursor int) {
 }
 
 func (s *Shell) openCommandPicker(query string) {
-	if s.commandLoading || s.app.ActiveChannel() == 0 {
+	if s.discord == nil || s.commandLoading || s.app.ActiveChannel() == 0 {
 		return
 	}
 	s.commandLoading = true
 	ctx := app.CommandContext{GuildID: s.app.ActiveGuild(), ChannelID: s.app.ActiveChannel()}
 	go func() {
-		commands, err := s.app.LoadCommands(ctx)
+		commands, err := s.discord.LoadCommands(ctx)
 		s.app.Post(func() {
 			s.commandLoading = false
 			if err != nil {
@@ -1742,7 +1754,7 @@ func (s *Shell) openCommandPicker(query string) {
 				}
 				s.mv.composer.SetValue("")
 				s.closeOverlay()
-				s.app.SubmitCommand(command, nil)
+				s.discord.SubmitCommand(command, nil)
 			}, s.closeOverlay))
 		})
 	}()

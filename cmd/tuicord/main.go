@@ -15,6 +15,7 @@ import (
 	"awesomeProject/internal/accounts"
 	"awesomeProject/internal/app"
 	"awesomeProject/internal/auth"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/discord"
 	"awesomeProject/internal/keyring"
@@ -24,7 +25,6 @@ import (
 	"awesomeProject/internal/uistate"
 
 	"github.com/diamondburned/arikawa/v3/utils/ws"
-	"github.com/diamondburned/ningen/v3"
 )
 
 // gatewayAuthFailedCode is Discord's gateway close code for a rejected
@@ -162,15 +162,14 @@ func run() error {
 	for i, account := range registry {
 		seeds[i] = accounts.Seed{Key: account.Key, Label: account.Label, ID: account.ID}
 	}
-	seeds[activeIdx].Ning = ning
-	seeds[activeIdx].App = orch
+	seeds[activeIdx].Backend = orch
 	seeds[activeIdx].Store = st
 
 	accountManager := accounts.New(accounts.Options{
 		UI:      uiApp,
 		Ctx:     ctx,
 		Surface: surface,
-		Build: func(key string) (*ningen.State, error) {
+		Build: func(key string) (backend.Backend, error) {
 			token, err := keyring.GetTokenFor(key)
 			if err != nil {
 				return nil, fmt.Errorf("read token for account %q: %w", key, err)
@@ -179,7 +178,11 @@ func run() error {
 			if token == "" {
 				return nil, fmt.Errorf("no saved token for account %q", key)
 			}
-			return discord.NewNingen(token)
+			ning, err := discord.NewNingen(token)
+			if err != nil {
+				return nil, err
+			}
+			return app.New(ning, store.New(0), uiApp), nil
 		},
 		Persist: func(reg config.Accounts) {
 			state.Accounts = stateAccounts(reg)
@@ -201,9 +204,9 @@ func run() error {
 	// commands remain registered in the same manager; ordinary plugins now load
 	// according to the Lua-derived Config. Host actions resolve the active account
 	// at call time so a plugin acts through the currently selected account.
-	activeApp := func() *app.App {
+	activeApp := func() backend.Backend {
 		if acc := accountManager.Active(); acc != nil {
-			return acc.App()
+			return acc.Backend()
 		}
 		return nil
 	}
@@ -226,8 +229,8 @@ type uiSurface struct {
 }
 
 func (u *uiSurface) Activate(a *accounts.Account) {
-	u.mv.SetActiveAccount(a.App())
-	u.shell.SetActiveAccount(a.App())
+	u.mv.SetActiveAccount(a.Backend())
+	u.shell.SetActiveAccount(a.Backend())
 }
 
 func (u *uiSurface) Refresh() { u.mv.Refresh() }

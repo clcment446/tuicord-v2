@@ -10,10 +10,10 @@ import (
 
 	"awesomeProject/internal/store"
 
+	"awesomeProject/internal/backend"
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
-	"github.com/diamondburned/arikawa/v3/utils/sendpart"
 )
 
 // syncPoster runs posted closures immediately, as if already on the UI goroutine.
@@ -319,7 +319,7 @@ func TestSendFilesSendsMultipartOptimisticallyAndCleansUp(t *testing.T) {
 
 	cleaned := make(chan struct{})
 	attachments := []store.Attachment{{Filename: "report.txt", ContentType: "text/plain", Size: 6}}
-	a.SendFiles("", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, attachments, func() { close(cleaned) })
+	a.SendFiles("", []backend.UploadFile{{Name: "report.txt", Reader: strings.NewReader("report")}}, attachments, func() { close(cleaned) })
 
 	msgs := a.store.Messages(42)
 	if len(msgs) != 1 || !msgs[0].Pending || msgs[0].Content != "" {
@@ -341,7 +341,7 @@ func TestSendFilesSendsMultipartOptimisticallyAndCleansUp(t *testing.T) {
 func TestSendFilesCleansUpWhenNoSendCanStart(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	cleaned := false
-	a.SendFiles("", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { cleaned = true })
+	a.SendFiles("", []backend.UploadFile{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { cleaned = true })
 	if !cleaned {
 		t.Fatal("cleanup was not called when there was no active channel")
 	}
@@ -353,7 +353,7 @@ func TestSendFilesCleansUpAfterFailedDelivery(t *testing.T) {
 	a.SetActive(1, 42)
 	cleaned := make(chan struct{})
 
-	a.SendFiles("note", []sendpart.File{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { close(cleaned) })
+	a.SendFiles("note", []backend.UploadFile{{Name: "report.txt", Reader: strings.NewReader("report")}}, nil, func() { close(cleaned) })
 
 	<-fs.done
 	<-cleaned

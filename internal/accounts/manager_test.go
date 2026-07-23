@@ -5,13 +5,14 @@ import (
 	"errors"
 	"testing"
 
+	"awesomeProject/internal/app"
+	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/tui"
 
 	"github.com/diamondburned/arikawa/v3/session"
-	"github.com/diamondburned/ningen/v3"
 )
 
 // fakeSurface records Manager-driven UI effects for assertions.
@@ -44,8 +45,8 @@ func TestEventSinkFollowsActiveAccount(t *testing.T) {
 	surf := &fakeSurface{}
 	sink := &recordingSink{}
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
-		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
+		{Key: "acct-2", Label: "Bob", Backend: newBackend(t)},
 	}
 	m := New(Options{
 		UI: tui.New(), Ctx: context.Background(), Surface: surf,
@@ -57,7 +58,7 @@ func TestEventSinkFollowsActiveAccount(t *testing.T) {
 	}
 
 	// Account 0 is active: SetActive emits "channel.switch", which reaches the sink.
-	a0 := m.Accounts()[0].App()
+	a0 := m.Accounts()[0].Backend()
 	a0.SetActive(1, 1)
 	if sink.events == 0 {
 		t.Fatal("active account events did not reach the sink")
@@ -71,17 +72,17 @@ func TestEventSinkFollowsActiveAccount(t *testing.T) {
 	if sink.events != before {
 		t.Fatal("background account events still reached the sink")
 	}
-	m.Accounts()[1].App().SetActive(3, 3) // newly active account: attached
+	m.Accounts()[1].Backend().SetActive(3, 3) // newly active account: attached
 	if sink.events == before {
 		t.Fatal("newly active account events did not reach the sink")
 	}
 }
 
-// wrapState builds a ningen state around an offline fake session so app.New
+// newBackend builds a Discord orchestrator around an offline fake session so it
 // works without any network. The connection is never opened in these tests.
-func wrapState(t *testing.T) *ningen.State {
+func newBackend(t *testing.T) backend.Backend {
 	t.Helper()
-	return discord.WrapSession(session.New(""))
+	return app.New(discord.WrapSession(session.New("")), store.New(0), tui.New())
 }
 
 func newManager(t *testing.T, surf Surface, seeds []Seed, build BuildFunc) (*Manager, *[]config.Accounts) {
@@ -103,8 +104,8 @@ func newManager(t *testing.T, surf Surface, seeds []Seed, build BuildFunc) (*Man
 func TestStartActivatesAndPersistsActiveAccount(t *testing.T) {
 	surf := &fakeSurface{}
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
-		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
+		{Key: "acct-2", Label: "Bob", Backend: newBackend(t)},
 	}
 	m, saved := newManager(t, surf, seeds, nil)
 
@@ -128,8 +129,8 @@ func TestStartActivatesAndPersistsActiveAccount(t *testing.T) {
 func TestSwitchChangesActiveAndRebinds(t *testing.T) {
 	surf := &fakeSurface{}
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
-		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
+		{Key: "acct-2", Label: "Bob", Backend: newBackend(t)},
 	}
 	m, saved := newManager(t, surf, seeds, nil)
 	if err := m.Start(); err != nil {
@@ -157,13 +158,13 @@ func TestLazyBuildHappensOnceAcrossSwitches(t *testing.T) {
 	surf := &fakeSurface{}
 	// Account 1 has no prebuilt state, so it must be built via BuildFunc.
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
 		{Key: "acct-2", Label: "Bob"},
 	}
 	builds := map[string]int{}
-	build := func(key string) (*ningen.State, error) {
+	build := func(key string) (backend.Backend, error) {
 		builds[key]++
-		return wrapState(t), nil
+		return newBackend(t), nil
 	}
 	m, _ := newManager(t, surf, seeds, build)
 	if err := m.Start(); err != nil {
@@ -184,7 +185,7 @@ func TestLazyBuildHappensOnceAcrossSwitches(t *testing.T) {
 	if builds["acct-2"] != 1 {
 		t.Fatalf("lazy account built %d times, want exactly 1", builds["acct-2"])
 	}
-	if m.Accounts()[1].App() == nil {
+	if m.Accounts()[1].Backend() == nil {
 		t.Fatalf("lazy account was not built")
 	}
 }
@@ -192,16 +193,16 @@ func TestLazyBuildHappensOnceAcrossSwitches(t *testing.T) {
 func TestSwitchBuildFailureSurfacesErrorAndRetries(t *testing.T) {
 	surf := &fakeSurface{}
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
 		{Key: "acct-2", Label: "Bob"},
 	}
 	attempts := 0
-	build := func(key string) (*ningen.State, error) {
+	build := func(key string) (backend.Backend, error) {
 		attempts++
 		if attempts == 1 {
 			return nil, errors.New("keyring locked")
 		}
-		return wrapState(t), nil
+		return newBackend(t), nil
 	}
 	m, _ := newManager(t, surf, seeds, build)
 	if err := m.Start(); err != nil {
@@ -228,7 +229,7 @@ func TestSwitchBuildFailureSurfacesErrorAndRetries(t *testing.T) {
 
 func TestBadgeReflectsUnreadFromStore(t *testing.T) {
 	surf := &fakeSurface{}
-	seeds := []Seed{{Key: "token", Label: "Alice", Ning: wrapState(t)}}
+	seeds := []Seed{{Key: "token", Label: "Alice", Backend: newBackend(t)}}
 	m, _ := newManager(t, surf, seeds, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -250,8 +251,8 @@ func TestBadgeReflectsUnreadFromStore(t *testing.T) {
 func TestBackgroundReadStateChangePushesAccountBadges(t *testing.T) {
 	surf := &fakeSurface{}
 	seeds := []Seed{
-		{Key: "token", Label: "Alice", Ning: wrapState(t)},
-		{Key: "acct-2", Label: "Bob", Ning: wrapState(t)},
+		{Key: "token", Label: "Alice", Backend: newBackend(t)},
+		{Key: "acct-2", Label: "Bob", Backend: newBackend(t)},
 	}
 	m, _ := newManager(t, surf, seeds, nil)
 	if err := m.Start(); err != nil {
@@ -279,7 +280,7 @@ func TestBackgroundReadStateChangePushesAccountBadges(t *testing.T) {
 
 func TestActiveReadStateChangeUsesAttentionOnlyRefresh(t *testing.T) {
 	surf := &fakeSurface{}
-	m, _ := newManager(t, surf, []Seed{{Key: "token", Ning: wrapState(t)}}, nil)
+	m, _ := newManager(t, surf, []Seed{{Key: "token", Backend: newBackend(t)}}, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestActiveReadStateChangeUsesAttentionOnlyRefresh(t *testing.T) {
 
 func TestBadgeLabelFallsBackToKey(t *testing.T) {
 	surf := &fakeSurface{}
-	seeds := []Seed{{Key: "acct-xyz", Ning: wrapState(t)}}
+	seeds := []Seed{{Key: "acct-xyz", Backend: newBackend(t)}}
 	m, _ := newManager(t, surf, seeds, nil)
 	if err := m.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
