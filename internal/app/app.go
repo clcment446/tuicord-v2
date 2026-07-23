@@ -317,6 +317,11 @@ type App struct {
 	activeGuild   store.GuildID
 	activeChannel store.ChannelID
 	selfID        store.UserID
+	// self is the logged-in user's identity, learned from READY alongside
+	// selfID. Mention resolution falls back to it so a self-mention resolves even
+	// in DMs (whose recipient lists exclude the current user) and in guilds whose
+	// member catalog has not loaded.
+	self store.Member
 	// stateSnapshot publishes the UI-owned selection and identity to readers on
 	// other goroutines (notably synchronous Lua accessors) without posting back
 	// to the UI loop, which may not be running during startup or shutdown.
@@ -469,6 +474,15 @@ func (a *App) ActiveChannel() store.ChannelID { return a.activeChannel }
 
 // SelfID returns the logged-in user's ID once READY has been processed.
 func (a *App) SelfID() store.UserID { return a.selfID }
+
+// Self returns the logged-in user's identity, resolving to ok=false until READY
+// has populated it.
+func (a *App) Self() (store.Member, bool) {
+	if a.self.ID == 0 {
+		return store.Member{}, false
+	}
+	return a.self, true
+}
 
 // StateSnapshot is an immutable, concurrently readable view of the small piece
 // of UI-owned state exposed to integrations. Call App.Snapshot instead of
