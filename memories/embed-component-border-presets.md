@@ -6,7 +6,7 @@ impact: normal
 commit: 13b0f44 (dirty)
 date: 2026-07-23
 created_at: 2026-07-23T11:00:00+02:00
-scope: internal/ui/embedview.go, internal/ui/componentview.go, internal/ui/border_style.go, internal/tui/widget
+scope: internal/ui/embedview.go, internal/ui/componentview.go, internal/ui/chatview.go, internal/tui/widget
 ---
 
 ## Problem
@@ -23,9 +23,11 @@ Using it as the chat-frame default would change existing output.
 ## Resolution
 
 The UI now maps `display.border_style` presets (`rounded`, `square`, `heavy`,
-`double`, and `ascii`) to explicit glyph sets. The selected set is passed into
-`frameEmbedLines` and the reusable `Border`, `Split`, `Modal`, and `Menu`
-widgets, covering both embeds and component containers. The rounded preset
+`double`, and `ascii`) to explicit glyph sets in `internal/tui/widget`. The
+selected set is passed into `frameEmbedLines` and the reusable `Border`,
+`Split`, `Modal`, and `Menu` widgets, covering both embeds and component
+containers. `Styles.BorderCharsOrDefault` centralizes the rounded fallback,
+and `NewChatView` reads the configured glyphs directly. The rounded preset
 explicitly retains the previous curved corners.
 
 ## Notes

@@ -2109,11 +2109,7 @@ func (s *Shell) styleMenu(menu *widget.Menu) {
 	menu.SetStyle(s.styles.Cell("menu"))
 	menu.SetSelectedStyle(s.styles.Cell("menu.selected"))
 	menu.SetBorderStyle(s.styles.Cell("panels.border"))
-	chars := s.styles.BorderChars
-	if chars == (widget.BorderChars{}) {
-		chars = BorderCharsForStyle(s.cfg.Display.BorderStyle)
-	}
-	menu.SetBorderChars(chars)
+	menu.SetBorderChars(s.styles.BorderCharsOrDefault())
 	menu.SetDangerStyle(s.styles.Cell("menu.danger"))
 	menu.SetDisabledStyle(s.styles.Cell("menu.disabled"))
 	menu.SetKeyStyle(s.styles.Cell("menu.key"))

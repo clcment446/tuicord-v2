@@ -53,30 +53,30 @@ type MainView struct {
 	styles   Styles
 	mediaCfg media.Config
 
-	borderChars        widget.BorderChars
-	guildList           *widget.ItemList
-	channelList         *widget.ItemList
-	memberList          *widget.ItemList
-	accountList         *widget.ItemList
-	accountBorder       *widget.Border
-	channelBorder       *widget.Border
-	themedBorders       []*widget.Border
-	themedSplits        []*widget.Split
-	onAccountSelect     func(int)
-	chat                *ChatView
-	chatBorder          *widget.Border
-	composerBorder      *widget.Border
-	composerStatus      *widget.Text
-	composerFiles       *widget.Text
-	composerPreview     *widget.Node
-	composerNode        *layout.Node
-	previewCellW        int
-	previewCellH        int
+	borderChars     widget.BorderChars
+	guildList       *widget.ItemList
+	channelList     *widget.ItemList
+	memberList      *widget.ItemList
+	accountList     *widget.ItemList
+	accountBorder   *widget.Border
+	channelBorder   *widget.Border
+	themedBorders   []*widget.Border
+	themedSplits    []*widget.Split
+	onAccountSelect func(int)
+	chat            *ChatView
+	chatBorder      *widget.Border
+	composerBorder  *widget.Border
+	composerStatus  *widget.Text
+	composerFiles   *widget.Text
+	composerPreview *widget.Node
+	composerNode    *layout.Node
+	previewCellW    int
+	previewCellH    int
 	// previewCache holds thumbnails already decoded off the UI thread, keyed by
 	// attachment path; previewPending guards against launching a second decode
 	// for the same path. Both are UI-goroutine-owned.
-	previewCache        map[string]*imagePreview
-	previewPending      map[string]bool
+	previewCache   map[string]*imagePreview
+	previewPending map[string]bool
 	// previewEpoch is bumped whenever attachments are cleared/reset. An in-flight
 	// off-thread decode captures the epoch at request time; if it no longer matches
 	// when the decode posts back, the result is stale (its temp path may have been
@@ -84,7 +84,7 @@ type MainView struct {
 	previewEpoch int
 	// syncPreviewDecode forces inline thumbnail decoding for tests with no event
 	// loop; production leaves it false so decodes run off the UI goroutine.
-	syncPreviewDecode bool
+	syncPreviewDecode   bool
 	composer            *widget.TextInput
 	attachments         []queuedAttachment
 	composerMode        composerMode
@@ -141,7 +141,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 		state = &uistate.State{}
 	}
 	mediaCfg := chatMediaConfig(cfg)
-	mv := &MainView{app: a, cfg: cfg, styles: styles, borderChars: BorderCharsForStyle(cfg.Display.BorderStyle), mediaCfg: mediaCfg, state: state,
+	mv := &MainView{app: a, cfg: cfg, styles: styles, borderChars: widget.BorderCharsForStyle(cfg.Display.BorderStyle), mediaCfg: mediaCfg, state: state,
 		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != "", lastActiveChannel: a.ActiveChannel()}
 
 	mv.guildList = widget.NewItemList(nil)
@@ -180,7 +180,6 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.accountList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
-	mv.chat.SetBorderStyle(cfg.Display.BorderStyle)
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
@@ -1735,11 +1734,7 @@ func (mv *MainView) updateComposerStatus() {
 // border only when no theme is available.
 func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
-	chars := styles.BorderChars
-	if chars == (widget.BorderChars{}) {
-		chars = BorderCharsForStyle("rounded")
-	}
-	b.SetBorderChars(chars)
+	b.SetBorderChars(styles.BorderCharsOrDefault())
 	b.SetTitle(title)
 	b.SetStyle(styles.Cell("panels.border"))
 	b.SetFocusStyle(styles.Cell("panels.focus"))

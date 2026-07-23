@@ -35,11 +35,7 @@ func newPluginViewport(title string, lines []string, actions []plugin.ViewportAc
 		textStyle: styles.Cell("messages.content"), border: styles.Cell("panels.border"),
 	}
 	p.modal = widget.NewModal(title, nil)
-	chars := styles.BorderChars
-	if chars == (widget.BorderChars{}) {
-		chars = BorderCharsForStyle("rounded")
-	}
-	p.modal.SetBorderChars(chars)
+	p.modal.SetBorderChars(styles.BorderCharsOrDefault())
 	p.modal.SetSize(54, min(18, max(7, len(lines)+4)))
 	p.modal.SetStyle(p.border)
 	return p

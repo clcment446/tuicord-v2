@@ -27,7 +27,8 @@ type BorderChars struct {
 	TeeRight string
 }
 
-// RoundedBorder is the default single-cell border style.
+// RoundedBorder is the default single-cell widget border; the configurable
+// "rounded" preset intentionally uses curved corners to preserve chat frames.
 var RoundedBorder = BorderChars{
 	TopLeft: "┌", TopRight: "┐", BottomLeft: "└", BottomRight: "┘",
 	Horizontal: "─", Vertical: "│", TeeLeft: "├", TeeRight: "┤",

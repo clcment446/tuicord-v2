@@ -84,7 +84,6 @@ func TestModalOneRowFrameUsesTopCorners(t *testing.T) {
 	m.SetCollapsed(true)
 	buf := screen.NewBuffer(12, 5)
 	m.Draw(buf.Clip(buf.Bounds()))
-	t.Logf("modal corners: %q %q", buf.Cell(2, 0).Content, buf.Cell(2, 1).Content)
 	rect := m.Bounds(tui.Size{W: 12, H: 5})
 
 	if got := buf.Cell(rect.X, rect.Y).Content; got != "┌" {

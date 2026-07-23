@@ -22,7 +22,7 @@ func TestFrameEmbedLinesPreservesAndOffsetsInteractionMetadata(t *testing.T) {
 		spinner:  true,
 	}
 
-	framed := frameEmbedLines([]chatLine{line}, 5, screen.Style{}, screen.Style{}, borderCharsForStyle("rounded"))
+	framed := frameEmbedLines([]chatLine{line}, 5, screen.Style{}, screen.Style{}, widget.BorderCharsForStyle("rounded"))
 	if len(framed) != 3 {
 		t.Fatalf("framed lines = %d, want top/content/bottom", len(framed))
 	}
@@ -56,7 +56,7 @@ func TestSetBorderStyleFallsBackAndSelectsPresets(t *testing.T) {
 		t.Fatalf("heavy border = %+v", view.borderChars)
 	}
 	view.SetBorderStyle("not-a-style")
-	if view.borderChars != borderCharsForStyle("rounded") {
+	if view.borderChars != widget.BorderCharsForStyle("rounded") {
 		t.Fatalf("invalid border style = %+v, want rounded", view.borderChars)
 	}
 }
