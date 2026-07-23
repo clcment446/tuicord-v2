@@ -113,8 +113,13 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 	}
 
 	matrixPanel := buildMatrixLogin(ctx, app, styles, setMatrix, matrixAuth)
+	// Stack the Discord panel (token + QR, side by side) above the Matrix panel.
+	// Horizontal() makes a top/bottom divider; the basis is the Discord pane's
+	// row height (kept above the minimum so neither pane collapses — Basis(0)
+	// would clamp to ~1 row and hide Discord). Matrix fills the remainder.
 	root := widget.NewSplit(discord, titled(styles, "Matrix", matrixPanel)).
-		Basis(0).
+		Basis(14).
+		MinFirst(8).
 		Horizontal()
 	root.SetBorderChars(styles.BorderCharsOrDefault())
 	return newCancelRoot(root, cancel)
