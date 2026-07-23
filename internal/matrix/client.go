@@ -70,16 +70,27 @@ func New(creds auth.Credentials, dataDir string, persist func(auth.Credentials) 
 	if len(pickle) == 0 {
 		pickle = newPickleKey()
 	}
+	// NewCryptoHelper only opens the (lazy) SQLite handle; it does no network or
+	// heavy I/O. StartCrypto performs the expensive device-key load/upload and is
+	// called from Connect on a background goroutine, so building a client never
+	// blocks the UI goroutine (which drives lazy account switches).
 	crypto, err := cryptohelper.NewCryptoHelper(m, pickle, c.dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("matrix: crypto init: %w", err)
 	}
-	if err := crypto.Init(context.Background()); err != nil {
-		return nil, fmt.Errorf("matrix: crypto start: %w", err)
-	}
 	m.Crypto = crypto
 	c.Crypto = crypto
 	return c, nil
+}
+
+// StartCrypto loads the E2EE machine (device keys, olm sessions) and registers
+// the crypto helper's sync handlers. It performs network I/O and must run off
+// the UI goroutine — call it from Connect, not New. Safe to call once per client.
+func (c *Client) StartCrypto(ctx context.Context) error {
+	if c.Crypto == nil {
+		return nil
+	}
+	return c.Crypto.Init(ctx)
 }
 
 // Syncer returns the default syncer for registering event handlers. NewClient

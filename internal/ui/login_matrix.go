@@ -34,7 +34,17 @@ func buildMatrixLogin(ctx context.Context, app *tui.App, styles Styles, setMatri
 		})
 	}
 
+	// busy guards against overlapping submissions. It is only ever read and
+	// written on the UI goroutine: submit handlers run there, and the login
+	// goroutines report failure by posting the reset back onto it (via failed).
 	var busy bool
+	failed := func(msg string) {
+		app.Post(func() {
+			busy = false
+			status.SetContent(msg)
+			app.Invalidate()
+		})
+	}
 	submitPassword := func(string) {
 		if busy {
 			return
@@ -51,8 +61,7 @@ func buildMatrixLogin(ctx context.Context, app *tui.App, styles Styles, setMatri
 		go func() {
 			creds, err := authr.Password(ctx, hs, u, p)
 			if err != nil {
-				busy = false
-				setStatus("Login failed: " + err.Error())
+				failed("Login failed: " + err.Error())
 				return
 			}
 			setMatrix(creds)
@@ -75,8 +84,7 @@ func buildMatrixLogin(ctx context.Context, app *tui.App, styles Styles, setMatri
 		go func() {
 			creds, err := authr.Token(ctx, hs, tok)
 			if err != nil {
-				busy = false
-				setStatus("Token invalid: " + err.Error())
+				failed("Token invalid: " + err.Error())
 				return
 			}
 			setMatrix(creds)

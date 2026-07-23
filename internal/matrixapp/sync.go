@@ -51,6 +51,13 @@ func (a *App) RegisterHandlers() {
 // reconnect loop: mautrix's SyncWithContext returns on error, so we back off and
 // retry, mirroring the Discord orchestrator's Connect contract.
 func (a *App) Connect(ctx context.Context) error {
+	// Load E2EE state (device keys, olm sessions) before syncing. This does
+	// network I/O, so it runs here on the connect goroutine rather than in New
+	// (which executes on the UI goroutine during a lazy account switch). On
+	// failure, encrypted rooms won't decrypt but unencrypted rooms still work.
+	if err := a.client.StartCrypto(ctx); err != nil && ctx.Err() == nil {
+		a.reportError(err)
+	}
 	backoff := time.Second
 	for ctx.Err() == nil {
 		err := a.client.M.SyncWithContext(ctx)
@@ -320,11 +327,17 @@ func (a *App) onMessage(ctx context.Context, evt *event.Event) {
 	msg := a.convertMessage(evt, content, channel)
 	fromSelf := evt.Sender == a.selfID
 	a.ui.Post(func() {
-		if msg.Nonce != "" {
-			a.store.ReplaceMessage(msg.Nonce, msg)
-		} else {
-			a.store.AppendMessage(msg)
+		// Reconcile our own optimistic echo by nonce first; otherwise dedupe
+		// against redelivered events (reconnect / gappy sync re-send timeline
+		// events) before appending, mirroring the Discord ingest path.
+		if msg.Nonce != "" && a.store.ReplaceMessage(msg.Nonce, msg) {
+			a.fireChange()
+			return
 		}
+		if a.store.HasMessage(channel, msg.ID) {
+			return // duplicate redelivery, already present
+		}
+		a.store.AppendMessage(msg)
 		a.fireChange()
 		if !fromSelf && a.onIncoming != nil {
 			a.onIncoming(msg)
@@ -345,6 +358,9 @@ func (a *App) onDecryptError(evt *event.Event, decErr error) {
 		Timestamp: time.UnixMilli(evt.Timestamp),
 	}
 	a.ui.Post(func() {
+		if a.store.HasMessage(channel, msg.ID) {
+			return // duplicate redelivery
+		}
 		a.store.AppendMessage(msg)
 		a.fireChange()
 	})
@@ -365,6 +381,10 @@ func (a *App) onReaction(ctx context.Context, evt *event.Event) {
 	me := evt.Sender == a.selfID
 
 	a.mu.Lock()
+	if _, seen := a.reactions[evt.ID]; seen {
+		a.mu.Unlock()
+		return // duplicate redelivery: the reaction event is already counted
+	}
 	a.reactions[evt.ID] = reactionRef{channel: channel, message: target, key: key}
 	a.mu.Unlock()
 
