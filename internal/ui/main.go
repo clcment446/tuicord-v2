@@ -179,6 +179,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.accountList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.SetBorderStyle(cfg.Display.BorderStyle)
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)

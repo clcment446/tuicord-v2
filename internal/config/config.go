@@ -210,6 +210,9 @@ type Colors struct {
 
 // Display controls presentation details that are not colors.
 type Display struct {
+	// BorderStyle selects the glyph set used to frame embeds and component containers.
+	// Supported values are rounded, square, heavy, double, and ascii.
+	BorderStyle string `toml:"border_style"`
 	// ASCII forces ASCII-only glyphs for channel badges and sidebar markers,
 	// for terminals or fonts without good Unicode symbol coverage. The client
 	// also switches to ASCII automatically when NO_COLOR is set in the
@@ -444,7 +447,7 @@ func Default() Config {
 			ClipboardTimeoutSeconds: 5,
 			PlayVideos:              true,
 		},
-		Display:       Display{NoAnimationsOverSSH: true, StickyAnchor: true},
+		Display:       Display{BorderStyle: "rounded", NoAnimationsOverSSH: true, StickyAnchor: true},
 		Accessibility: Accessibility{MouseOn: true},
 		// Catppuccin Latte: the light variant of the Catppuccin palette.
 		Colors: Colors{
@@ -773,6 +776,7 @@ border = "#bcc0cc"
 error = "#d20f39"
 
 [display]
+border_style = "rounded"
 # Restrict emitted colors to the terminal's standard 16-color palette.
 tty_colors = false
 # Render cached Discord gradient roles on author names.
