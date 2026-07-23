@@ -83,6 +83,28 @@ func TestSplitDividerUsesConfiguredThemeStyle(t *testing.T) {
 	}
 }
 
+func TestSplitUsesConfiguredBorderChars(t *testing.T) {
+	split := NewSplit(NewText("left"), NewText("right")).Basis(3)
+	split.SetBorderChars(BorderChars{Horizontal: "=", Vertical: "!"})
+	buf := tui.New().Render(split, tui.Size{W: 10, H: 3})
+	if got := buf.Cell(3, 1).Content; got != "!" {
+		t.Fatalf("vertical divider = %q, want !", got)
+	}
+
+	split.Horizontal()
+	buf = screen.NewBuffer(10, 3)
+	split.Draw(buf.Clip(buf.Bounds()))
+	var divider bool
+	for y := 0; y < 3; y++ {
+		for x := 0; x < 10; x++ {
+			divider = divider || buf.Cell(x, y).Content == "="
+		}
+	}
+	if !divider {
+		t.Fatal("horizontal divider did not use configured glyph")
+	}
+}
+
 func TestSplitForwardsUnhandledInputToPane(t *testing.T) {
 	field := NewTextInput("")
 	split := NewSplit(field, NewText("right")).Basis(8)

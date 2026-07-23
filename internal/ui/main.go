@@ -53,29 +53,30 @@ type MainView struct {
 	styles   Styles
 	mediaCfg media.Config
 
-	guildList           *widget.ItemList
-	channelList         *widget.ItemList
-	memberList          *widget.ItemList
-	accountList         *widget.ItemList
-	accountBorder       *widget.Border
-	channelBorder       *widget.Border
-	themedBorders       []*widget.Border
-	themedSplits        []*widget.Split
-	onAccountSelect     func(int)
-	chat                *ChatView
-	chatBorder          *widget.Border
-	composerBorder      *widget.Border
-	composerStatus      *widget.Text
-	composerFiles       *widget.Text
-	composerPreview     *widget.Node
-	composerNode        *layout.Node
-	previewCellW        int
-	previewCellH        int
+	borderChars     widget.BorderChars
+	guildList       *widget.ItemList
+	channelList     *widget.ItemList
+	memberList      *widget.ItemList
+	accountList     *widget.ItemList
+	accountBorder   *widget.Border
+	channelBorder   *widget.Border
+	themedBorders   []*widget.Border
+	themedSplits    []*widget.Split
+	onAccountSelect func(int)
+	chat            *ChatView
+	chatBorder      *widget.Border
+	composerBorder  *widget.Border
+	composerStatus  *widget.Text
+	composerFiles   *widget.Text
+	composerPreview *widget.Node
+	composerNode    *layout.Node
+	previewCellW    int
+	previewCellH    int
 	// previewCache holds thumbnails already decoded off the UI thread, keyed by
 	// attachment path; previewPending guards against launching a second decode
 	// for the same path. Both are UI-goroutine-owned.
-	previewCache        map[string]*imagePreview
-	previewPending      map[string]bool
+	previewCache   map[string]*imagePreview
+	previewPending map[string]bool
 	// previewEpoch is bumped whenever attachments are cleared/reset. An in-flight
 	// off-thread decode captures the epoch at request time; if it no longer matches
 	// when the decode posts back, the result is stale (its temp path may have been
@@ -83,7 +84,7 @@ type MainView struct {
 	previewEpoch int
 	// syncPreviewDecode forces inline thumbnail decoding for tests with no event
 	// loop; production leaves it false so decodes run off the UI goroutine.
-	syncPreviewDecode bool
+	syncPreviewDecode   bool
 	composer            *widget.TextInput
 	attachments         []queuedAttachment
 	composerMode        composerMode
@@ -140,7 +141,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 		state = &uistate.State{}
 	}
 	mediaCfg := chatMediaConfig(cfg)
-	mv := &MainView{app: a, cfg: cfg, styles: styles, mediaCfg: mediaCfg, state: state,
+	mv := &MainView{app: a, cfg: cfg, styles: styles, borderChars: widget.BorderCharsForStyle(cfg.Display.BorderStyle), mediaCfg: mediaCfg, state: state,
 		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != "", lastActiveChannel: a.ActiveChannel()}
 
 	mv.guildList = widget.NewItemList(nil)
@@ -274,9 +275,11 @@ func (mv *MainView) SetStyles(styles Styles) {
 	for _, border := range mv.themedBorders {
 		border.SetStyle(styles.Cell("panels.border"))
 		border.SetFocusStyle(styles.Cell("panels.focus"))
+		border.SetBorderChars(mv.borderChars)
 	}
 	for _, split := range mv.themedSplits {
 		split.SetStyle(styles.Cell("panels.border"))
+		split.SetBorderChars(mv.borderChars)
 	}
 }
 
@@ -321,6 +324,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(accountsMinWidth).
 		MaxFirst(accountsMaxWidth).
 		CollapsibleFirst()
+	composerRow.SetBorderChars(mv.borderChars)
 	composerRow.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, composerRow)
 	accountsPolicy.Apply(mv.accountBorder.Layout(), layout.Row)
@@ -354,6 +358,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinSecond(membersWidth).
 		CollapsibleSecond().
 		Vertical()
+	chatAndMembers.SetBorderChars(mv.borderChars)
 	chatAndMembers.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, chatAndMembers)
 	membersNode := members.Layout()
@@ -379,6 +384,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(12).
 		MaxFirst(40).
 		CollapsibleFirst()
+	channelsAndRest.SetBorderChars(mv.borderChars)
 	channelsAndRest.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, channelsAndRest)
 	channelsPolicy.Apply(channels.Layout(), layout.Row)
@@ -397,6 +403,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(3).
 		MaxFirst(24).
 		CollapsibleFirst()
+	root.SetBorderChars(mv.borderChars)
 	root.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, root)
 	guildsPolicy.Apply(guildRail.Layout(), layout.Row)
@@ -1727,6 +1734,7 @@ func (mv *MainView) updateComposerStatus() {
 // border only when no theme is available.
 func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
+	b.SetBorderChars(styles.BorderCharsOrDefault())
 	b.SetTitle(title)
 	b.SetStyle(styles.Cell("panels.border"))
 	b.SetFocusStyle(styles.Cell("panels.focus"))
@@ -1735,6 +1743,7 @@ func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 
 func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
 	b := titled(mv.styles, title, child)
+	b.SetBorderChars(mv.borderChars)
 	// Track for live re-theming on a runtime theme switch (overlays are recreated
 	// per open, so they need this only for the persistent main-layout panels).
 	mv.themedBorders = append(mv.themedBorders, b)

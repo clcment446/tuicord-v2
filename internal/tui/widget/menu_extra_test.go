@@ -78,6 +78,21 @@ func TestMenuSettersApplyStyles(t *testing.T) {
 	}
 }
 
+func TestMenuUsesConfiguredBorderChars(t *testing.T) {
+	m := NewMenu([]MenuItem{{Separator: true}})
+	m.SetBorderChars(BorderChars{TopLeft: "[", TopRight: "]", BottomLeft: "[", BottomRight: "]", Horizontal: "=", Vertical: "!", TeeLeft: "<", TeeRight: ">"})
+	m.SetAnchor(0, 0)
+	buf := screen.NewBuffer(12, 5)
+	m.Measure(sizeOf(buf))
+	m.Draw(buf.Clip(buf.Bounds()))
+	if got := buf.Cell(0, 0).Content; got != "[" {
+		t.Fatalf("menu top-left = %q, want [", got)
+	}
+	if got := buf.Cell(0, 1).Content; got != "<" {
+		t.Fatalf("menu separator left tee = %q, want <", got)
+	}
+}
+
 func TestMenuFocusContract(t *testing.T) {
 	m := NewMenu([]MenuItem{{Label: "a"}})
 	if !m.CanFocus() {

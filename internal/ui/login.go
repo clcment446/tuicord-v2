@@ -76,6 +76,7 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		Basis(36).
 		MinFirst(30).
 		Vertical()
+	root.SetBorderChars(styles.BorderCharsOrDefault())
 	return newCancelRoot(root, cancel)
 }
 

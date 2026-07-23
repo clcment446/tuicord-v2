@@ -10,6 +10,7 @@ import (
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
+	"awesomeProject/internal/tui/widget"
 )
 
 func TestFrameEmbedLinesPreservesAndOffsetsInteractionMetadata(t *testing.T) {
@@ -21,7 +22,7 @@ func TestFrameEmbedLinesPreservesAndOffsetsInteractionMetadata(t *testing.T) {
 		spinner:  true,
 	}
 
-	framed := frameEmbedLines([]chatLine{line}, 5, screen.Style{}, screen.Style{})
+	framed := frameEmbedLines([]chatLine{line}, 5, screen.Style{}, screen.Style{}, widget.BorderCharsForStyle("rounded"))
 	if len(framed) != 3 {
 		t.Fatalf("framed lines = %d, want top/content/bottom", len(framed))
 	}
@@ -31,6 +32,32 @@ func TestFrameEmbedLinesPreservesAndOffsetsInteractionMetadata(t *testing.T) {
 	}
 	if got.header != header || !got.spinner {
 		t.Fatalf("framed metadata = header %p spinner %t, want preserved", got.header, got.spinner)
+	}
+}
+
+func TestFrameEmbedLinesUsesConfiguredBorderGlyphs(t *testing.T) {
+	chars := widget.BorderChars{TopLeft: "[", TopRight: "]", BottomLeft: "[", BottomRight: "]", Horizontal: "=", Vertical: "!"}
+	framed := frameEmbedLines([]chatLine{{segments: []chatSegment{{text: "body"}}}}, 4, screen.Style{}, screen.Style{}, chars)
+	if got := lineText(framed[0]); got != "[====]" {
+		t.Fatalf("top border = %q, want %q", got, "[====]")
+	}
+	if got := lineText(framed[1]); !strings.HasPrefix(got, "!") || !strings.HasSuffix(got, "!") {
+		t.Fatalf("content border = %q, want custom vertical glyphs", got)
+	}
+	if got := lineText(framed[len(framed)-1]); got != "[====]" {
+		t.Fatalf("bottom border = %q, want %q", got, "[====]")
+	}
+}
+
+func TestSetBorderStyleFallsBackAndSelectsPresets(t *testing.T) {
+	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetBorderStyle("heavy")
+	if view.borderChars.Vertical != "┃" || view.borderChars.Horizontal != "━" {
+		t.Fatalf("heavy border = %+v", view.borderChars)
+	}
+	view.SetBorderStyle("not-a-style")
+	if view.borderChars != widget.BorderCharsForStyle("rounded") {
+		t.Fatalf("invalid border style = %+v, want rounded", view.borderChars)
 	}
 }
 

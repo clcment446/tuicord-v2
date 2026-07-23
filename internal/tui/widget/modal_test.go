@@ -93,3 +93,20 @@ func TestModalOneRowFrameUsesTopCorners(t *testing.T) {
 		t.Fatalf("one-row right corner = %q, want ┐", got)
 	}
 }
+
+func TestModalUsesConfiguredBorderChars(t *testing.T) {
+	m := NewModal("", nil)
+	m.SetSize(8, 4)
+	m.SetBorderChars(BorderChars{TopLeft: "[", TopRight: "]", BottomLeft: "[", BottomRight: "]", Horizontal: "=", Vertical: "!"})
+	buf := screen.NewBuffer(12, 5)
+	m.Draw(buf.Clip(buf.Bounds()))
+	if got := buf.Cell(2, 0).Content; got != "[" {
+		t.Fatalf("modal top-left = %q, want [", got)
+	}
+	if got := buf.Cell(3, 0).Content; got != "=" {
+		t.Fatalf("modal top edge = %q, want =", got)
+	}
+	if got := buf.Cell(2, 1).Content; got != "!" {
+		t.Fatalf("modal left edge = %q, want !", got)
+	}
+}

@@ -172,6 +172,7 @@ tuicord.configure({
     members_hide_below = 120,
   },
   display = {
+    border_style = "rounded",
     ascii = false,
     tty_colors = false,
     role_gradients = false,

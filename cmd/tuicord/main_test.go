@@ -3,8 +3,19 @@ package main
 import (
 	"testing"
 
+	"awesomeProject/internal/config"
+	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
 )
+
+func TestUIStylesUnknownBorderStyleFallsBackToRounded(t *testing.T) {
+	cfg := config.Default()
+	cfg.Display.BorderStyle = "unknown"
+
+	if got := uiStyles(cfg).BorderChars; got != widget.BorderCharsForStyle("rounded") {
+		t.Fatalf("unknown border style = %+v, want rounded", got)
+	}
+}
 
 func TestDedupAccountRegistryDropsRepeatedKeys(t *testing.T) {
 	list := []uistate.Account{
