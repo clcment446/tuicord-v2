@@ -53,6 +53,7 @@ type MainView struct {
 	styles   Styles
 	mediaCfg media.Config
 
+	borderChars        widget.BorderChars
 	guildList           *widget.ItemList
 	channelList         *widget.ItemList
 	memberList          *widget.ItemList
@@ -140,7 +141,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 		state = &uistate.State{}
 	}
 	mediaCfg := chatMediaConfig(cfg)
-	mv := &MainView{app: a, cfg: cfg, styles: styles, mediaCfg: mediaCfg, state: state,
+	mv := &MainView{app: a, cfg: cfg, styles: styles, borderChars: BorderCharsForStyle(cfg.Display.BorderStyle), mediaCfg: mediaCfg, state: state,
 		ascii: cfg.Display.ASCII || os.Getenv("NO_COLOR") != "", lastActiveChannel: a.ActiveChannel()}
 
 	mv.guildList = widget.NewItemList(nil)
@@ -275,9 +276,11 @@ func (mv *MainView) SetStyles(styles Styles) {
 	for _, border := range mv.themedBorders {
 		border.SetStyle(styles.Cell("panels.border"))
 		border.SetFocusStyle(styles.Cell("panels.focus"))
+		border.SetBorderChars(mv.borderChars)
 	}
 	for _, split := range mv.themedSplits {
 		split.SetStyle(styles.Cell("panels.border"))
+		split.SetBorderChars(mv.borderChars)
 	}
 }
 
@@ -322,6 +325,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(accountsMinWidth).
 		MaxFirst(accountsMaxWidth).
 		CollapsibleFirst()
+	composerRow.SetBorderChars(mv.borderChars)
 	composerRow.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, composerRow)
 	accountsPolicy.Apply(mv.accountBorder.Layout(), layout.Row)
@@ -355,6 +359,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinSecond(membersWidth).
 		CollapsibleSecond().
 		Vertical()
+	chatAndMembers.SetBorderChars(mv.borderChars)
 	chatAndMembers.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, chatAndMembers)
 	membersNode := members.Layout()
@@ -380,6 +385,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(12).
 		MaxFirst(40).
 		CollapsibleFirst()
+	channelsAndRest.SetBorderChars(mv.borderChars)
 	channelsAndRest.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, channelsAndRest)
 	channelsPolicy.Apply(channels.Layout(), layout.Row)
@@ -398,6 +404,7 @@ func (mv *MainView) compose() tui.Widget {
 		MinFirst(3).
 		MaxFirst(24).
 		CollapsibleFirst()
+	root.SetBorderChars(mv.borderChars)
 	root.SetStyle(mv.styles.Cell("panels.border"))
 	mv.themedSplits = append(mv.themedSplits, root)
 	guildsPolicy.Apply(guildRail.Layout(), layout.Row)
@@ -1728,6 +1735,11 @@ func (mv *MainView) updateComposerStatus() {
 // border only when no theme is available.
 func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 	b := widget.NewBorder(child)
+	chars := styles.BorderChars
+	if chars == (widget.BorderChars{}) {
+		chars = BorderCharsForStyle("rounded")
+	}
+	b.SetBorderChars(chars)
 	b.SetTitle(title)
 	b.SetStyle(styles.Cell("panels.border"))
 	b.SetFocusStyle(styles.Cell("panels.focus"))
@@ -1736,6 +1748,7 @@ func titled(styles Styles, title string, child tui.Widget) *widget.Border {
 
 func (mv *MainView) titled(title string, child tui.Widget) *widget.Border {
 	b := titled(mv.styles, title, child)
+	b.SetBorderChars(mv.borderChars)
 	// Track for live re-theming on a runtime theme switch (overlays are recreated
 	// per open, so they need this only for the persistent main-layout panels).
 	mv.themedBorders = append(mv.themedBorders, b)

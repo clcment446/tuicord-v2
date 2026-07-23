@@ -84,6 +84,7 @@ func TestModalOneRowFrameUsesTopCorners(t *testing.T) {
 	m.SetCollapsed(true)
 	buf := screen.NewBuffer(12, 5)
 	m.Draw(buf.Clip(buf.Bounds()))
+	t.Logf("modal corners: %q %q", buf.Cell(2, 0).Content, buf.Cell(2, 1).Content)
 	rect := m.Bounds(tui.Size{W: 12, H: 5})
 
 	if got := buf.Cell(rect.X, rect.Y).Content; got != "┌" {
@@ -91,5 +92,22 @@ func TestModalOneRowFrameUsesTopCorners(t *testing.T) {
 	}
 	if got := buf.Cell(rect.X+rect.W-1, rect.Y).Content; got != "┐" {
 		t.Fatalf("one-row right corner = %q, want ┐", got)
+	}
+}
+
+func TestModalUsesConfiguredBorderChars(t *testing.T) {
+	m := NewModal("", nil)
+	m.SetSize(8, 4)
+	m.SetBorderChars(BorderChars{TopLeft: "[", TopRight: "]", BottomLeft: "[", BottomRight: "]", Horizontal: "=", Vertical: "!"})
+	buf := screen.NewBuffer(12, 5)
+	m.Draw(buf.Clip(buf.Bounds()))
+	if got := buf.Cell(2, 0).Content; got != "[" {
+		t.Fatalf("modal top-left = %q, want [", got)
+	}
+	if got := buf.Cell(3, 0).Content; got != "=" {
+		t.Fatalf("modal top edge = %q, want =", got)
+	}
+	if got := buf.Cell(2, 1).Content; got != "!" {
+		t.Fatalf("modal left edge = %q, want !", got)
 	}
 }

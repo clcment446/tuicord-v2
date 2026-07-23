@@ -19,12 +19,13 @@ type Modal struct {
 	explicitOrigin bool
 	collapsed      bool
 	style          screen.Style
+	chars          BorderChars
 	node           layout.Node
 }
 
 // NewModal returns a modal overlay around child.
 func NewModal(title string, child tui.Widget) *Modal {
-	m := &Modal{title: title, child: child, w: 40, h: 10}
+	m := &Modal{title: title, child: child, w: 40, h: 10, chars: RoundedBorder}
 	m.rebuild()
 	return m
 }
@@ -139,6 +140,13 @@ func (w *Modal) SetStyle(style screen.Style) {
 	w.style = style
 }
 
+// SetBorderChars sets the glyphs used for the modal frame.
+func (w *Modal) SetBorderChars(chars BorderChars) {
+	if w != nil {
+		w.chars = chars
+	}
+}
+
 // Measure returns the configured modal size clamped to avail.
 func (w *Modal) Measure(avail tui.Size) tui.Size {
 	if w == nil {
@@ -175,25 +183,25 @@ func (w *Modal) Draw(r screen.Region) {
 	w.screenH = r.Height()
 	w.last = rect
 	for x := rect.X; x < rect.X+rect.W; x++ {
-		r.Set(x, rect.Y, styled("─", w.style))
+		r.Set(x, rect.Y, styled(w.chars.Horizontal, w.style))
 		if rect.H > 1 {
-			r.Set(x, rect.Y+rect.H-1, styled("─", w.style))
+			r.Set(x, rect.Y+rect.H-1, styled(w.chars.Horizontal, w.style))
 		}
 	}
 	if rect.W > 1 {
 		for y := rect.Y; y < rect.Y+rect.H; y++ {
-			r.Set(rect.X, y, styled("│", w.style))
-			r.Set(rect.X+rect.W-1, y, styled("│", w.style))
+			r.Set(rect.X, y, styled(w.chars.Vertical, w.style))
+			r.Set(rect.X+rect.W-1, y, styled(w.chars.Vertical, w.style))
 		}
 	}
-	r.Set(rect.X, rect.Y, styled("┌", w.style))
+	r.Set(rect.X, rect.Y, styled(w.chars.TopLeft, w.style))
 	if rect.W > 1 {
-		r.Set(rect.X+rect.W-1, rect.Y, styled("┐", w.style))
+		r.Set(rect.X+rect.W-1, rect.Y, styled(w.chars.TopRight, w.style))
 	}
 	if rect.H > 1 {
-		r.Set(rect.X, rect.Y+rect.H-1, styled("└", w.style))
+		r.Set(rect.X, rect.Y+rect.H-1, styled(w.chars.BottomLeft, w.style))
 		if rect.W > 1 {
-			r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled("┘", w.style))
+			r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled(w.chars.BottomRight, w.style))
 		}
 	}
 	if w.title != "" && rect.W > 4 {

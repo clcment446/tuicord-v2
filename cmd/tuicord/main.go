@@ -375,7 +375,8 @@ func uiStyles(cfg config.Config) ui.Styles {
 		Pending: cells["pending"],
 		Error:   cells["error"],
 		Cells:   cells, Custom: custom, Overrides: cfg.ColorOverrides,
-		State: &ui.StyleState{},
+		BorderChars: ui.BorderCharsForStyle(cfg.Display.BorderStyle),
+		State:       &ui.StyleState{},
 	}
 }
 

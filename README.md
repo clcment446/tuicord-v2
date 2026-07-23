@@ -30,7 +30,8 @@ untouched. Background GIF and role-gradient animations are disabled by default
 when an SSH session is detected; set `display.no_animations_over_ssh = false`
 in `tuicord.configure` to opt out. Set `display.border_style` to `rounded`,
 `square`, `heavy`, `double`, or `ascii` to choose the frame glyphs used by
-embeds and component sections. Machine-managed accounts and auth-mode
+embeds, component sections, panels, menus, modals, and split dividers.
+Machine-managed accounts and auth-mode
 preference live in `~/.local/state/tuicord/ui.toml`; tokens remain in the OS
 keyring.
 
