@@ -1435,7 +1435,8 @@ func (s *Shell) openProfileWithFallback(id store.UserID, fallback store.Member) 
 	st := s.app.Store()
 	guild := s.app.ActiveGuild()
 	details := buildProfileDetails(st, guild, 0, id)
-	if m, ok := memberForContext(st, guild, s.app.ActiveChannel(), id); ok {
+	self, hasSelf := s.app.Self()
+	if m, ok := memberForContext(st, guild, s.app.ActiveChannel(), id, self, hasSelf); ok {
 		details = fillProfileIdentity(details, m)
 	}
 	details = fillProfileIdentity(details, fallback)

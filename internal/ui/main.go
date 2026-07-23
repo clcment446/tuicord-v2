@@ -1395,9 +1395,10 @@ func (mv *MainView) resolver() markup.Resolver {
 	st := mv.app.Store()
 	guild := mv.app.ActiveGuild()
 	channel := mv.app.ActiveChannel()
+	self, hasSelf := mv.app.Self()
 	return markup.Resolver{
 		Member: func(id uint64) (string, bool) {
-			m, ok := memberForContext(st, guild, channel, store.UserID(id))
+			m, ok := memberForContext(st, guild, channel, store.UserID(id), self, hasSelf)
 			return m.Name, ok
 		},
 		Channel: func(id uint64) (string, bool) {
@@ -1417,12 +1418,22 @@ func (mv *MainView) resolver() markup.Resolver {
 }
 
 // memberForContext resolves guild members normally and falls back to the
-// active conversation's participant list for direct and group DMs.
-func memberForContext(st *store.Store, guild store.GuildID, channel store.ChannelID, id store.UserID) (store.Member, bool) {
+// active conversation's participant list for direct and group DMs, then to the
+// logged-in user's own identity (self/hasSelf). The self fallback matters
+// because the current user is absent from DM recipient lists and from guilds
+// whose member catalog has not loaded, so a self-mention would otherwise render
+// as unknown-user.
+func memberForContext(st *store.Store, guild store.GuildID, channel store.ChannelID, id store.UserID, self store.Member, hasSelf bool) (store.Member, bool) {
 	if m, ok := st.Member(guild, id); ok {
 		return m, true
 	}
-	return st.ChannelRecipient(channel, id)
+	if m, ok := st.ChannelRecipient(channel, id); ok {
+		return m, true
+	}
+	if hasSelf && self.ID == id {
+		return self, true
+	}
+	return store.Member{}, false
 }
 
 func (mv *MainView) onSend(content string) {
