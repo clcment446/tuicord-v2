@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/event"
@@ -270,6 +271,8 @@ func (a *App) MarkChannelRead(channel store.ChannelID) {
 	a.store.ClearUnread(channel)
 	a.mu.Lock()
 	delete(a.channelUnread, channel)
+	delete(a.channelHighlight, channel)
+	a.recomputeAggregatesLocked()
 	a.mu.Unlock()
 }
 
@@ -292,12 +295,20 @@ func (a *App) LoadOlderHistory(channel store.ChannelID) {
 	a.backfill(channel, 50)
 }
 
-var backfillGate sync.Map // channel -> *sync.Mutex, serializes per-room backfill
+// backfillGate serializes backfill per channel so overlapping LoadHistory /
+// LoadOlderHistory calls (or rapid scrolling) cannot fetch the same page from
+// the same prev_batch token twice and prepend duplicates.
+var backfillGate sync.Map // store.ChannelID -> *int32 (0 idle, 1 in-flight)
 
 func (a *App) backfill(channel store.ChannelID, limit int) {
 	room, ok := a.resolveRoom(channel)
 	if !ok {
 		return
+	}
+	gateAny, _ := backfillGate.LoadOrStore(channel, new(int32))
+	gate := gateAny.(*int32)
+	if !atomic.CompareAndSwapInt32(gate, 0, 1) {
+		return // a backfill for this channel is already running
 	}
 	a.mu.Lock()
 	info := a.rooms[room]
@@ -307,12 +318,14 @@ func (a *App) backfill(channel store.ChannelID, limit int) {
 	}
 	a.mu.Unlock()
 	if from == "" {
+		atomic.StoreInt32(gate, 0)
 		return
 	}
 	if limit <= 0 {
 		limit = 50
 	}
 	go func() {
+		defer atomic.StoreInt32(gate, 0)
 		resp, err := a.client.M.Messages(context.Background(), room, from, "", mautrix.DirectionBackward, nil, limit)
 		if err != nil {
 			a.reportError(err)

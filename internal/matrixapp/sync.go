@@ -74,15 +74,18 @@ func (a *App) Connect(ctx context.Context) error {
 	return ctx.Err()
 }
 
-// onSync reads per-room unread counts and timeline pagination tokens.
+// onSync reads per-room unread counts and timeline pagination tokens. Matrix
+// only includes rooms whose state changed in an incremental sync, so the
+// per-channel maps are updated in place (never rebuilt from the delta) and the
+// account-wide mention total and per-guild badges are recomputed from the full
+// maps — otherwise counts for quiet rooms would be lost after the first delta.
 func (a *App) onSync(ctx context.Context, resp *mautrix.RespSync, since string) bool {
 	type unreadUpdate struct {
-		channel store.ChannelID
-		guild   store.GuildID
-		status  backend.UnreadStatus
+		channel   store.ChannelID
+		status    backend.UnreadStatus
+		highlight int
 	}
 	var updates []unreadUpdate
-	mentionDelta := 0
 
 	a.mu.Lock()
 	for roomID, jr := range resp.Rooms.Join {
@@ -100,15 +103,13 @@ func (a *App) onSync(ctx context.Context, resp *mautrix.RespSync, since string) 
 			} else if jr.UnreadNotifications.NotificationCount > 0 {
 				status = backend.Unread
 			}
-			mentionDelta += jr.UnreadNotifications.HighlightCount
 			updates = append(updates, unreadUpdate{
-				channel: info.channelID,
-				guild:   a.guildForLocked(roomID),
-				status:  status,
+				channel:   info.channelID,
+				status:    status,
+				highlight: jr.UnreadNotifications.HighlightCount,
 			})
 		}
 	}
-	a.mentionTotal = mentionDelta
 	a.mu.Unlock()
 
 	if len(updates) == 0 {
@@ -118,17 +119,20 @@ func (a *App) onSync(ctx context.Context, resp *mautrix.RespSync, since string) 
 
 	a.ui.Post(func() {
 		a.mu.Lock()
-		a.guildUnread = map[store.GuildID]backend.UnreadStatus{}
 		for _, u := range updates {
 			if u.status == backend.Read {
 				delete(a.channelUnread, u.channel)
+				delete(a.channelHighlight, u.channel)
 			} else {
 				a.channelUnread[u.channel] = u.status
-			}
-			if g := a.guildUnread[u.guild]; u.status > g {
-				a.guildUnread[u.guild] = u.status
+				if u.highlight > 0 {
+					a.channelHighlight[u.channel] = u.highlight
+				} else {
+					delete(a.channelHighlight, u.channel)
+				}
 			}
 		}
+		a.recomputeAggregatesLocked()
 		a.mu.Unlock()
 		if a.onReadStateChange != nil {
 			a.onReadStateChange()
@@ -136,6 +140,29 @@ func (a *App) onSync(ctx context.Context, resp *mautrix.RespSync, since string) 
 	})
 	a.ids.flush()
 	return true
+}
+
+// recomputeAggregatesLocked rebuilds the per-guild badge severities and the
+// account-wide mention total from the full per-channel maps. Caller holds a.mu.
+func (a *App) recomputeAggregatesLocked() {
+	guildUnread := make(map[store.GuildID]backend.UnreadStatus, len(a.guildUnread))
+	for channel, status := range a.channelUnread {
+		room, ok := a.roomByChannel[channel]
+		if !ok {
+			continue
+		}
+		guild := a.guildForLocked(room)
+		if status > guildUnread[guild] {
+			guildUnread[guild] = status
+		}
+	}
+	a.guildUnread = guildUnread
+
+	total := 0
+	for _, h := range a.channelHighlight {
+		total += h
+	}
+	a.mentionTotal = total
 }
 
 // --- state handlers ---------------------------------------------------------

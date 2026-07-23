@@ -28,6 +28,7 @@ const UngroupedRoomsGuildID store.GuildID = ^store.GuildID(1)
 // poster is the slice of tui.App the orchestrator posts UI work through.
 type poster interface {
 	Post(func())
+	TryPost(func()) bool
 	WriteRaw([]byte)
 	Invalidate()
 	ForceRepaint()
@@ -66,19 +67,20 @@ type App struct {
 	selfID id.UserID
 	self   store.Member
 
-	mu            sync.Mutex
-	activeGuild   store.GuildID
-	activeChannel store.ChannelID
-	rooms         map[id.RoomID]*roomInfo
-	roomByChannel map[store.ChannelID]id.RoomID
-	reactions     map[id.EventID]reactionRef // reaction event -> target
-	directRooms   map[id.RoomID]bool
-	childToSpace  map[id.RoomID]id.RoomID            // child room -> parent space room
-	memberNames   map[id.RoomID]map[id.UserID]string // per-room display names
-	channelUnread map[store.ChannelID]backend.UnreadStatus
-	guildUnread   map[store.GuildID]backend.UnreadStatus
-	mentionTotal  int
-	ready         bool
+	mu               sync.Mutex
+	activeGuild      store.GuildID
+	activeChannel    store.ChannelID
+	rooms            map[id.RoomID]*roomInfo
+	roomByChannel    map[store.ChannelID]id.RoomID
+	reactions        map[id.EventID]reactionRef // reaction event -> target
+	directRooms      map[id.RoomID]bool
+	childToSpace     map[id.RoomID]id.RoomID            // child room -> parent space room
+	memberNames      map[id.RoomID]map[id.UserID]string // per-room display names
+	channelUnread    map[store.ChannelID]backend.UnreadStatus
+	channelHighlight map[store.ChannelID]int
+	guildUnread      map[store.GuildID]backend.UnreadStatus
+	mentionTotal     int
+	ready            bool
 
 	stateSnapshot atomic.Pointer[backend.StateSnapshot]
 
@@ -99,19 +101,20 @@ var _ backend.Backend = (*App)(nil)
 // idmapPath persists the room/user id interning table across restarts.
 func New(client *matrix.Client, st *store.Store, ui *tui.App, idmapPath string) *App {
 	a := &App{
-		client:        client,
-		store:         st,
-		ui:            ui,
-		ids:           newIDMap(idmapPath),
-		selfID:        client.UserID(),
-		rooms:         map[id.RoomID]*roomInfo{},
-		roomByChannel: map[store.ChannelID]id.RoomID{},
-		reactions:     map[id.EventID]reactionRef{},
-		directRooms:   map[id.RoomID]bool{},
-		childToSpace:  map[id.RoomID]id.RoomID{},
-		memberNames:   map[id.RoomID]map[id.UserID]string{},
-		channelUnread: map[store.ChannelID]backend.UnreadStatus{},
-		guildUnread:   map[store.GuildID]backend.UnreadStatus{},
+		client:           client,
+		store:            st,
+		ui:               ui,
+		ids:              newIDMap(idmapPath),
+		selfID:           client.UserID(),
+		rooms:            map[id.RoomID]*roomInfo{},
+		roomByChannel:    map[store.ChannelID]id.RoomID{},
+		reactions:        map[id.EventID]reactionRef{},
+		directRooms:      map[id.RoomID]bool{},
+		childToSpace:     map[id.RoomID]id.RoomID{},
+		memberNames:      map[id.RoomID]map[id.UserID]string{},
+		channelUnread:    map[store.ChannelID]backend.UnreadStatus{},
+		channelHighlight: map[store.ChannelID]int{},
+		guildUnread:      map[store.GuildID]backend.UnreadStatus{},
 	}
 	a.self = store.Member{ID: store.UserID(a.ids.intern(string(a.selfID)))}
 	a.authorizer = newMediaAuthorizer(a)
@@ -123,14 +126,11 @@ func (a *App) Store() *store.Store { return a.store }
 
 // --- poster passthrough -----------------------------------------------------
 
-func (a *App) Post(fn func()) { a.ui.Post(fn) }
-func (a *App) TryPost(fn func()) bool {
-	a.ui.Post(fn)
-	return true
-}
-func (a *App) WriteRaw(b []byte) { a.ui.WriteRaw(b) }
-func (a *App) Invalidate()       { a.ui.Invalidate() }
-func (a *App) ForceRepaint()     { a.ui.ForceRepaint() }
+func (a *App) Post(fn func())         { a.ui.Post(fn) }
+func (a *App) TryPost(fn func()) bool { return a.ui.TryPost(fn) }
+func (a *App) WriteRaw(b []byte)      { a.ui.WriteRaw(b) }
+func (a *App) Invalidate()            { a.ui.Invalidate() }
+func (a *App) ForceRepaint()          { a.ui.ForceRepaint() }
 
 // --- identity & selection ---------------------------------------------------
 
@@ -170,6 +170,8 @@ func (a *App) SetActive(guild store.GuildID, channel store.ChannelID) {
 		a.store.ClearUnread(channel)
 		a.mu.Lock()
 		delete(a.channelUnread, channel)
+		delete(a.channelHighlight, channel)
+		a.recomputeAggregatesLocked()
 		a.mu.Unlock()
 	}
 	a.emit("channel.switch", map[string]any{
