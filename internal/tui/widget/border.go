@@ -22,12 +22,15 @@ type BorderChars struct {
 	Horizontal string
 	// Vertical is the left and right edge.
 	Vertical string
+	// TeeLeft and TeeRight are separator junctions used by bordered menus.
+	TeeLeft  string
+	TeeRight string
 }
 
 // RoundedBorder is the default single-cell border style.
 var RoundedBorder = BorderChars{
 	TopLeft: "┌", TopRight: "┐", BottomLeft: "└", BottomRight: "┘",
-	Horizontal: "─", Vertical: "│",
+	Horizontal: "─", Vertical: "│", TeeLeft: "├", TeeRight: "┤",
 }
 
 // Border draws a frame and exposes a padded child layout.
@@ -120,6 +123,10 @@ func (w *Border) SetChars(chars BorderChars) {
 	}
 	w.chars = chars
 }
+
+// SetBorderChars is the descriptive alias for SetChars used by other framed
+// widgets.
+func (w *Border) SetBorderChars(chars BorderChars) { w.SetChars(chars) }
 
 // Measure returns the child's preferred size plus a one-cell frame.
 func (w *Border) Measure(avail tui.Size) tui.Size {

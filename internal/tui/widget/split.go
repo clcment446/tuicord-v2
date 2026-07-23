@@ -22,6 +22,7 @@ type Split struct {
 	maxSecond int
 	main      int
 	style     screen.Style
+	chars     BorderChars
 	focused   bool
 	focusable bool
 
@@ -40,7 +41,7 @@ type Split struct {
 
 // NewSplit returns a row split with first on the left and second on the right.
 func NewSplit(first, second tui.Widget) *Split {
-	s := &Split{first: first, second: second, dir: layout.Row, basis: 24, min: 1, minSecond: 1}
+	s := &Split{first: first, second: second, dir: layout.Row, basis: 24, min: 1, minSecond: 1, chars: RoundedBorder}
 	// The root node grows by default; rebuild leaves the root's own sizing
 	// untouched so callers can override Basis/Grow after construction.
 	s.node.Grow = 1
@@ -228,6 +229,13 @@ func (w *Split) SetStyle(style screen.Style) {
 	w.style = style
 }
 
+// SetBorderChars sets the glyphs used for dividers and collapsed split edges.
+func (w *Split) SetBorderChars(chars BorderChars) {
+	if w != nil {
+		w.chars = chars
+	}
+}
+
 // CanFocus reports whether the split itself belongs in keyboard focus order.
 func (w *Split) CanFocus() bool {
 	// A split's divider and collapsed toggle are layout affordances, not
@@ -296,7 +304,7 @@ func (w *Split) Draw(r screen.Region) {
 		y := w.clampDivider(r.Height())
 		if y >= 0 && y < r.Height() {
 			for x := 0; x < r.Width(); x++ {
-				r.Set(x, y, styled("─", w.dividerStyle()))
+				r.Set(x, y, styled(w.chars.Horizontal, w.dividerStyle()))
 			}
 		}
 		return
@@ -309,7 +317,7 @@ func (w *Split) Draw(r screen.Region) {
 	x := w.clampDivider(r.Width())
 	if x >= 0 && x < r.Width() {
 		for y := 0; y < r.Height(); y++ {
-			r.Set(x, y, styled("│", w.dividerStyle()))
+			r.Set(x, y, styled(w.chars.Vertical, w.dividerStyle()))
 		}
 	}
 }
@@ -538,7 +546,7 @@ func (w *Split) drawCollapsed(r screen.Region) {
 			tri = "▲"
 		}
 		for x := 0; x < r.Width(); x++ {
-			r.Set(x, y, styled("─", w.dividerStyle()))
+			r.Set(x, y, styled(w.chars.Horizontal, w.dividerStyle()))
 		}
 		if r.Width() > 0 && r.Height() > 0 {
 			r.Set(r.Width()/2, y, styled(tri, w.dividerStyle()))
@@ -552,7 +560,7 @@ func (w *Split) drawCollapsed(r screen.Region) {
 		tri = "◀"
 	}
 	for y := 0; y < r.Height(); y++ {
-		r.Set(x, y, styled("│", w.dividerStyle()))
+		r.Set(x, y, styled(w.chars.Vertical, w.dividerStyle()))
 	}
 	if r.Width() > 0 && r.Height() > 0 {
 		r.Set(x, r.Height()/2, styled(tri, w.dividerStyle()))

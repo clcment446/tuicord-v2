@@ -170,12 +170,13 @@ type ChatView struct {
 }
 
 type Styles struct {
-	Text    screen.Style
-	Muted   screen.Style
-	Accent  screen.Style
-	Border  screen.Style
-	Pending screen.Style
-	Error   screen.Style
+	Text        screen.Style
+	Muted       screen.Style
+	Accent      screen.Style
+	Border      screen.Style
+	Pending     screen.Style
+	Error       screen.Style
+	BorderChars widget.BorderChars
 	// Cells is the semantic cell palette. Legacy fields remain as compatibility
 	// aliases for widgets that have not yet moved to a named surface.
 	Cells     map[string]screen.Style

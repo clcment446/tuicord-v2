@@ -210,7 +210,8 @@ type Colors struct {
 
 // Display controls presentation details that are not colors.
 type Display struct {
-	// BorderStyle selects the glyph set used to frame embeds and component containers.
+	// BorderStyle selects the glyph set used to frame embeds, component containers,
+	// and other bordered UI widgets.
 	// Supported values are rounded, square, heavy, double, and ascii.
 	BorderStyle string `toml:"border_style"`
 	// ASCII forces ASCII-only glyphs for channel badges and sidebar markers,
