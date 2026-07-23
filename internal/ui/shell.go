@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"awesomeProject/internal/app"
+	"awesomeProject/internal/auth"
 	"awesomeProject/internal/backend"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/markup"
@@ -79,12 +80,19 @@ type Shell struct {
 	// discord is the active account's orchestrator when it is a Discord account,
 	// nil otherwise. It gates protocol-specific UI (slash commands, message
 	// components, GIF search) that only Discord exposes.
-	discord        *app.App
-	cfg            config.Config
-	styles         Styles
-	plugins        PluginHost
-	overlay        tui.Widget // nil = show the main view
-	popup          tui.Widget // small interactive layer drawn over current()
+	discord *app.App
+	cfg     config.Config
+	styles  Styles
+	plugins PluginHost
+	overlay tui.Widget // nil = show the main view
+	popup   tui.Widget // small interactive layer drawn over current()
+	// Sign-in overlay wiring (the `;signin` command). loginApp is the live tui
+	// runtime the overlay posts through, matrixAuth performs Matrix network login
+	// (nil hides the Matrix panel), and onSignIn persists a new account's
+	// credentials and switches to it. All nil until SetSignInHandler is called.
+	loginApp       *tui.App
+	matrixAuth     MatrixAuthenticator
+	onSignIn       func(keyringValue string) error
 	toasts         []*Toast
 	notifier       desktopNotifier
 	dispatch       func(func()) bool
@@ -491,7 +499,7 @@ func (s *Shell) runLocalCommand(input string) bool {
 	}
 	switch command.name {
 	case "help":
-		detail := ";help · ;quit · ;switch · ;settings · ;theme [name] · ;paste"
+		detail := ";help · ;signin · ;quit · ;switch · ;settings · ;theme [name] · ;paste"
 		if s.plugins != nil {
 			if names := s.plugins.CommandNames(); len(names) > 0 {
 				detail += " · plugins: ;" + strings.Join(names, " ;")
@@ -503,6 +511,8 @@ func (s *Shell) runLocalCommand(input string) bool {
 		if s.cancel != nil {
 			s.cancel()
 		}
+	case "signin", "login":
+		s.openSignIn()
 	case "switch":
 		s.openQuickSwitcher()
 		if qs, ok := s.overlay.(*QuickSwitcher); ok && len(command.args) > 0 {
@@ -886,6 +896,64 @@ func (s *Shell) setIndependentOverlay(overlay tui.Widget) {
 	}
 	s.composerOverlay = nil
 	s.overlay = overlay
+}
+
+// SetSignInHandler wires the in-app `;signin` flow. loginApp is the live tui
+// runtime the sign-in overlay posts progress through, matrixAuth performs the
+// Matrix network login (pass nil to hide the Matrix panel), and onSignIn
+// persists the new account's keyring value and switches to it. onSignIn runs on
+// the UI goroutine. Call once after NewShell.
+func (s *Shell) SetSignInHandler(loginApp *tui.App, matrixAuth MatrixAuthenticator, onSignIn func(keyringValue string) error) {
+	if s == nil {
+		return
+	}
+	s.loginApp = loginApp
+	s.matrixAuth = matrixAuth
+	s.onSignIn = onSignIn
+}
+
+// openSignIn presents the account sign-in overlay. On a completed Discord token
+// or Matrix login it hands the encoded keyring value to the injected handler,
+// which registers and activates the new account.
+func (s *Shell) openSignIn() {
+	if s == nil {
+		return
+	}
+	if s.loginApp == nil || s.onSignIn == nil {
+		s.ShowNotice("Sign in", "Adding accounts is not available in this build.")
+		return
+	}
+	var root tui.Widget
+	complete := func(r LoginResult) {
+		// Ignore a completion that arrives after the overlay was dismissed or
+		// replaced (a Matrix login posts back from a background goroutine).
+		if s.overlay != root {
+			return
+		}
+		value, err := r.KeyringValue()
+		if err != nil {
+			s.ShowToast("Sign in", err)
+			return
+		}
+		s.closeOverlay()
+		if err := s.onSignIn(value); err != nil {
+			s.ShowToast("Sign in", err)
+		}
+	}
+	setToken := func(t string) {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return
+		}
+		s.post(func() { complete(LoginResult{token: t}) })
+	}
+	setMatrix := func(c auth.Credentials) {
+		creds := c
+		s.post(func() { complete(LoginResult{matrix: &creds}) })
+	}
+	root = buildSignIn(s.lifecycleCtx, s.loginApp, s.styles, setToken, setMatrix, s.closeOverlay, s.matrixAuth)
+	s.setIndependentOverlay(root)
+	s.loginApp.Invalidate()
 }
 
 func (s *Shell) setComposerOverlay(overlay tui.Widget) {
@@ -1778,6 +1846,7 @@ func (s *Shell) openLocalCommandPicker(query string, start int) {
 func (s *Shell) localCommandSpecs() []localCommandSpec {
 	commands := []localCommandSpec{
 		{Name: "help", Description: "Show local commands"},
+		{Name: "signin", Description: "Add another account"},
 		{Name: "quit", Description: "Exit Tuicord"},
 		{Name: "switch", Description: "Switch channel"},
 		{Name: "settings", Description: "Open server settings"},

@@ -79,7 +79,10 @@ func (p *LocalCommandPicker) Handle(ev tui.Event) bool {
 	case input.KeyEsc:
 		p.onClose()
 		return true
-	case input.KeyEnter:
+	case input.KeyEnter, input.KeyTab:
+		// Enter and Tab both autocomplete the highlighted command into the
+		// composer (onPick inserts ";name " and closes); arguments are then typed
+		// as ordinary composer input.
 		if command, ok := p.search.Selected(); ok && p.onPick != nil {
 			p.onPick(command.Name)
 		}

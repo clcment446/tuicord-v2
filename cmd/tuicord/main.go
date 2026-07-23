@@ -5,6 +5,8 @@ package main
 import (
 	"awesomeProject/internal/tui/widget"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -205,6 +207,20 @@ func run() error {
 	surface.manager = accountManager
 	mv.SetAccountSelectHandler(func(i int) { _ = accountManager.Switch(i) })
 
+	// `;signin` adds another account at runtime: persist its credentials under a
+	// fresh keyring key, register it, and switch to it. Runs on the UI goroutine.
+	shell.SetSignInHandler(uiApp, matrixAuthenticator{}, func(value string) error {
+		key, err := newAccountKey(value)
+		if err != nil {
+			return err
+		}
+		if err := keyring.SetTokenFor(key, value); err != nil {
+			return fmt.Errorf("save credentials: %w", err)
+		}
+		label := defaultAccountLabel(value)
+		return accountManager.SwitchTo(accountManager.Add(key, label))
+	})
+
 	// Attach the live Host only after App/MainView/Shell exist. Config keymaps and
 	// commands remain registered in the same manager; ordinary plugins now load
 	// according to the Lua-derived Config. Host actions resolve the active account
@@ -273,6 +289,32 @@ func newBackendFromValue(key, rawValue string, uiApp *tui.App) (backend.Backend,
 		return nil, err
 	}
 	return app.New(ning, store.New(0), uiApp), nil
+}
+
+// newAccountKey returns a fresh keyring key for an account added at runtime via
+// `;signin`. A Matrix account is keyed by its user ID so signing in again with
+// the same account updates one entry instead of accumulating duplicates; a
+// Discord account (a bare token, no stable identity available yet) gets a random
+// key.
+func newAccountKey(value string) (string, error) {
+	if creds, ok := auth.Decode(value); ok && creds.UserID != "" {
+		return "matrix:" + creds.UserID, nil
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate account key: %w", err)
+	}
+	return "discord:" + hex.EncodeToString(b[:]), nil
+}
+
+// defaultAccountLabel derives a display label for a newly added account. Matrix
+// carries its user ID; Discord's is discovered from the gateway READY, so it
+// starts as a placeholder the account manager overwrites on hydrate.
+func defaultAccountLabel(value string) string {
+	if creds, ok := auth.Decode(value); ok && creds.UserID != "" {
+		return creds.UserID
+	}
+	return "New account"
 }
 
 // matrixDataDir returns the per-account private directory holding the E2EE

@@ -51,6 +51,10 @@ type roomInfo struct {
 	children []string
 	// prevBatch is the pagination token for backfilling older history.
 	prevBatch string
+	// encrypted is true once we have seen this room's m.room.encryption state.
+	// Tracked independently of the crypto state store so the send path can refuse
+	// to leak plaintext into an encrypted room when E2EE failed to initialize.
+	encrypted bool
 }
 
 // reactionRef locates the target of a reaction event so a later redaction can
@@ -86,6 +90,19 @@ type App struct {
 	guildUnread      map[store.GuildID]backend.UnreadStatus
 	mentionTotal     int
 	ready            bool
+
+	// caughtUp is false while the first (full-state) sync is being processed and
+	// true once the client is following the live stream. The initial sync replays
+	// each room's recent backlog as timeline events; without this gate every one
+	// of them fires OnIncomingMessage and the account is buried in notifications
+	// on every launch. It tracks the sync token (empty == initial/reconnect
+	// catch-up), so a reconnect that restarts from scratch also stays quiet.
+	caughtUp atomic.Bool
+
+	// cryptoReady is true only after StartCrypto succeeds. When false, E2EE is not
+	// functional (e.g. the device's olm account conflicts with the server), and
+	// the send path must not leak plaintext into encrypted rooms.
+	cryptoReady atomic.Bool
 
 	stateSnapshot atomic.Pointer[backend.StateSnapshot]
 

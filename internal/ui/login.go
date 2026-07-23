@@ -82,6 +82,18 @@ func RunLogin(ctx context.Context, styles Styles, theme tui.Theme, preferredMode
 	return result, nil
 }
 
+// loginLabel is a plain text line on the login screen that carries the theme
+// background. An unstyled widget.NewText clears its whole region with a
+// background-less style, which punches terminal-default holes through the
+// themed backdrop (visible as inconsistent theming on any terminal whose
+// default background differs from the theme). Styling the label keeps the
+// login surface uniformly themed, matching the QR and input panels.
+func loginLabel(styles Styles, content string) *widget.Text {
+	t := widget.NewText(content)
+	t.SetStyle(styles.Cell("login.input"))
+	return t
+}
+
 // buildLogin composes the login layout: Discord (token + QR) stacked over the
 // Matrix panel.
 func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(string), setMatrix func(auth.Credentials), cancel context.CancelFunc, preferredMode string, onModeSelected func(string), matrixAuth MatrixAuthenticator) tui.Widget {
@@ -92,12 +104,12 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 	tokenInput.OnSubmit(setToken)
 
 	tokenPanel := widget.Column(
-		widget.NewText("Log in to Discord"),
-		widget.NewText(""),
-		widget.NewText("Option 1 — paste a token:"),
+		loginLabel(styles, "Log in to Discord"),
+		loginLabel(styles, ""),
+		loginLabel(styles, "Option 1 — paste a token:"),
 		titled(styles, "Token", tokenInput),
-		widget.NewText(""),
-		widget.NewText("Option 2 — scan the QR code with the Discord mobile app."),
+		loginLabel(styles, ""),
+		loginLabel(styles, "Option 2 — scan the QR code with the Discord mobile app."),
 	)
 
 	qr := NewQRPanel(ctx, app, styles, setToken, preferredMode, onModeSelected)
@@ -107,6 +119,7 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		MinFirst(30).
 		Vertical()
 	discord.SetBorderChars(styles.BorderCharsOrDefault())
+	discord.SetStyle(styles.Cell("panels.border"))
 
 	if matrixAuth == nil {
 		return newCancelRoot(discord, cancel)
@@ -122,6 +135,42 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		MinFirst(8).
 		Horizontal()
 	root.SetBorderChars(styles.BorderCharsOrDefault())
+	root.SetStyle(styles.Cell("panels.border"))
+	return newCancelRoot(root, cancel)
+}
+
+// buildSignIn composes the in-app account sign-in overlay used by the `;signin`
+// command: a Discord token paste field beside the Matrix panel. It deliberately
+// omits the QR remote-auth panel, whose background network/browser lifecycle is
+// owned by the separate startup RunLogin runtime and is not safe to host inside
+// the live app. matrixAuth may be nil to hide the Matrix panel. setToken and
+// setMatrix report the entered credentials; cancel dismisses the overlay.
+func buildSignIn(ctx context.Context, app *tui.App, styles Styles, setToken func(string), setMatrix func(auth.Credentials), cancel context.CancelFunc, matrixAuth MatrixAuthenticator) tui.Widget {
+	tokenInput := widget.NewTextInput("Paste Discord token, press Enter")
+	tokenInput.SetStyle(styles.Cell("login.input"))
+	tokenInput.SetPlaceholderStyle(styles.Cell("login.placeholder"))
+	tokenInput.SetCursorStyle(styles.Cell("login.cursor"))
+	tokenInput.OnSubmit(setToken)
+
+	tokenPanel := widget.Column(
+		loginLabel(styles, "Add a Discord account"),
+		loginLabel(styles, ""),
+		loginLabel(styles, "Paste a token:"),
+		titled(styles, "Token", tokenInput),
+	)
+	discord := titled(styles, "Discord", tokenPanel)
+
+	if matrixAuth == nil {
+		return newCancelRoot(discord, cancel)
+	}
+
+	matrixPanel := buildMatrixLogin(ctx, app, styles, setMatrix, matrixAuth)
+	root := widget.NewSplit(discord, titled(styles, "Matrix", matrixPanel)).
+		Basis(9).
+		MinFirst(6).
+		Horizontal()
+	root.SetBorderChars(styles.BorderCharsOrDefault())
+	root.SetStyle(styles.Cell("panels.border"))
 	return newCancelRoot(root, cancel)
 }
 

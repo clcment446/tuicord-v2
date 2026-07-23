@@ -2,6 +2,7 @@ package matrixapp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ func (a *App) RegisterHandlers() {
 	s.OnEventType(event.StateRoomAvatar, a.onStateAvatar)
 	s.OnEventType(event.StateMember, a.onStateMember)
 	s.OnEventType(event.StateSpaceChild, a.onSpaceChild)
+	s.OnEventType(event.StateEncryption, a.onStateEncryption)
 	s.OnEventType(event.AccountDataDirectChats, a.onDirectChats)
 
 	s.OnEventType(event.EventMessage, a.onMessage)
@@ -55,8 +57,12 @@ func (a *App) Connect(ctx context.Context) error {
 	// network I/O, so it runs here on the connect goroutine rather than in New
 	// (which executes on the UI goroutine during a lazy account switch). On
 	// failure, encrypted rooms won't decrypt but unencrypted rooms still work.
-	if err := a.client.StartCrypto(ctx); err != nil && ctx.Err() == nil {
-		a.reportError(err)
+	if err := a.client.StartCrypto(ctx); err != nil {
+		if ctx.Err() == nil {
+			a.reportError(cryptoSetupError(err))
+		}
+	} else {
+		a.cryptoReady.Store(true)
 	}
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -87,6 +93,12 @@ func (a *App) Connect(ctx context.Context) error {
 // account-wide mention total and per-guild badges are recomputed from the full
 // maps — otherwise counts for quiet rooms would be lost after the first delta.
 func (a *App) onSync(ctx context.Context, resp *mautrix.RespSync, since string) bool {
+	// OnSync runs before this response's timeline events are dispatched (see
+	// mautrix DefaultSyncer.ProcessResponse), so setting the live-stream gate here
+	// governs whether this batch's messages raise notifications. An empty token is
+	// the initial sync (or a from-scratch reconnect catch-up): stay quiet.
+	a.caughtUp.Store(since != "")
+
 	type unreadUpdate struct {
 		channel   store.ChannelID
 		status    backend.UnreadStatus
@@ -305,6 +317,36 @@ func (a *App) onSpaceChild(ctx context.Context, evt *event.Event) {
 	a.syncRoomEntry(child)
 }
 
+// cryptoSetupError maps mautrix's E2EE bring-up failures to an actionable
+// message. The common one for tuicord is a device conflict: the pasted access
+// token belongs to another session (e.g. Element), so that device's keys are
+// already on the server while tuicord's local olm account is empty and unshared.
+// Two clients cannot share one device's E2EE identity.
+func cryptoSetupError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "not marked as shared") || strings.Contains(msg, "mismatching identity key") {
+		return fmt.Errorf("end-to-end encryption unavailable: this login is reusing another session's device " +
+			"(its keys are already on the server, but this client doesn't have them). Sign in with a device of " +
+			"its own — password login, or an access token freshly created for tuicord — rather than pasting your " +
+			"existing Element/app token. Encrypted rooms will not work, and messages will not be sent, until this is fixed")
+	}
+	return fmt.Errorf("end-to-end encryption failed to start; encrypted rooms will not work: %w", err)
+}
+
+// onStateEncryption records that a room is end-to-end encrypted. Kept
+// independently of the crypto state store: when E2EE fails to initialize that
+// store is never populated, and the send path relies on this flag to avoid
+// leaking plaintext into an encrypted room.
+func (a *App) onStateEncryption(ctx context.Context, evt *event.Event) {
+	info := a.roomInfoLocked(evt.RoomID)
+	a.mu.Lock()
+	info.encrypted = true
+	a.mu.Unlock()
+}
+
 func (a *App) onDirectChats(ctx context.Context, evt *event.Event) {
 	content := evt.Content.AsDirectChats()
 	if content == nil {
@@ -359,6 +401,10 @@ func (a *App) onMessage(ctx context.Context, evt *event.Event) {
 
 	msg := a.convertMessage(evt, content, channel)
 	fromSelf := evt.Sender == a.selfID
+	// Only live messages notify. Capture the gate on the sync goroutine (not
+	// inside Post) so a later sync flipping it cannot retroactively notify this
+	// batch. The initial sync's backlog therefore lands silently.
+	notify := !fromSelf && a.caughtUp.Load()
 	a.ui.Post(func() {
 		// Reconcile our own optimistic echo by nonce first; otherwise dedupe
 		// against redelivered events (reconnect / gappy sync re-send timeline
@@ -372,7 +418,7 @@ func (a *App) onMessage(ctx context.Context, evt *event.Event) {
 		}
 		a.store.AppendMessage(msg)
 		a.fireChange()
-		if !fromSelf && a.onIncoming != nil {
+		if notify && a.onIncoming != nil {
 			a.onIncoming(msg)
 		}
 	})

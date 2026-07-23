@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"awesomeProject/internal/auth"
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/tui/widget"
 	"awesomeProject/internal/uistate"
@@ -56,5 +57,42 @@ func TestDedupAccountRegistryReindexesActivePastDuplicate(t *testing.T) {
 	}
 	if active != 1 {
 		t.Fatalf("active index = %d, want 1", active)
+	}
+}
+
+func TestNewAccountKeyAndLabel(t *testing.T) {
+	// Matrix credentials are keyed and labeled by user ID (stable across re-login).
+	creds := auth.Credentials{Protocol: auth.ProtocolMatrix, UserID: "@alice:example.org"}
+	value, err := creds.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := newAccountKey(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "matrix:@alice:example.org"; key != want {
+		t.Fatalf("matrix key = %q, want %q", key, want)
+	}
+	if got := defaultAccountLabel(value); got != "@alice:example.org" {
+		t.Fatalf("matrix label = %q, want the user ID", got)
+	}
+
+	// Discord is a bare token: random, unique keys and a placeholder label.
+	k1, err := newAccountKey("some.discord.token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, _ := newAccountKey("some.discord.token")
+	if k1 == k2 {
+		t.Fatal("expected distinct random keys for Discord accounts")
+	}
+	for _, k := range []string{k1, k2} {
+		if len(k) <= len("discord:") || k[:len("discord:")] != "discord:" {
+			t.Fatalf("discord key %q missing discord: prefix", k)
+		}
+	}
+	if got := defaultAccountLabel("some.discord.token"); got != "New account" {
+		t.Fatalf("discord label = %q, want placeholder", got)
 	}
 }

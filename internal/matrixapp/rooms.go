@@ -145,6 +145,31 @@ func (a *App) ensureGuildRow(guild store.GuildID) {
 			a.store.UpsertGuild(store.Guild{ID: guild, Name: "Space"})
 		}
 	}
+	a.ensureWritableRole(guild)
+}
+
+// matrixEveryonePerms is the baseline the UI needs to treat a Matrix room as a
+// normal, writable channel. The client's read-only gate is Discord's
+// permission model (Store.ChannelCan), which denies everything for a guild that
+// has no @everyone role — so without this every non-DM Matrix room renders with
+// a read-only composer. We grant only participation bits (view/send/react), not
+// management bits, so Discord-only moderation UI stays hidden. Matrix power
+// levels are not yet enforced here.
+const matrixEveryonePerms = store.PermViewChannel |
+	store.PermSendMessages |
+	store.PermAddReactions |
+	store.PermSendMessagesInThreads |
+	store.PermCreatePublicThreads
+
+// ensureWritableRole installs a permissive @everyone role (role ID == guild ID,
+// which Store.MemberPermissions reads as the baseline) for a synthetic Matrix
+// guild. Must run on the UI goroutine.
+func (a *App) ensureWritableRole(guild store.GuildID) {
+	a.store.UpsertRole(guild, store.Role{
+		ID:          store.RoleID(guild),
+		Name:        "@everyone",
+		Permissions: matrixEveryonePerms,
+	})
 }
 
 // roomDisplayName derives a human name for a room lacking an m.room.name, from

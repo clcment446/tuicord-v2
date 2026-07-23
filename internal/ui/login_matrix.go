@@ -26,6 +26,7 @@ func buildMatrixLogin(ctx context.Context, app *tui.App, styles Styles, setMatri
 	homeserver.SetValue("matrix.org")
 
 	status := widget.NewText("")
+	status.SetStyle(styles.Cell("auth.status"))
 	status.SetWrap(true)
 	setStatus := func(msg string) {
 		app.Post(func() {
@@ -93,15 +94,15 @@ func buildMatrixLogin(ctx context.Context, app *tui.App, styles Styles, setMatri
 	tokenInput.OnSubmit(submitToken)
 
 	return widget.Column(
-		widget.NewText("Log in to Matrix"),
-		widget.NewText(""),
+		loginLabel(styles, "Log in to Matrix"),
+		loginLabel(styles, ""),
 		titled(styles, "Homeserver", homeserver),
 		titled(styles, "Username", user),
 		titled(styles, "Password", password),
-		widget.NewText(""),
-		widget.NewText("Or paste an existing access token:"),
+		loginLabel(styles, ""),
+		loginLabel(styles, "Or paste an existing access token:"),
 		titled(styles, "Access token", tokenInput),
-		widget.NewText(""),
+		loginLabel(styles, ""),
 		status,
 	)
 }

@@ -2,6 +2,7 @@ package matrixapp
 
 import (
 	"context"
+	"errors"
 	"mime"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,36 @@ import (
 	"awesomeProject/internal/backend"
 	"awesomeProject/internal/store"
 )
+
+// errEncryptionUnavailable is surfaced when the user tries to post to an
+// encrypted room while E2EE is not working. Sending would go out as plaintext
+// (mautrix only encrypts when its crypto state store knows the room is
+// encrypted, which never gets populated after a crypto init failure), so we
+// refuse rather than silently leak the message into an "encrypted" room.
+var errEncryptionUnavailable = errors.New("can't send: this room is end-to-end encrypted but encryption isn't set up on this device — see the sign-in warning. Refusing to send unencrypted")
+
+// blockedByEncryption reports whether a post to channel must be refused because
+// the room is encrypted but E2EE is not functional. It also surfaces the reason.
+func (a *App) blockedByEncryption(channel store.ChannelID) bool {
+	if a.cryptoReady.Load() || !a.roomEncrypted(channel) {
+		return false
+	}
+	a.reportError(errEncryptionUnavailable)
+	return true
+}
+
+// roomEncrypted reports whether the room behind channel has advertised
+// m.room.encryption.
+func (a *App) roomEncrypted(channel store.ChannelID) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	room, ok := a.roomByChannel[channel]
+	if !ok {
+		return false
+	}
+	info := a.rooms[room]
+	return info != nil && info.encrypted
+}
 
 // resolveRoom maps a store channel back to its Matrix room ID.
 func (a *App) resolveRoom(channel store.ChannelID) (id.RoomID, bool) {
@@ -44,6 +75,9 @@ func (a *App) SendToChannel(channel store.ChannelID, content string) {
 	if !ok {
 		return
 	}
+	if a.blockedByEncryption(channel) {
+		return
+	}
 	txn := a.client.M.TxnID()
 	a.store.AppendMessage(store.Message{
 		ChannelID: channel,
@@ -67,6 +101,12 @@ func (a *App) SendFiles(content string, files []backend.UploadFile, optimistic [
 	}
 	room, ok := a.resolveRoom(channel)
 	if !ok {
+		if cleanup != nil {
+			cleanup()
+		}
+		return
+	}
+	if a.blockedByEncryption(channel) {
 		if cleanup != nil {
 			cleanup()
 		}
