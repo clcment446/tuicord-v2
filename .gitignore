@@ -3,6 +3,6 @@
 *.test
 coverage.out
 __pycache__/
-
+.claude
 # Built binaries
 /tuicord
