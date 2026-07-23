@@ -76,11 +76,7 @@ func buildLogin(ctx context.Context, app *tui.App, styles Styles, setToken func(
 		Basis(36).
 		MinFirst(30).
 		Vertical()
-	chars := styles.BorderChars
-	if chars == (widget.BorderChars{}) {
-		chars = BorderCharsForStyle("rounded")
-	}
-	root.SetBorderChars(chars)
+	root.SetBorderChars(styles.BorderCharsOrDefault())
 	return newCancelRoot(root, cancel)
 }
 

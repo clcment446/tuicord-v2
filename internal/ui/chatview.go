@@ -185,6 +185,15 @@ type Styles struct {
 	State     *StyleState
 }
 
+// BorderCharsOrDefault returns the configured border glyphs, or the rounded
+// preset when no glyph set was provided.
+func (s Styles) BorderCharsOrDefault() widget.BorderChars {
+	if s.BorderChars == (widget.BorderChars{}) {
+		return widget.BorderCharsForStyle("rounded")
+	}
+	return s.BorderChars
+}
+
 type StyleState struct {
 	Generation uint64
 }
@@ -197,7 +206,7 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		active:          active,
 		resolver:        resolver,
 		styles:          styles,
-		borderChars:     borderCharsForStyle("rounded"),
+		borderChars:     styles.BorderCharsOrDefault(),
 		keyboardFocused: true,
 		vimKeys:         config.Default().Keys.Vim,
 		focusStopIndex:  -1,
@@ -219,7 +228,7 @@ func (w *ChatView) SetBorderStyle(name string) {
 	if w == nil {
 		return
 	}
-	w.borderChars = borderCharsForStyle(name)
+	w.borderChars = widget.BorderCharsForStyle(name)
 }
 
 // SetPlayingVideo marks url as the video now playing so Draw reserves (blanks)
