@@ -105,6 +105,9 @@ func (fv *ForumView) setBody(preview tui.Widget) {
 		return
 	}
 	fv.body = widget.NewSplit(left, preview).Basis(34).MinFirst(18).MinSecond(20).Vertical()
+	if split, ok := fv.body.(*widget.Split); ok {
+		split.SetBorderChars(fv.styles.BorderCharsOrDefault())
+	}
 }
 
 // SetPreview installs the right-hand pane used to show the selected post.

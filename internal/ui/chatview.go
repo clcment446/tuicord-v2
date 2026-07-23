@@ -18,12 +18,13 @@ import (
 )
 
 type ChatView struct {
-	store      *store.Store
-	active     func() store.ChannelID
-	resolver   func() markup.Resolver
-	onReachTop func()
-	styles     Styles
-	node       layout.Node
+	store       *store.Store
+	active      func() store.ChannelID
+	resolver    func() markup.Resolver
+	onReachTop  func()
+	styles      Styles
+	borderChars widget.BorderChars
+	node        layout.Node
 
 	visibleLines            []chatLine
 	visibleStart            int
@@ -169,18 +170,28 @@ type ChatView struct {
 }
 
 type Styles struct {
-	Text    screen.Style
-	Muted   screen.Style
-	Accent  screen.Style
-	Border  screen.Style
-	Pending screen.Style
-	Error   screen.Style
+	Text        screen.Style
+	Muted       screen.Style
+	Accent      screen.Style
+	Border      screen.Style
+	Pending     screen.Style
+	Error       screen.Style
+	BorderChars widget.BorderChars
 	// Cells is the semantic cell palette. Legacy fields remain as compatibility
 	// aliases for widgets that have not yet moved to a named surface.
 	Cells     map[string]screen.Style
 	Custom    map[string]bool
 	Overrides *config.ColorOverrides
 	State     *StyleState
+}
+
+// BorderCharsOrDefault returns the configured border glyphs, or the rounded
+// preset when no glyph set was provided.
+func (s Styles) BorderCharsOrDefault() widget.BorderChars {
+	if s.BorderChars == (widget.BorderChars{}) {
+		return widget.BorderCharsForStyle("rounded")
+	}
+	return s.BorderChars
 }
 
 type StyleState struct {
@@ -195,6 +206,7 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		active:          active,
 		resolver:        resolver,
 		styles:          styles,
+		borderChars:     styles.BorderCharsOrDefault(),
 		keyboardFocused: true,
 		vimKeys:         config.Default().Keys.Vim,
 		focusStopIndex:  -1,
@@ -208,6 +220,15 @@ func NewChatView(st *store.Store, active func() store.ChannelID, resolver func()
 		focusRanges:     make(map[string]messageRange, store.DefaultHistoryLimit),
 		focusStops:      make([]chatFocusStop, 0, store.DefaultHistoryLimit*3),
 	}
+}
+
+// SetBorderStyle selects the glyph set used to frame embeds and component
+// containers. Unknown values retain the rounded default.
+func (w *ChatView) SetBorderStyle(name string) {
+	if w == nil {
+		return
+	}
+	w.borderChars = widget.BorderCharsForStyle(name)
 }
 
 // SetPlayingVideo marks url as the video now playing so Draw reserves (blanks)

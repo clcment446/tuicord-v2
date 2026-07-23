@@ -3,6 +3,7 @@
 package main
 
 import (
+	"awesomeProject/internal/tui/widget"
 	"context"
 	"errors"
 	"flag"
@@ -375,7 +376,8 @@ func uiStyles(cfg config.Config) ui.Styles {
 		Pending: cells["pending"],
 		Error:   cells["error"],
 		Cells:   cells, Custom: custom, Overrides: cfg.ColorOverrides,
-		State: &ui.StyleState{},
+		BorderChars: widget.BorderCharsForStyle(cfg.Display.BorderStyle),
+		State:       &ui.StyleState{},
 	}
 }
 

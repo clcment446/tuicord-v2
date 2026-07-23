@@ -62,6 +62,7 @@ type Menu struct {
 	disabledStyle screen.Style
 	keyStyle      screen.Style
 	borderStyle   screen.Style
+	chars         BorderChars
 	vimNavigation bool
 
 	node layout.Node
@@ -75,6 +76,7 @@ func NewMenu(items []MenuItem) *Menu {
 		keyStyle:      screen.Style{Attrs: screen.Dim},
 		disabledStyle: screen.Style{Attrs: screen.Dim},
 		dangerStyle:   screen.Style{Attrs: screen.Bold},
+		chars:         RoundedBorder,
 		node:          layout.Node{Grow: 1},
 	}
 	m.SetItems(items)
@@ -161,6 +163,13 @@ func (m *Menu) SetBorderStyle(s screen.Style) {
 	}
 }
 
+// SetBorderChars sets the glyphs used for the menu frame and separators.
+func (m *Menu) SetBorderChars(chars BorderChars) {
+	if m != nil {
+		m.chars = chars
+	}
+}
+
 // SetVimNavigation opts the menu into j/k movement. Arrow navigation remains
 // available in every configuration.
 func (m *Menu) SetVimNavigation(enabled bool) {
@@ -234,17 +243,17 @@ func (m *Menu) Draw(r screen.Region) {
 	}
 	// Border box.
 	for x := rect.X; x < rect.X+rect.W; x++ {
-		r.Set(x, rect.Y, styled("─", m.borderStyle))
-		r.Set(x, rect.Y+rect.H-1, styled("─", m.borderStyle))
+		r.Set(x, rect.Y, styled(m.chars.Horizontal, m.borderStyle))
+		r.Set(x, rect.Y+rect.H-1, styled(m.chars.Horizontal, m.borderStyle))
 	}
 	for y := rect.Y; y < rect.Y+rect.H; y++ {
-		r.Set(rect.X, y, styled("│", m.borderStyle))
-		r.Set(rect.X+rect.W-1, y, styled("│", m.borderStyle))
+		r.Set(rect.X, y, styled(m.chars.Vertical, m.borderStyle))
+		r.Set(rect.X+rect.W-1, y, styled(m.chars.Vertical, m.borderStyle))
 	}
-	r.Set(rect.X, rect.Y, styled("┌", m.borderStyle))
-	r.Set(rect.X+rect.W-1, rect.Y, styled("┐", m.borderStyle))
-	r.Set(rect.X, rect.Y+rect.H-1, styled("└", m.borderStyle))
-	r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled("┘", m.borderStyle))
+	r.Set(rect.X, rect.Y, styled(m.chars.TopLeft, m.borderStyle))
+	r.Set(rect.X+rect.W-1, rect.Y, styled(m.chars.TopRight, m.borderStyle))
+	r.Set(rect.X, rect.Y+rect.H-1, styled(m.chars.BottomLeft, m.borderStyle))
+	r.Set(rect.X+rect.W-1, rect.Y+rect.H-1, styled(m.chars.BottomRight, m.borderStyle))
 
 	innerW := rect.W - 2
 	for i, it := range m.items {
@@ -253,11 +262,11 @@ func (m *Menu) Draw(r screen.Region) {
 			break
 		}
 		if it.Separator {
-			r.Set(rect.X, y, styled("├", m.borderStyle))
+			r.Set(rect.X, y, styled(m.chars.TeeLeft, m.borderStyle))
 			for x := rect.X + 1; x < rect.X+rect.W-1; x++ {
-				r.Set(x, y, styled("─", m.borderStyle))
+				r.Set(x, y, styled(m.chars.Horizontal, m.borderStyle))
 			}
-			r.Set(rect.X+rect.W-1, y, styled("┤", m.borderStyle))
+			r.Set(rect.X+rect.W-1, y, styled(m.chars.TeeRight, m.borderStyle))
 			continue
 		}
 		m.drawRow(r, rect.X+1, y, innerW, i, it)

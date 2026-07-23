@@ -199,7 +199,7 @@ func (w *ChatView) renderComponentContainer(ctx *componentRenderContext, m store
 	if len(lines) == 0 {
 		lines = append(lines, componentTextLine(componentFrame{}, "[container]", mergeStyle(contentBase, w.styles.Cell("components.description"))))
 	}
-	return frameEmbedLines(lines, inner, borderStyle, contentBase)
+	return frameEmbedLines(lines, inner, borderStyle, contentBase, w.borderChars)
 }
 
 func (w *ChatView) componentAccent(node store.ComponentNode, frame componentFrame) screen.Color {
