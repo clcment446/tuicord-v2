@@ -2,6 +2,7 @@ package matrixapp
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -32,6 +33,35 @@ func TestIDMapEventsUseDisjointRange(t *testing.T) {
 	}
 	if again := m.event("$event123"); again != ev {
 		t.Fatalf("event intern not stable: %d != %d", again, ev)
+	}
+}
+
+func TestIDMapBoundsEventRange(t *testing.T) {
+	m := newIDMap("")
+	room := m.intern("!room:example.org") // persistent, must never be evicted
+
+	// Intern well past the cap; the event maps must stay bounded.
+	total := eventIDCap + 1000
+	for i := 0; i < total; i++ {
+		m.event("$evt-" + strconv.Itoa(i))
+	}
+	if got := len(m.eventOrder); got > eventIDCap {
+		t.Fatalf("eventOrder = %d, want <= cap %d", got, eventIDCap)
+	}
+	// The persistent room id survives regardless of event churn.
+	if _, ok := m.str(room); !ok {
+		t.Fatalf("persistent room id was evicted")
+	}
+	// The most recent event is still resolvable; an early one is gone.
+	if _, ok := m.fwd["$evt-"+strconv.Itoa(total-1)]; !ok {
+		t.Fatalf("most recent event id was evicted")
+	}
+	if _, ok := m.fwd["$evt-0"]; ok {
+		t.Fatalf("oldest event id should have been evicted")
+	}
+	// fwd/rev must not exceed the cap plus the handful of persistent entries.
+	if len(m.fwd) > eventIDCap+8 || len(m.rev) > eventIDCap+8 {
+		t.Fatalf("maps unbounded: fwd=%d rev=%d", len(m.fwd), len(m.rev))
 	}
 }
 

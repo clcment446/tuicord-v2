@@ -386,6 +386,14 @@ func (a *App) onReaction(ctx context.Context, evt *event.Event) {
 		return // duplicate redelivery: the reaction event is already counted
 	}
 	a.reactions[evt.ID] = reactionRef{channel: channel, message: target, key: key}
+	// Bound the redaction-routing map: evicting the oldest reaction only means a
+	// redaction of a very old reaction can't un-react it (cosmetic).
+	a.reactionOrder = append(a.reactionOrder, evt.ID)
+	if len(a.reactionOrder) > eventIDCap {
+		evict := a.reactionOrder[0]
+		a.reactionOrder = a.reactionOrder[1:]
+		delete(a.reactions, evict)
+	}
 	a.mu.Unlock()
 
 	a.ui.Post(func() {

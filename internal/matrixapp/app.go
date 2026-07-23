@@ -72,7 +72,8 @@ type App struct {
 	activeChannel    store.ChannelID
 	rooms            map[id.RoomID]*roomInfo
 	roomByChannel    map[store.ChannelID]id.RoomID
-	reactions        map[id.EventID]reactionRef // reaction event -> target
+	reactions        map[id.EventID]reactionRef // reaction event -> target (for redaction routing)
+	reactionOrder    []id.EventID               // FIFO of reaction event ids, bounds the map
 	directRooms      map[id.RoomID]bool
 	childToSpace     map[id.RoomID]id.RoomID            // child room -> parent space room
 	memberNames      map[id.RoomID]map[id.UserID]string // per-room display names

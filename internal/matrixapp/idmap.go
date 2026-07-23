@@ -14,10 +14,18 @@ import (
 // non-persisted range so the two spaces never collide even across restarts.
 const eventIDBase uint64 = 1 << 48
 
+// eventIDCap bounds how many interned event IDs are retained. It is far larger
+// than the total number of messages the store keeps across all channel rings,
+// so an evicted event's message is always already gone from every ring — which
+// makes eviction safe: the dedup guard (HasMessage) only consults live rings,
+// and a redelivered event that old would legitimately be treated as new.
+const eventIDCap = 65536
+
 // idMap interns Matrix string IDs (!room:server, @user:server, $event) into the
 // store's uint64 identifier space. Rooms and users are persisted so that
 // uistate layouts — keyed by uint64 — stay valid across restarts; event IDs are
-// ephemeral, since the store never persists message IDs.
+// ephemeral (the store never persists message IDs) and bounded by a FIFO cap so
+// a long-running session does not grow the map without limit.
 //
 // It is safe for concurrent use: the sync goroutine and action goroutines
 // allocate, while the UI goroutine resolves reverse lookups.
@@ -25,11 +33,12 @@ type idMap struct {
 	mu   sync.RWMutex
 	path string
 
-	fwd   map[string]uint64 // mxid -> id (rooms + users, persisted)
-	rev   map[uint64]string // id -> mxid (rooms + users + events)
-	next  uint64            // next persistent id
-	enext uint64            // next ephemeral event id
-	dirty bool
+	fwd        map[string]uint64 // mxid -> id (rooms + users + events)
+	rev        map[uint64]string // id -> mxid (rooms + users + events)
+	next       uint64            // next persistent id
+	enext      uint64            // next ephemeral event id
+	eventOrder []string          // interned event mxids in allocation order (FIFO)
+	dirty      bool
 }
 
 type idMapFile struct {
@@ -111,6 +120,15 @@ func (m *idMap) event(mxid string) uint64 {
 	m.enext++
 	m.fwd[mxid] = id
 	m.rev[id] = mxid
+	m.eventOrder = append(m.eventOrder, mxid)
+	if len(m.eventOrder) > eventIDCap {
+		evict := m.eventOrder[0]
+		m.eventOrder = m.eventOrder[1:]
+		if old, ok := m.fwd[evict]; ok {
+			delete(m.fwd, evict)
+			delete(m.rev, old)
+		}
+	}
 	return id
 }
 
