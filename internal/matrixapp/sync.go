@@ -34,6 +34,13 @@ func (a *App) RegisterHandlers() {
 	s.OnEventType(event.EventReaction, a.onReaction)
 	s.OnEventType(event.EventRedaction, a.onRedaction)
 
+	// Surface undecryptable messages as a placeholder instead of dropping them
+	// silently (missing keys, unverified session). If keys arrive later, mautrix
+	// re-decrypts and re-dispatches, replacing the placeholder via its event ID.
+	if a.client.Crypto != nil {
+		a.client.Crypto.DecryptErrorCallback = a.onDecryptError
+	}
+
 	// Per-room unread counts and pagination tokens live only on the sync
 	// response, not on individual events. Returning true keeps the crypto helper
 	// and per-event dispatch running.
@@ -295,6 +302,24 @@ func (a *App) onMessage(ctx context.Context, evt *event.Event) {
 		if !fromSelf && a.onIncoming != nil {
 			a.onIncoming(msg)
 		}
+	})
+}
+
+// onDecryptError renders a placeholder for a message that could not be
+// decrypted, so E2EE rooms with missing keys still show that a message exists.
+func (a *App) onDecryptError(evt *event.Event, decErr error) {
+	channel := a.channelFor(evt.RoomID)
+	msg := store.Message{
+		ID:        store.MessageID(a.ids.event(string(evt.ID))),
+		ChannelID: channel,
+		AuthorID:  store.UserID(a.ids.intern(string(evt.Sender))),
+		Author:    a.displayName(evt.RoomID, evt.Sender),
+		Content:   "🔒 Unable to decrypt this message",
+		Timestamp: time.UnixMilli(evt.Timestamp),
+	}
+	a.ui.Post(func() {
+		a.store.AppendMessage(msg)
+		a.fireChange()
 	})
 }
 

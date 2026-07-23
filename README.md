@@ -1,19 +1,26 @@
 # tuicord
 
-A Discord client that runs in your terminal, written in Go.
+A Discord and Matrix client that runs in your terminal, written in Go.
 
 ## Build
 
-Needs Go 1.26+.
+Needs Go 1.26+ and a C toolchain (cgo, for the Matrix E2EE SQLite store).
 
 ```sh
-go build -o tuicord ./cmd/tuicord
+go build -tags goolm -o tuicord ./cmd/tuicord
 ./tuicord
 ```
 
+The `goolm` build tag selects the pure-Go olm implementation for Matrix
+end-to-end encryption, so no system `libolm` is required. **All `go` commands
+(`build`, `test`, `vet`, `run`) need `-tags goolm`** — without it the build
+fails looking for `olm/olm.h`.
+
 First launch creates `~/.config/tuicord-v2/config.lua` and `plugins/`, then
-walks you through login (token, QR, or captcha). The token is kept in your
-system keyring afterward.
+walks you through login. Discord (token, QR, or captcha) and Matrix (homeserver
++ password, or access-token paste) are both offered on the login screen. Secrets
+are kept in your system keyring afterward; the Matrix E2EE crypto store lives
+under `~/.local/share/tuicord/matrix/<account>/`.
 
 ## Configuration
 
@@ -38,10 +45,10 @@ keyring.
 ## Testing
 
 ```sh
-go test ./...
-go test -race ./...
+go test -tags goolm ./...
+go test -tags goolm -race ./...
 (cd third_party/arikawa && go test ./...)
-GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -run '^$' -exec=true ./...
+GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go test -tags goolm -run '^$' -exec=true ./...
 ```
 
 `third_party/arikawa` has its own `go.mod`. Go module boundaries mean the root
