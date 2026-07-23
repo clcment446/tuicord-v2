@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto/attachment"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 
@@ -109,28 +110,53 @@ func (a *App) uploadAndSend(room id.RoomID, channel store.ChannelID, f backend.U
 	if ctype == "" {
 		ctype = "application/octet-stream"
 	}
-	resp, err := a.client.M.UploadBytesWithName(context.Background(), data, ctype, f.Name)
-	if err != nil {
-		a.reportError(err)
-		return
-	}
-	msgType := event.MsgFile
-	switch {
-	case strings.HasPrefix(ctype, "image/"):
-		msgType = event.MsgImage
-	case strings.HasPrefix(ctype, "video/"):
-		msgType = event.MsgVideo
-	case strings.HasPrefix(ctype, "audio/"):
-		msgType = event.MsgAudio
-	}
 	content := &event.MessageEventContent{
-		MsgType: msgType,
+		MsgType: mediaMsgType(ctype),
 		Body:    f.Name,
-		URL:     resp.ContentURI.CUString(),
 		Info:    &event.FileInfo{MimeType: ctype, Size: len(data)},
 	}
-	txn := a.client.M.TxnID()
-	a.deliver(room, channel, txn, content)
+
+	// In an encrypted room the media itself must be encrypted before upload —
+	// SendMessageEvent only encrypts the event JSON, not the bytes the
+	// homeserver stores. Upload ciphertext and carry the keys in content.File.
+	ctx := context.Background()
+	encrypted := false
+	if a.client.M.StateStore != nil {
+		if enc, encErr := a.client.M.StateStore.IsEncrypted(ctx, room); encErr == nil {
+			encrypted = enc
+		}
+	}
+	if encrypted {
+		ef := attachment.NewEncryptedFile()
+		ciphertext := ef.Encrypt(data)
+		resp, upErr := a.client.M.UploadBytes(ctx, ciphertext, "application/octet-stream")
+		if upErr != nil {
+			a.reportError(upErr)
+			return
+		}
+		content.File = &event.EncryptedFileInfo{EncryptedFile: *ef, URL: resp.ContentURI.CUString()}
+	} else {
+		resp, upErr := a.client.M.UploadBytesWithName(ctx, data, ctype, f.Name)
+		if upErr != nil {
+			a.reportError(upErr)
+			return
+		}
+		content.URL = resp.ContentURI.CUString()
+	}
+	a.deliver(room, channel, a.client.M.TxnID(), content)
+}
+
+func mediaMsgType(ctype string) event.MessageType {
+	switch {
+	case strings.HasPrefix(ctype, "image/"):
+		return event.MsgImage
+	case strings.HasPrefix(ctype, "video/"):
+		return event.MsgVideo
+	case strings.HasPrefix(ctype, "audio/"):
+		return event.MsgAudio
+	default:
+		return event.MsgFile
+	}
 }
 
 func (a *App) Reply(content string, message store.Message, mention bool) {

@@ -97,6 +97,58 @@ func TestOnMessageReconcilesOwnEchoByNonce(t *testing.T) {
 	}
 }
 
+func memberEvent(room id.RoomID, user id.UserID, membership event.Membership, name string) *event.Event {
+	stateKey := string(user)
+	return &event.Event{
+		Type:     event.StateMember,
+		RoomID:   room,
+		Sender:   user,
+		StateKey: &stateKey,
+		Content:  event.Content{Parsed: &event.MemberEventContent{Membership: membership, Displayname: name}},
+	}
+}
+
+func TestRoomRenderedOnlyWhenJoinedAndRemovedOnLeave(t *testing.T) {
+	a, st := newTestApp()
+	room := id.RoomID("!room:example.org")
+	channel := a.channelFor(room)
+
+	// Before our own join, the room must not appear as a channel.
+	a.syncRoomEntry(room)
+	if _, ok := st.Channel(channel); ok {
+		t.Fatal("room rendered before we joined it")
+	}
+
+	// Our own join materializes it.
+	a.onStateMember(context.Background(), memberEvent(room, a.selfID, event.MembershipJoin, "me"))
+	if _, ok := st.Channel(channel); !ok {
+		t.Fatal("joined room was not rendered")
+	}
+
+	// Leaving removes it.
+	a.onStateMember(context.Background(), memberEvent(room, a.selfID, event.MembershipLeave, "me"))
+	if _, ok := st.Channel(channel); ok {
+		t.Fatal("left room was not removed")
+	}
+}
+
+func TestMemberListFiltersByMembership(t *testing.T) {
+	a, st := newTestApp()
+	room := id.RoomID("!room:example.org")
+	a.onStateMember(context.Background(), memberEvent(room, a.selfID, event.MembershipJoin, "me"))
+	guild := a.guildFor(room)
+	alice := id.UserID("@alice:example.org")
+
+	a.onStateMember(context.Background(), memberEvent(room, alice, event.MembershipJoin, "Alice"))
+	if _, ok := st.Member(guild, store.UserID(a.ids.intern(string(alice)))); !ok {
+		t.Fatal("joined member not added")
+	}
+	a.onStateMember(context.Background(), memberEvent(room, alice, event.MembershipLeave, "Alice"))
+	if _, ok := st.Member(guild, store.UserID(a.ids.intern(string(alice)))); ok {
+		t.Fatal("left member not removed from the list")
+	}
+}
+
 func TestUnreadAggregatesSurviveIncrementalSyncs(t *testing.T) {
 	a, _ := newTestApp()
 	roomA := id.RoomID("!a:example.org")

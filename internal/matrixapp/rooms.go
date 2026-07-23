@@ -55,12 +55,19 @@ func (a *App) syncRoomEntry(roomID id.RoomID) {
 		return
 	}
 	isSpace := info.isSpace
+	joined := info.joined
 	name := info.name
 	channelID := info.channelID
 	isDM := a.directRooms[roomID]
 	guild := a.guildForLocked(roomID)
 	spaceGuild := store.GuildID(a.ids.intern(string(roomID)))
 	a.mu.Unlock()
+
+	// Only rooms we have actually joined are rendered. This keeps a space's
+	// advertised-but-unjoined children out of the sidebar.
+	if !joined {
+		return
+	}
 
 	a.ui.Post(func() {
 		if isSpace {
@@ -91,6 +98,37 @@ func (a *App) syncRoomEntry(roomID id.RoomID) {
 		})
 		a.fireGuildChange()
 		a.markReadyOnce()
+	})
+}
+
+// removeRoom drops a room we have left or been banned from: its channel, its
+// space guild (if it was a space), its member cache, and any unread state.
+func (a *App) removeRoom(roomID id.RoomID) {
+	a.mu.Lock()
+	info := a.rooms[roomID]
+	if info == nil {
+		a.mu.Unlock()
+		return
+	}
+	channelID := info.channelID
+	isSpace := info.isSpace
+	spaceGuild := store.GuildID(a.ids.intern(string(roomID)))
+	delete(a.rooms, roomID)
+	delete(a.roomByChannel, channelID)
+	delete(a.memberNames, roomID)
+	delete(a.directRooms, roomID)
+	delete(a.childToSpace, roomID)
+	delete(a.channelUnread, channelID)
+	delete(a.channelHighlight, channelID)
+	a.recomputeAggregatesLocked()
+	a.mu.Unlock()
+
+	a.ui.Post(func() {
+		a.store.RemoveChannel(channelID)
+		if isSpace {
+			a.store.RemoveGuild(spaceGuild)
+		}
+		a.fireGuildChange()
 	})
 }
 

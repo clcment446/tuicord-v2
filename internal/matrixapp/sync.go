@@ -222,6 +222,38 @@ func (a *App) onStateMember(ctx context.Context, evt *event.Event) {
 		return
 	}
 	userID := id.UserID(evt.GetStateKey())
+	joined := member.Membership == event.MembershipJoin
+	isSelf := userID == a.selfID
+
+	// Our own membership drives whether the room is materialized at all: a
+	// leave/ban removes it, and only a join renders it as a channel.
+	if isSelf {
+		a.mu.Lock()
+		if info := a.rooms[evt.RoomID]; info != nil {
+			info.joined = joined
+		}
+		a.mu.Unlock()
+		if !joined {
+			a.removeRoom(evt.RoomID)
+			return
+		}
+	}
+
+	uid := store.UserID(a.ids.intern(string(userID)))
+	guild := a.guildFor(evt.RoomID)
+
+	// Non-joined members (left, banned, invited) are removed from the member
+	// list rather than shown.
+	if !joined {
+		a.mu.Lock()
+		if names := a.memberNames[evt.RoomID]; names != nil {
+			delete(names, userID)
+		}
+		a.mu.Unlock()
+		a.ui.Post(func() { a.store.RemoveMember(guild, uid) })
+		return
+	}
+
 	name := member.Displayname
 	if name == "" {
 		name = localpart(userID)
@@ -231,11 +263,8 @@ func (a *App) onStateMember(ctx context.Context, evt *event.Event) {
 		a.memberNames[evt.RoomID] = map[id.UserID]string{}
 	}
 	a.memberNames[evt.RoomID][userID] = name
-	isSelf := userID == a.selfID
 	a.mu.Unlock()
 
-	uid := store.UserID(a.ids.intern(string(userID)))
-	guild := a.guildFor(evt.RoomID)
 	avatar := ""
 	if member.AvatarURL != "" {
 		if uri, ok := matrix.ParseMXC(member.AvatarURL); ok {
@@ -250,6 +279,10 @@ func (a *App) onStateMember(ctx context.Context, evt *event.Event) {
 			a.publishSnapshot()
 		}
 	})
+	if isSelf {
+		// Now that we know we're joined, render the room.
+		a.syncRoomEntry(evt.RoomID)
+	}
 }
 
 func (a *App) onSpaceChild(ctx context.Context, evt *event.Event) {

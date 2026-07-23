@@ -43,6 +43,10 @@ type roomInfo struct {
 	avatar    string
 	isSpace   bool
 	isDM      bool
+	// joined is true once our own m.room.member shows membership=join. Rooms we
+	// are not joined to (e.g. a space's advertised children we haven't joined)
+	// are tracked for relationships but never rendered as channels.
+	joined bool
 	// children are ordered child room mxids when this room is a space.
 	children []string
 	// prevBatch is the pagination token for backfilling older history.
