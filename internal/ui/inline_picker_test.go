@@ -187,9 +187,29 @@ func TestMemberForContextResolvesSentDMValue(t *testing.T) {
 	st.UpsertChannel(store.Channel{ID: 90, GuildID: dmGuild, Kind: store.ChannelDM,
 		Recipients: []store.Member{{ID: 20, Name: "Ada Lovelace"}}})
 
-	m, ok := memberForContext(st, dmGuild, 90, 20)
+	m, ok := memberForContext(st, dmGuild, 90, 20, store.Member{}, false)
 	if !ok || m.Name != "Ada Lovelace" {
 		t.Fatalf("DM mention resolution = %+v,%v, want Ada Lovelace", m, ok)
+	}
+}
+
+func TestMemberForContextResolvesSelfMention(t *testing.T) {
+	const dmGuild = ^store.GuildID(0)
+	st := store.New(0)
+	// A DM channel: recipients exclude the logged-in user, so a self-mention
+	// only resolves through the self fallback.
+	st.UpsertChannel(store.Channel{ID: 90, GuildID: dmGuild, Kind: store.ChannelDM,
+		Recipients: []store.Member{{ID: 20, Name: "Ada Lovelace"}}})
+	self := store.Member{ID: 7, Name: "Me"}
+
+	m, ok := memberForContext(st, dmGuild, 90, 7, self, true)
+	if !ok || m.Name != "Me" {
+		t.Fatalf("self mention resolution = %+v,%v, want Me", m, ok)
+	}
+
+	// Without a known self identity it stays unresolved.
+	if _, ok := memberForContext(st, dmGuild, 90, 7, store.Member{}, false); ok {
+		t.Fatal("self mention resolved without a known self identity")
 	}
 }
 

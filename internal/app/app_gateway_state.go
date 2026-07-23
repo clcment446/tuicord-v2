@@ -112,6 +112,15 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	selfID := store.UserID(e.User.ID)
 	sessionID := e.SessionID
 	hasNitro := e.User.Nitro != discord.NoUserNitro
+	// Snapshot the logged-in user's identity so self-mentions resolve even in
+	// DMs (whose recipient lists exclude the current user) and in guilds whose
+	// member catalog has not loaded. ningen retains and mutates e, so copy now.
+	self := store.Member{
+		ID:        selfID,
+		Name:      e.User.DisplayOrUsername(),
+		Username:  e.User.Username,
+		AvatarURL: e.User.AvatarURL(),
+	}
 	var folders []store.GuildFolder
 	if e.UserSettings != nil {
 		folders = convertGuildFolders(e.UserSettings.GuildFolders)
@@ -123,6 +132,7 @@ func (a *App) handleReady(e *gateway.ReadyEvent) {
 	readMarks := readMarksFromReady(e)
 	a.ui.Post(func() {
 		a.selfID = selfID
+		a.self = self
 		a.publishStateSnapshot()
 		a.sessionID = sessionID
 		a.store.SetNitro(hasNitro)
