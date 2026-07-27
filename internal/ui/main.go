@@ -1105,9 +1105,10 @@ func (mv *MainView) channelBreadcrumb(id store.ChannelID) string {
 }
 
 // channelReadOnly reports whether the composer should be disabled for a channel:
-// no SEND_MESSAGES permission (rules channels, most announcement channels), or
-// an archived thread. DMs and forums are never read-only here (forums use the
-// post composer instead).
+// no SEND_MESSAGES permission (rules channels, most announcement channels),
+// no SEND_MESSAGES_IN_THREADS permission for a thread, or an archived thread.
+// DMs and forums are never read-only here (forums use the post composer
+// instead).
 func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
 	if id == 0 {
 		return false
@@ -1122,7 +1123,11 @@ func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
 	if c.Kind == store.ChannelForum {
 		return false
 	}
-	if !mv.app.Store().ChannelCan(c.GuildID, mv.app.SelfID(), id, store.PermSendMessages) {
+	permission := store.PermSendMessages
+	if c.Kind == store.ChannelThread {
+		permission = store.PermSendMessagesInThreads
+	}
+	if !mv.app.Store().ChannelCan(c.GuildID, mv.app.SelfID(), id, permission) {
 		return true
 	}
 	if c.Kind == store.ChannelThread && c.Thread != nil && c.Thread.Archived {
@@ -1381,6 +1386,16 @@ func (mv *MainView) refreshMembers(guild store.GuildID) {
 	// channel's recipient list (same fallback the @-mention menu uses).
 	if channel, ok := st.Channel(mv.app.ActiveChannel()); ok && channel.Kind == store.ChannelDM {
 		members = append([]store.Member(nil), channel.Recipients...)
+	} else {
+		// Store.Members is map-backed. Sort the sidebar rows so a refresh does
+		// not reshuffle guild members that do not belong to any role.
+		sort.Slice(members, func(i, j int) bool {
+			left, right := strings.ToLower(members[i].Name), strings.ToLower(members[j].Name)
+			if left != right {
+				return left < right
+			}
+			return members[i].ID < members[j].ID
+		})
 	}
 	items := make([]widget.Item, 0, len(members))
 	for _, m := range members {

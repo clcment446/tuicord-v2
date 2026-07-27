@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"reflect"
 	"testing"
 
 	"awesomeProject/internal/app"
@@ -132,6 +133,29 @@ func TestRefreshChannelsPreservesBrowsedSelection(t *testing.T) {
 	mv.refreshChannels()
 	if got := mv.channelRows[mv.channelList.Selected()].ChannelID; got != 20 {
 		t.Fatalf("selected channel after refresh = %d, want 20", got)
+	}
+}
+
+func TestRefreshMembersKeepsMembersWithoutRolesAlphabetical(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertMember(1, store.Member{ID: 1, Name: "zoe"})
+	st.UpsertMember(1, store.Member{ID: 2, Name: "Alice"})
+	st.UpsertMember(1, store.Member{ID: 3, Name: "mike"})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	mv := &MainView{app: a, memberList: widget.NewItemList(nil)}
+
+	mv.refreshMembers(1)
+
+	items := mv.memberList.Items()
+	got := make([]string, len(items))
+	for i, item := range items {
+		got[i] = item.Label
+	}
+	want := []string{"Alice", "mike", "zoe"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("member rows = %v, want %v", got, want)
 	}
 }
 
