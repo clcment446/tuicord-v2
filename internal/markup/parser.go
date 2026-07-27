@@ -2,6 +2,7 @@ package markup
 
 import (
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -92,8 +93,38 @@ func (p *parser) scanWebURL(i int) int {
 		return i
 	}
 	target := p.src[i:end]
+	if kind, name, ok := bareDiscordMedia(target); ok {
+		p.emit(Span{Kind: kind, Text: name, URL: target})
+		return end
+	}
 	p.emit(Span{Kind: Kind_Link, Text: target, URL: target, Action: &Action{Kind: ActionOpenURL, Target: target}})
 	return end
+}
+
+// bareDiscordMedia identifies the CDN links emitted by Vencord-style emoji
+// and sticker sharing. They have no Markdown marker, but are still safe to
+// render as inline Discord media because ClassifyURL requires a Discord CDN
+// host and the expected resource path.
+func bareDiscordMedia(raw string) (Kind, string, bool) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return Kind_Text, "", false
+	}
+	name := u.Query().Get("name")
+	switch media.ClassifyURL(raw) {
+	case media.ClassEmoji:
+		if name == "" {
+			name = "emoji"
+		}
+		return Kind_FakeEmoji, name, true
+	case media.ClassSticker:
+		if name == "" {
+			name = "sticker"
+		}
+		return Kind_FakeSticker, name, true
+	default:
+		return Kind_Text, "", false
+	}
 }
 
 // scanSmall consumes Discord's -# small-text line. The marker requires a

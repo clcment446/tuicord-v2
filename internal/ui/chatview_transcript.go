@@ -355,8 +355,6 @@ func (w *ChatView) authorLine(m store.Message, guild store.GuildID) chatLine {
 	header := m.Author
 	if m.Failed {
 		header += " (failed)"
-	} else if m.Pending {
-		header += " (sending…)"
 	}
 	authorStyle := w.styles.Cell("messages.author")
 	if m.Failed {

@@ -21,10 +21,14 @@ func (w *ChatView) renderReplyLine(reply store.MessageReply, channel store.Chann
 	if reply.Deleted {
 		return chatLine{segments: []chatSegment{{text: "╭─▸ original message was deleted", style: muted}}}
 	}
-	name := reply.Author
-	if n, ok := w.store.MemberName(guild, reply.AuthorID); ok && n != "" {
-		name = n
+	if reply.Unavailable {
+		return chatLine{segments: []chatSegment{{text: "╭─▸ original message is unavailable", style: muted}}}
 	}
+	// The summary arrives from the referenced message and therefore uses the
+	// same author identity as ordinary messages. Do not replace it with the
+	// current guild-member display name: that makes replies disagree with their
+	// message headers when a member changed their server nickname.
+	name := reply.Author
 	if name == "" {
 		name = "unknown"
 	}

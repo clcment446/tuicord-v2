@@ -248,14 +248,16 @@ type Message struct {
 
 // MessageReply is the referenced-message summary a reply carries. Deleted
 // marks a reply whose original message no longer exists (Discord sends a null
-// referenced_message for those).
+// referenced_message for those). Unavailable marks an ephemeral reply whose
+// snapshot was omitted, which is not evidence that its original was deleted.
 type MessageReply struct {
-	MessageID MessageID
-	ChannelID ChannelID
-	AuthorID  UserID
-	Author    string
-	Content   string
-	Deleted   bool
+	MessageID   MessageID
+	ChannelID   ChannelID
+	AuthorID    UserID
+	Author      string
+	Content     string
+	Deleted     bool
+	Unavailable bool
 }
 
 // ForwardedMessage is the partial snapshot Discord attaches to a forwarded

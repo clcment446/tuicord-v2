@@ -29,6 +29,25 @@ func TestChatViewRendersReplyReference(t *testing.T) {
 	}
 }
 
+func TestChatViewReplyAuthorUsesMessageIdentity(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Kind: store.ChannelText})
+	st.UpsertMember(1, store.Member{ID: 9, Name: "display name", Username: "account-name"})
+	st.AppendMessage(store.Message{
+		ID: 2, ChannelID: 1, AuthorID: 7, Author: "alice", Content: "sure!",
+		Reply: &store.MessageReply{MessageID: 1, ChannelID: 1, AuthorID: 9, Author: "account-name", Content: "can you do it?"},
+	})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(48, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	reply := rowText(buf, 1)
+	if !strings.Contains(reply, "@account-name") || strings.Contains(reply, "display name") {
+		t.Errorf("reply line = %q, want message author identity", reply)
+	}
+}
+
 func TestChatViewReplyPreviewResolvesMention(t *testing.T) {
 	st := store.New(0)
 	st.UpsertMember(1, store.Member{ID: 42, Name: "alice"})
@@ -68,6 +87,22 @@ func TestChatViewRendersDeletedReplyReference(t *testing.T) {
 
 	if !strings.Contains(rowText(buf, 1), "original message was deleted") {
 		t.Errorf("reply line = %q, want deletion notice", rowText(buf, 1))
+	}
+}
+
+func TestChatViewRendersUnavailableReplyReference(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID: 2, ChannelID: 1, AuthorID: 7, Author: "alice", Content: "sure!",
+		Reply: &store.MessageReply{MessageID: 1, ChannelID: 1, Unavailable: true},
+	})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	buf := screen.NewBuffer(48, 3)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if got := rowText(buf, 1); !strings.Contains(got, "original message is unavailable") || strings.Contains(got, "unknown") {
+		t.Errorf("reply line = %q, want unavailable-reference notice", got)
 	}
 }
 

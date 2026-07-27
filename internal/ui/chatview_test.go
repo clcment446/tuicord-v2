@@ -62,7 +62,7 @@ func TestChatViewRendersConsecutiveMessagesFromAuthorAsOneBlock(t *testing.T) {
 	}
 }
 
-func TestChatViewMarksPendingAndFailed(t *testing.T) {
+func TestChatViewStylesPendingAuthorWithoutSendingLabel(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ChannelID: 1, Author: "you", Content: "hi", Pending: true})
 
@@ -70,8 +70,11 @@ func TestChatViewMarksPendingAndFailed(t *testing.T) {
 	buf := screen.NewBuffer(30, 2)
 	view.Draw(buf.Clip(buf.Bounds()))
 
-	if !strings.Contains(rowText(buf, 0), "sending") {
-		t.Errorf("pending header = %q, want to contain 'sending'", rowText(buf, 0))
+	if got := rowText(buf, 0); got != "you" {
+		t.Errorf("pending header = %q, want author without a sending label", got)
+	}
+	if got := buf.Cell(0, 0).Style; got != view.styles.Cell("messages.pending") {
+		t.Errorf("pending author style = %+v, want %+v", got, view.styles.Cell("messages.pending"))
 	}
 }
 

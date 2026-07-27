@@ -33,7 +33,7 @@ func TestConvertMessageMapsReply(t *testing.T) {
 	}
 }
 
-func TestConvertMessageMarksDeletedReplyTarget(t *testing.T) {
+func TestConvertMessageMarksAbsentReplyTargetDeleted(t *testing.T) {
 	msg := discord.Message{
 		ID:        7,
 		ChannelID: 3,
@@ -45,6 +45,22 @@ func TestConvertMessageMarksDeletedReplyTarget(t *testing.T) {
 	got := convertMessage(msg)
 	if got.Reply == nil || !got.Reply.Deleted || got.Reply.MessageID != 5 {
 		t.Fatalf("Reply = %+v, want deleted marker for message 5", got.Reply)
+	}
+}
+
+func TestConvertEphemeralReplyDoesNotClaimAbsentReplyTargetWasDeleted(t *testing.T) {
+	msg := discord.Message{
+		ID:        7,
+		ChannelID: 3,
+		Type:      discord.InlinedReplyMessage,
+		Flags:     discord.EphemeralMessage,
+		Author:    discord.User{ID: 42, Username: "alice"},
+		Content:   "sure!",
+		Reference: &discord.MessageReference{Type: discord.MessageReferenceTypeDefault, MessageID: 5, ChannelID: 3},
+	}
+	got := convertMessage(msg)
+	if got.Reply == nil || got.Reply.Deleted || !got.Reply.Unavailable || got.Reply.MessageID != 5 {
+		t.Fatalf("Reply = %+v, want unresolved ephemeral reference without a deletion claim", got.Reply)
 	}
 }
 
