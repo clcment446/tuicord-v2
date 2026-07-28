@@ -1525,6 +1525,8 @@ func (mv *MainView) onSend(content string) {
 		mv.CancelComposerMode()
 		return
 	}
+	escapedModeStart := startsEscapedModeCharacter(content, mv.cfg.Keys.ModeEscape)
+	content = unescapeModeCharacters(content, mv.cfg.Keys.ModeEscape)
 	if updated, attachments, err := importDollarPaths(mv.workspaceRoot(), content); err != nil {
 		mv.reportUploadError(err)
 		return
@@ -1539,7 +1541,7 @@ func (mv *MainView) onSend(content string) {
 	if (strings.TrimSpace(content) == "" && len(mv.attachments) == 0) || mv.composerReadOnly {
 		return
 	}
-	if mv.composerMode == composerNormal && mv.onLocalCommand != nil && mv.onLocalCommand(content) {
+	if !escapedModeStart && mv.composerMode == composerNormal && mv.onLocalCommand != nil && mv.onLocalCommand(content) {
 		mv.composer.SetValue("")
 		return
 	}

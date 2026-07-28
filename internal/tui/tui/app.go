@@ -457,31 +457,41 @@ func (a *App) handleKey(ev input.KeyEvent) bool {
 	}
 	if vimKeyMatches(ev, a.vimFocusPrev) || vimKeyMatches(ev, a.vimFocusNext) {
 		focused := a.Focus.Focused()
-		if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
-			forward := vimKeyMatches(ev, a.vimFocusNext)
-			if traverser.HandleVimFocus(forward) {
-				a.Invalidate()
-				return true
-			}
-			if forward {
-				a.Focus.Next()
-			} else {
-				a.Focus.Prev()
-			}
-			a.Invalidate()
-			return true
+		consumerClaims := false
+		if consumer, ok := focused.(VimKeyConsumer); ok {
+			consumerClaims = consumer.VimConsumesKey(ev)
 		}
-	}
-	if vimKeyMatches(ev, a.vimPanelPrev) || vimKeyMatches(ev, a.vimPanelNext) {
-		if focused := a.Focus.Focused(); focused != nil {
+		if !consumerClaims {
 			if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
-				if vimKeyMatches(ev, a.vimPanelNext) {
+				forward := vimKeyMatches(ev, a.vimFocusNext)
+				if traverser.HandleVimFocus(forward) {
+					a.Invalidate()
+					return true
+				}
+				if forward {
 					a.Focus.Next()
 				} else {
 					a.Focus.Prev()
 				}
 				a.Invalidate()
 				return true
+			}
+		}
+	}
+	if vimKeyMatches(ev, a.vimPanelPrev) || vimKeyMatches(ev, a.vimPanelNext) {
+		if focused := a.Focus.Focused(); focused != nil {
+			if consumer, ok := focused.(VimKeyConsumer); ok && consumer.VimConsumesKey(ev) {
+				// Let the focused widget's local action handle this key.
+			} else {
+				if traverser, ok := focused.(VimFocusTraverser); ok && traverser.VimFocusEnabled() {
+					if vimKeyMatches(ev, a.vimPanelNext) {
+						a.Focus.Next()
+					} else {
+						a.Focus.Prev()
+					}
+					a.Invalidate()
+					return true
+				}
 			}
 		}
 	}

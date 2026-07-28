@@ -62,6 +62,12 @@ func TestLoadVimKeyOverrides(t *testing.T) {
 	}
 }
 
+func TestDefaultVimHideEmbedsKey(t *testing.T) {
+	if got := Default().Keys.Vim.HideEmbeds; got != "H" {
+		t.Fatalf("default hide_embeds key = %q, want H", got)
+	}
+}
+
 func TestLoadVimKeyEmptiesDisableIndividualAndAllActions(t *testing.T) {
 	t.Run("individual", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.toml")
@@ -99,6 +105,7 @@ delete = ""
 reply = ""
 edit = ""
 add_reaction = ""
+hide_embeds = ""
 focus_previous = ""
 focus_next = ""
 panel_previous = ""
@@ -395,6 +402,12 @@ func TestLoadFromBorderStyleDisplayOption(t *testing.T) {
 func TestDefaultBorderStyleIsRounded(t *testing.T) {
 	if got := Default().Display.BorderStyle; got != "rounded" {
 		t.Fatalf("default display.border_style = %q, want rounded", got)
+	}
+}
+
+func TestModeEscapeIsOptInByDefault(t *testing.T) {
+	if got := Default().Keys.ModeEscape; got != "" {
+		t.Fatalf("default mode_escape = %q, want disabled", got)
 	}
 }
 

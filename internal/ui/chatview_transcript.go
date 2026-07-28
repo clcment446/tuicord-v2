@@ -256,9 +256,11 @@ func (w *ChatView) renderBody(m store.Message, channel store.ChannelID, width in
 		body = append(body, w.renderContent(m.Content, width, style)...)
 	}
 	body = append(body, w.renderForwards(m, width, style)...)
-	body = append(body, w.renderMedia(m, width, style)...)
-	body = append(body, w.renderEmbeds(m, width, style)...)
-	body = append(body, w.renderComponentTree(m, width, style)...)
+	if !w.hiddenRichContent[messagePlacementPrefix(m)] {
+		body = append(body, w.renderMedia(m, width, style)...)
+		body = append(body, w.renderEmbeds(m, width, style)...)
+		body = append(body, w.renderComponentTree(m, width, style)...)
+	}
 	if line, ok := w.renderReactions(m.Reactions, messagePlacementPrefix(m)); ok {
 		body = append(body, line)
 	}
