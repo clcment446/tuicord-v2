@@ -155,12 +155,18 @@ func (w *ChatView) render(width int) []chatLine {
 			previous.Failed != m.Failed || previous.Pending != m.Pending
 		if showAuthor {
 			line := w.authorLine(m, guild)
+			if m.PingsSelf {
+				line = w.mentionLine(line, guild)
+			}
 			line.msg = msg
 			lines = append(lines, line)
 		}
 		body, ok := w.cachedBody(m, channel, width)
 		if !ok {
 			body, ok = w.renderBody(m, channel, width)
+		}
+		if m.PingsSelf {
+			body = w.mentionLines(body, guild)
 		}
 		stable = stable && ok
 		start := len(lines)
@@ -187,6 +193,35 @@ func (w *ChatView) render(width int) []chatLine {
 	w.sweepBodyCache()
 	w.sweepMedia()
 	return c.lines
+}
+
+func (w *ChatView) mentionLine(line chatLine, guild store.GuildID) chatLine {
+	next := line
+	next.style = w.mentionStyle(guild, line.style)
+	next.segments = make([]chatSegment, len(line.segments))
+	for i, segment := range line.segments {
+		next.segments[i] = segment
+		next.segments[i].style = w.mentionStyle(guild, segment.style)
+	}
+	return next
+}
+
+func (w *ChatView) mentionLines(lines []chatLine, guild store.GuildID) []chatLine {
+	next := make([]chatLine, len(lines))
+	for i, line := range lines {
+		next[i] = w.mentionLine(line, guild)
+	}
+	return next
+}
+
+func (w *ChatView) mentionStyle(guild store.GuildID, base screen.Style) screen.Style {
+	style := mergeStyle(base, w.styles.Cell("messages.mention"))
+	if w.mentionColor != nil {
+		if color := w.mentionColor(guild); color != 0 {
+			style.Fg = rgbColor(color)
+		}
+	}
+	return style
 }
 
 // renderBody renders and caches everything a message contributes below its

@@ -104,6 +104,26 @@ func TestChatViewResolvesMarkup(t *testing.T) {
 	}
 }
 
+func TestChatViewHighlightsMentionWithOwnRoleColor(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertRole(1, store.Role{ID: 7, Position: 10, Color: 0x123456})
+	st.UpsertMember(1, store.Member{ID: 42, Name: "me", RoleIDs: []store.RoleID{7}})
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Content: "ping", PingsSelf: true})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMentionColor(func(guild store.GuildID) uint32 { return st.MemberColor(guild, 42) })
+	lines := view.render(40)
+	if len(lines) != 2 {
+		t.Fatalf("rendered lines = %d, want author and content", len(lines))
+	}
+	want := screen.RGB(0x12, 0x34, 0x56)
+	if got := lines[1].segments[0].style.Fg; got != want {
+		t.Fatalf("mention fg = %+v, want own role color %+v", got, want)
+	}
+}
+
 func TestChatViewRendersSmallMarkupWithSmallStyle(t *testing.T) {
 	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{
 		Cells: map[string]screen.Style{

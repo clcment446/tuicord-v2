@@ -478,9 +478,10 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 				a.store.RememberMemberIdentity(store.GuildID(e.GuildID), converted)
 			}
 		}
+		pingsSelf := a.messagePingsSelf(e.Message)
+		msg.PingsSelf = pingsSelf
 		// Reconcile an optimistic local echo when possible; otherwise append.
 		appended := !a.store.ReplaceMessage(msg.Nonce, msg)
-		pingsSelf := a.messagePingsSelf(e.Message)
 		if appended && a.store.HasMessage(msg.ChannelID, msg.ID) {
 			// The gateway can redeliver a MESSAGE_CREATE. It carries no nonce match,
 			// so it looks like a fresh append; appending would duplicate the message
@@ -488,7 +489,7 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 			appended = false
 		} else if appended {
 			a.store.AppendMessage(msg)
-			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID {
+			if msg.ChannelID != a.activeChannel && msg.AuthorID != a.selfID && a.tracksNotifications(msg.ChannelID, uint64(e.GuildID)) {
 				a.store.IncrementUnread(msg.ChannelID)
 				if pingsSelf {
 					a.store.IncrementPing(msg.ChannelID)
@@ -524,6 +525,9 @@ func (a *App) messagePingsSelf(message discord.Message) bool {
 	if message.GuildID == 0 || a.selfID == 0 {
 		return false
 	}
+	if _, ok := a.store.Guild(store.GuildID(message.GuildID)); !ok {
+		return false
+	}
 	self, ok := a.store.Member(store.GuildID(message.GuildID), a.selfID)
 	if !ok {
 		return false
@@ -536,6 +540,29 @@ func (a *App) messagePingsSelf(message discord.Message) bool {
 		}
 	}
 	return false
+}
+
+// tracksNotifications limits local unread state to guilds present in the
+// account's hydrated guild directory. DMs are tracked when their channel is
+// known; transient events for unknown guilds are ignored.
+func (a *App) tracksNotifications(channel store.ChannelID, guildID uint64) bool {
+	if c, ok := a.store.Channel(channel); ok && c.Kind == store.ChannelDM {
+		return true
+	}
+	if guildID == 0 {
+		return false
+	}
+	if _, ok := a.store.Guild(store.GuildID(guildID)); ok {
+		return true
+	}
+	if a.activeGuild == store.GuildID(guildID) {
+		return true
+	}
+	// A channel can be hydrated before its guild directory entry in startup
+	// tests and during READY ordering. Matching the channel's guild is enough
+	// to treat that already-known channel as in-scope.
+	c, ok := a.store.Channel(channel)
+	return ok && c.GuildID == store.GuildID(guildID)
 }
 
 // handleMessageUpdate patches an existing message in place. Discord unfurls link

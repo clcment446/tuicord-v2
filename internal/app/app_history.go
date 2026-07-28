@@ -89,6 +89,9 @@ func (a *App) loadHistoryFrom(channel store.ChannelID, limit uint, snapshot hist
 				a.store.RememberMemberIdentity(ch.GuildID, convertMember(discord.Member{User: message.Author}, guild))
 			}
 		}
+		for i := range converted {
+			converted[i].PingsSelf = a.messagePingsSelf(messages[len(messages)-1-i])
+		}
 		current := a.store.Messages(channel)
 		a.store.SetMessages(channel, mergeInitialHistory(a.store, channel, converted, current, snapshot.revision))
 		a.finishHistoryLoad(channel, true)
@@ -204,6 +207,9 @@ func (a *App) loadOlderHistoryFrom(channel store.ChannelID, before discord.Messa
 			for _, message := range messages {
 				a.store.RememberMemberIdentity(ch.GuildID, convertMember(discord.Member{User: message.Author}, guild))
 			}
+		}
+		for i := range converted {
+			converted[i].PingsSelf = a.messagePingsSelf(messages[len(messages)-1-i])
 		}
 		a.store.PrependMessagesSince(channel, converted, snapshot.revision)
 		a.finishOlderHistory(channel, len(messages) < int(limit))

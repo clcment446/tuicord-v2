@@ -902,6 +902,8 @@ func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
 	a := newTestApp(&fakeSender{})
 	a.selfID = 7
 	a.store.UpsertGuild(store.Guild{ID: 1, Name: "guild"})
+	a.store.UpsertRole(1, store.Role{ID: 99, Position: 10, Color: 0x123456})
+	a.store.UpsertMember(1, store.Member{ID: 7, Name: "self", RoleIDs: []store.RoleID{99}})
 	a.store.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
 	a.store.UpsertChannel(store.Channel{ID: 11, GuildID: DirectMessagesGuildID, Name: "alice", Kind: store.ChannelDM})
 
@@ -917,24 +919,55 @@ func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
 	if got := a.store.Pings(10); got != 1 {
 		t.Errorf("mention pings = %d, want 1", got)
 	}
+
+	// A role mention targeting one of the logged-in user's roles has the same
+	// notification and highlight semantics as a direct user mention.
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 4, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 8},
+		MentionRoleIDs: []discord.RoleID{99},
+	}})
+	if got := a.store.Pings(10); got != 2 {
+		t.Errorf("role mention pings = %d, want 2 total", got)
+	}
+	roleMessages := a.store.Messages(10)
+	if len(roleMessages) < 2 || !roleMessages[len(roleMessages)-1].PingsSelf {
+		t.Fatalf("role mention message = %+v, want PingsSelf=true", roleMessages)
+	}
 	if got := a.store.Pings(11); got != 1 {
 		t.Errorf("DM pings = %d, want 1", got)
 	}
-	if got := a.store.GuildPings(1); got != 1 {
-		t.Errorf("guild pings = %d, want 1", got)
+	if got := a.store.GuildPings(1); got != 2 {
+		t.Errorf("guild pings = %d, want 2", got)
 	}
 
 	// Gateway echoes without a nonce are still authored by us and must not
 	// create unread or ping state for an inactive channel.
-	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 4, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 7}, Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}}}})
-	if got := a.store.Pings(10); got != 1 {
-		t.Errorf("self message pings = %d, want 1", got)
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 5, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 7}, Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}}}})
+	if got := a.store.Pings(10); got != 2 {
+		t.Errorf("self message pings = %d, want 2", got)
 	}
 
 	// Selecting a channel clears both its ordinary unread and ping badge.
 	a.SetActive(1, 10)
 	if got := a.store.Pings(10); got != 0 {
 		t.Errorf("active channel pings = %d, want 0", got)
+	}
+}
+
+func TestMessageCreateIgnoresNotificationsFromUnknownGuild(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.selfID = 7
+
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 90, GuildID: 999, ChannelID: 90, Author: discord.User{ID: 8},
+		Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}},
+	}})
+
+	if got := a.store.Unread(90); got != 0 {
+		t.Fatalf("unknown-guild unread = %d, want 0", got)
+	}
+	if got := a.store.Pings(90); got != 0 {
+		t.Fatalf("unknown-guild pings = %d, want 0", got)
 	}
 }
 

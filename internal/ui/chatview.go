@@ -116,6 +116,7 @@ type ChatView struct {
 	roleGradientAnimations bool
 	roleGradientPhase      float64
 	roleGradientVisible    bool
+	mentionColor           func(store.GuildID) uint32
 
 	// bodyCache memoizes rendered message bodies. Without it every frame
 	// re-parses markup and re-lays out embeds and components for the whole
@@ -196,6 +197,16 @@ func (s Styles) BorderCharsOrDefault() widget.BorderChars {
 
 type StyleState struct {
 	Generation uint64
+}
+
+// SetMentionColor supplies the logged-in member's effective role color for
+// messages that ping them. A nil callback keeps the configured mention color.
+func (w *ChatView) SetMentionColor(fn func(store.GuildID) uint32) {
+	if w == nil {
+		return
+	}
+	w.mentionColor = fn
+	w.invalidateBodies()
 }
 
 // NewChatView returns a chat view over st. active reports which channel to show;

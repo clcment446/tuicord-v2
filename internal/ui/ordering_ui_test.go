@@ -65,6 +65,23 @@ func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
 	}
 }
 
+func TestSidebarUsesUnreadCountWhenChannelHasNoMentions(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	st.IncrementUnread(10)
+	st.IncrementUnread(10)
+
+	mv := &MainView{app: a, state: &uistate.State{}, guildList: widget.NewItemList(nil), channelList: widget.NewItemList(nil)}
+	mv.rebuildGuilds()
+	mv.refreshChannels()
+	if got := mv.channelList.Items()[0].Badge; got != "2" {
+		t.Fatalf("unread channel badge = %q, want 2", got)
+	}
+}
+
 func TestDirectMessagesServerIsFirst(t *testing.T) {
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 1, Name: "Alpha"})

@@ -222,11 +222,14 @@ type Message struct {
 	Flags         uint64
 	Pending       bool
 	Failed        bool
-	Attachments   []Attachment
-	Embeds        []Embed
-	Stickers      []Sticker
-	Reactions     []Reaction
-	Components    []Component
+	// PingsSelf marks a message whose structured Discord mentions target the
+	// logged-in account, allowing live and history messages to render alike.
+	PingsSelf   bool
+	Attachments []Attachment
+	Embeds      []Embed
+	Stickers    []Sticker
+	Reactions   []Reaction
+	Components  []Component
 	// ComponentTree preserves Discord's hierarchical Components V2 layout.
 	ComponentTree []ComponentNode
 	Pinned        bool

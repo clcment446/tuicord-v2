@@ -180,6 +180,9 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.accountList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.SetMentionColor(func(guild store.GuildID) uint32 {
+		return mv.app.Store().MemberColor(guild, mv.app.SelfID())
+	})
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
@@ -936,7 +939,7 @@ func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
 	}
 	badge := ""
 	if row.Navigable() {
-		badge = unreadBadge(mv.app.Store().Pings(row.ChannelID))
+		badge = channelUnreadBadge(mv.app.Store().Unread(row.ChannelID), mv.app.Store().Pings(row.ChannelID))
 	}
 	return widget.Item{Label: label, Badge: badge}
 }
@@ -1377,6 +1380,15 @@ func unreadBadge(n int) string {
 	default:
 		return strconv.Itoa(n)
 	}
+}
+
+// channelUnreadBadge gives mention counts precedence while retaining ordinary
+// new-message counts for channels without a ping.
+func channelUnreadBadge(unread, mentions int) string {
+	if mentions > 0 {
+		return unreadBadge(mentions)
+	}
+	return unreadBadge(unread)
 }
 
 func (mv *MainView) refreshMembers(guild store.GuildID) {
