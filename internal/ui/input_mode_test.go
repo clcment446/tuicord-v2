@@ -42,6 +42,40 @@ func TestShellInputModeIAndComposerSemicolonQ(t *testing.T) {
 	}
 }
 
+func TestAltModeCharacterInsertsConfiguredEscapePrefix(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keys.ModeEscape = "\\"
+	mv := &MainView{cfg: cfg, composer: widget.NewTextInput("Message")}
+	s := &Shell{mv: mv, cfg: cfg}
+
+	if !s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("Alt+% was not handled")
+	}
+	if got := mv.composer.Value(); got != `\%` {
+		t.Fatalf("composer value = %q, want escaped mode character", got)
+	}
+	if _, _, _, ok := completionToken(mv.composer.Value(), mv.composer.Cursor()); ok {
+		t.Fatal("escaped mode character opened autocomplete")
+	}
+}
+
+func TestAltModeCharacterDoesNothingWhenEscapeDisabled(t *testing.T) {
+	cfg := config.Default()
+	mv := &MainView{cfg: cfg, composer: widget.NewTextInput("Message")}
+	s := &Shell{mv: mv, cfg: cfg}
+	if s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("Alt+% was claimed while mode escaping was disabled")
+	}
+}
+
+func TestUnescapeModeCharacters(t *testing.T) {
+	got := unescapeModeCharacters(`literal \% \@ \\% and \x`, "\\")
+	want := `literal % @ \% and \x`
+	if got != want {
+		t.Fatalf("unescaped = %q, want %q", got, want)
+	}
+}
+
 func TestVimITransfersRuntimeFocusToNewlyEnabledComposer(t *testing.T) {
 	cfg := vimTestConfig()
 	st := store.New(0)

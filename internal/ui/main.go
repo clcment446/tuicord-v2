@@ -1543,6 +1543,7 @@ func (mv *MainView) onSend(content string) {
 		mv.composer.SetValue("")
 		return
 	}
+	content = unescapeModeCharacters(content, mv.cfg.Keys.ModeEscape)
 	if mv.forumActive {
 		if mv.onNewForumPost != nil {
 			mv.onNewForumPost(content)

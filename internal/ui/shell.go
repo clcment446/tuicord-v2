@@ -1134,6 +1134,13 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 	if s.overlay != nil {
 		return false
 	}
+	if key.Key == input.KeyRune && key.Mods&input.Alt != 0 && key.Mods&(input.Ctrl|input.Super) == 0 &&
+		strings.ContainsRune("/;:%#@&+", key.Rune) {
+		if escape, ok := modeEscapeRune(s.cfg.Keys.ModeEscape); ok && s.mv != nil && s.mv.composer != nil {
+			s.mv.InsertIntoComposer(string(escape) + string(key.Rune))
+			return true
+		}
+	}
 	// Configured focus claims are global on the main surface. Handling them here
 	// prevents a plain-rune binding from being inserted into the composer or
 	// consumed as a chat Vim motion. Overlay-local widgets still get first claim
@@ -1827,6 +1834,32 @@ func completionToken(value string, cursor int) (rune, int, string, bool) {
 		return 0, 0, "", false
 	}
 	return trigger, start, value[start+size : cursor], true
+}
+
+func modeEscapeRune(value string) (rune, bool) {
+	runes := []rune(value)
+	if len(runes) != 1 || unicode.IsSpace(runes[0]) {
+		return 0, false
+	}
+	return runes[0], true
+}
+
+func unescapeModeCharacters(value, escapeValue string) string {
+	escape, ok := modeEscapeRune(escapeValue)
+	if !ok || value == "" {
+		return value
+	}
+	runes := []rune(value)
+	var out strings.Builder
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == escape && i+1 < len(runes) && strings.ContainsRune("/;:%#@&+", runes[i+1]) {
+			i++
+			out.WriteRune(runes[i])
+			continue
+		}
+		out.WriteRune(runes[i])
+	}
+	return out.String()
 }
 
 func (s *Shell) openMessageMenu(msg store.Message, x, y int) {

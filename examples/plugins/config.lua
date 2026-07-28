@@ -21,6 +21,7 @@ tuicord.configure({
     next_panel = "tab",
     focus_composer = "esc",
     picker = "ctrl+e",
+    mode_escape = "",
     paste_image = "ctrl+v",
     video_pause = "space",
     video_seek_backward = "left",
