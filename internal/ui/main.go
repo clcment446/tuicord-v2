@@ -1387,21 +1387,76 @@ func (mv *MainView) refreshMembers(guild store.GuildID) {
 	if channel, ok := st.Channel(mv.app.ActiveChannel()); ok && channel.Kind == store.ChannelDM {
 		members = append([]store.Member(nil), channel.Recipients...)
 	} else {
-		// Store.Members is map-backed. Sort the sidebar rows so a refresh does
-		// not reshuffle guild members that do not belong to any role.
-		sort.Slice(members, func(i, j int) bool {
-			left, right := strings.ToLower(members[i].Name), strings.ToLower(members[j].Name)
-			if left != right {
-				return left < right
-			}
-			return members[i].ID < members[j].ID
-		})
+		mv.memberList.SetItems(memberSidebarItems(members, st.Roles(guild), mv.styles))
+		return
 	}
 	items := make([]widget.Item, 0, len(members))
 	for _, m := range members {
 		items = append(items, widget.Item{Label: m.Name})
 	}
 	mv.memberList.SetItems(items)
+}
+
+// memberSidebarItems groups guild members by their highest hoisted role. Roles
+// are supplied in display order (highest position first) by Store.Roles.
+func memberSidebarItems(members []store.Member, roles []store.Role, styles Styles) []widget.Item {
+	byRole := make(map[store.RoleID][]store.Member, len(roles))
+	ungrouped := make([]store.Member, 0, len(members))
+	for _, member := range members {
+		roleID, ok := highestHoistedRole(member, roles)
+		if !ok {
+			ungrouped = append(ungrouped, member)
+			continue
+		}
+		byRole[roleID] = append(byRole[roleID], member)
+	}
+
+	headerStyle := styles.Cell("muted")
+	headerStyle.Attrs |= screen.Bold
+	items := make([]widget.Item, 0, len(members)+len(roles)+1)
+	for _, role := range roles {
+		group := byRole[role.ID]
+		if !role.Hoist || len(group) == 0 {
+			continue
+		}
+		items = append(items, widget.Item{Label: role.Name, Style: headerStyle})
+		items = appendMemberItems(items, group)
+	}
+	if len(ungrouped) > 0 {
+		if len(items) > 0 {
+			items = append(items, widget.Item{Label: "Members", Style: headerStyle})
+		}
+		items = appendMemberItems(items, ungrouped)
+	}
+	return items
+}
+
+func highestHoistedRole(member store.Member, roles []store.Role) (store.RoleID, bool) {
+	for _, role := range roles {
+		if !role.Hoist {
+			continue
+		}
+		for _, memberRoleID := range member.RoleIDs {
+			if memberRoleID == role.ID {
+				return role.ID, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func appendMemberItems(items []widget.Item, members []store.Member) []widget.Item {
+	sort.Slice(members, func(i, j int) bool {
+		left, right := strings.ToLower(members[i].Name), strings.ToLower(members[j].Name)
+		if left != right {
+			return left < right
+		}
+		return members[i].ID < members[j].ID
+	})
+	for _, member := range members {
+		items = append(items, widget.Item{Label: member.Name})
+	}
+	return items
 }
 
 // resolver builds a markup resolver bound to the active guild, so mentions and

@@ -791,6 +791,10 @@ func drawFocusedChatLine(r screen.Region, x, y int, line chatLine, focusStart, f
 		}
 	}
 	if fillFocus {
+		// The fill covers only blank cells after the rendered text. Retain the
+		// semantic foreground/background (notably markdown heading colors), but
+		// never extend inline text decorations across the remaining row.
+		focusBase.Attrs &^= screen.Bold | screen.Dim | screen.Italic | screen.Underline | screen.Strike
 		style := Styles{}.focusedStyle(focusBase)
 		if focus.Fg.Set() || focus.Bg.Set() {
 			style = mergeStyle(style, focus)

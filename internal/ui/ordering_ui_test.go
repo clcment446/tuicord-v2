@@ -159,6 +159,34 @@ func TestRefreshMembersKeepsMembersWithoutRolesAlphabetical(t *testing.T) {
 	}
 }
 
+func TestRefreshMembersGroupsMembersByHighestHoistedRole(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertRole(1, store.Role{ID: 10, Name: "Moderators", Position: 20, Hoist: true})
+	st.UpsertRole(1, store.Role{ID: 20, Name: "Contributors", Position: 10, Hoist: true})
+	st.UpsertRole(1, store.Role{ID: 30, Name: "Unhoisted", Position: 30})
+	st.UpsertMember(1, store.Member{ID: 1, Name: "zoe", RoleIDs: []store.RoleID{10}})
+	st.UpsertMember(1, store.Member{ID: 2, Name: "Alice", RoleIDs: []store.RoleID{20, 30}})
+	st.UpsertMember(1, store.Member{ID: 3, Name: "mike", RoleIDs: []store.RoleID{20}})
+	st.UpsertMember(1, store.Member{ID: 4, Name: "bob", RoleIDs: []store.RoleID{30}})
+	st.UpsertMember(1, store.Member{ID: 5, Name: "Aaron", RoleIDs: []store.RoleID{20, 10}})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	mv := &MainView{app: a, memberList: widget.NewItemList(nil)}
+
+	mv.refreshMembers(1)
+
+	items := mv.memberList.Items()
+	got := make([]string, len(items))
+	for i, item := range items {
+		got[i] = item.Label
+	}
+	want := []string{"Moderators", "Aaron", "zoe", "Contributors", "Alice", "mike", "Members", "bob"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("member rows = %v, want %v", got, want)
+	}
+}
+
 func TestOpenChannelMenuLabels(t *testing.T) {
 	st := &uistate.State{}
 	st.TogglePinnedChannel(5)

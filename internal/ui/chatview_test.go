@@ -1312,6 +1312,27 @@ func TestChatViewWholeBlockHighlightSkipsEmptyRows(t *testing.T) {
 	}
 }
 
+func TestFocusedStrikethroughDoesNotDecorateLinePadding(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "~~gone~~"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	view.SetHighlightFocusBlock(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if buf.Cell(0, 1).Style.Attrs&screen.Strike == 0 {
+		t.Fatal("strikethrough message text lost its decoration")
+	}
+	padding := buf.Cell(20, 1).Style
+	if padding.Attrs&screen.Strike != 0 {
+		t.Fatal("focused line padding inherited strikethrough from message text")
+	}
+	if padding.Attrs&screen.Reverse == 0 {
+		t.Fatal("focused line padding lost its focus highlight")
+	}
+}
+
 func TestFocusedHeaderUsesHeaderColorAcrossWholeLine(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "# heading"})
