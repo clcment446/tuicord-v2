@@ -418,6 +418,21 @@ func TestComposerOwnedPickerRestoresInputIndependentOverlayDoesNot(t *testing.T)
 		}
 	})
 
+	t.Run("inline picker traps Tab", func(t *testing.T) {
+		runtime, shell, mv, other := newVimFocusHarness(t, vimTestConfig())
+		enterVimInput(t, runtime, shell)
+		picker := NewInlinePicker(store.New(0), Styles{}, 0, 0, false, false, '@', "missing", func(string) {}, nil, shell.closeOverlay)
+		shell.setComposerOverlay(picker)
+		runtime.Render(shell, tui.Size{W: 40, H: 9})
+
+		if !runtime.Handle(input.KeyEvent{Key: input.KeyTab}) {
+			t.Fatal("picker Tab was not handled")
+		}
+		if runtime.Focus.Focused() != picker || runtime.Focus.Focused() == other || shell.editor.phase != editorOverlaySuspended || mv.composer.CanFocus() {
+			t.Fatalf("Tab escaped picker: focus=%T phase=%v composer-focusable=%v", runtime.Focus.Focused(), shell.editor.phase, mv.composer.CanFocus())
+		}
+	})
+
 	t.Run("independent overlay", func(t *testing.T) {
 		runtime, shell, mv, _ := newVimFocusHarness(t, vimTestConfig())
 		enterVimInput(t, runtime, shell)

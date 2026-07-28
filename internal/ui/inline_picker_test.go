@@ -181,6 +181,44 @@ func TestInlinePickerMentionUsesActiveDMRecipients(t *testing.T) {
 	}
 }
 
+func TestInlinePickerTabAcceptsMentionAndNeverEscapesOnNoMatch(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "guild"})
+	st.UpsertMember(1, store.Member{ID: 20, Name: "Ada Lovelace"})
+
+	var inserted string
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, '@', "adl",
+		func(s string) { inserted = s }, nil, func() {})
+	if !p.Handle(input.KeyEvent{Key: input.KeyTab}) {
+		t.Fatal("Tab was not claimed by mention picker")
+	}
+	if inserted != "<@20>" {
+		t.Fatalf("Tab inserted = %q, want member mention", inserted)
+	}
+
+	empty := NewInlinePicker(st, Styles{}, 1, 0, false, true, '@', "missing",
+		func(string) { t.Fatal("no-match Tab inserted a value") }, nil, func() {})
+	if !empty.Handle(input.KeyEvent{Key: input.KeyTab}) {
+		t.Fatal("no-match Tab was not claimed")
+	}
+}
+
+func TestInlinePickerShiftTabMovesToPreviousResult(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "guild"})
+	st.UpsertMember(1, store.Member{ID: 20, Name: "Ada"})
+	st.UpsertMember(1, store.Member{ID: 21, Name: "Alan"})
+	p := NewInlinePicker(st, Styles{}, 1, 0, false, true, '@', "a", func(string) {}, nil, func() {})
+	p.list.SetSelectedSilent(1)
+
+	if !p.Handle(input.KeyEvent{Key: input.KeyTab, Mods: input.Shift}) {
+		t.Fatal("Shift+Tab was not claimed")
+	}
+	if got := p.list.Selected(); got != 0 {
+		t.Fatalf("Shift+Tab selected %d, want 0", got)
+	}
+}
+
 func TestMemberForContextResolvesSentDMValue(t *testing.T) {
 	const dmGuild = ^store.GuildID(0)
 	st := store.New(0)
