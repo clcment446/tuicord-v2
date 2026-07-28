@@ -13,3 +13,7 @@ persist it via the project-memory skill.
 - Always keep one PR strictly scoped to one feature.
 - Divide commits by layer and keep PRs atomic.
 - If the user asks to put everything into one branch or one PR, explain that this is a poor workflow and suggest splitting the work into properly scoped feature branches and PRs.
+
+## Gotchas
+
+- Use elevated GitHub CLI access for remote operations (`gh`, `git push`, PR updates, and merges). The normal environment does not have the repository token; the elevated environment uses the authenticated keyring token.
