@@ -148,6 +148,13 @@ func (w *ChatView) SetVimKeys(keys config.VimKeys) {
 	}
 }
 
+// SetCursorFollowsScroll keeps message focus synchronized with PageUp/PageDown.
+func (w *ChatView) SetCursorFollowsScroll(enabled bool) {
+	if w != nil {
+		w.cursorFollowsScroll = enabled
+	}
+}
+
 // SetMouseBreakpointTracking opts pointer motion into changing the keyboard
 // stopping point. Click activation remains available regardless of this flag.
 func (w *ChatView) SetMouseBreakpointTracking(enabled bool) {

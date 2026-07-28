@@ -351,6 +351,7 @@ func (w *ChatView) moveComponent(delta int) bool {
 func (w *ChatView) pageUp() {
 	w.vimStickOldest = false
 	w.bottomScroll.SetOffset(w.bottomScroll.Offset() + max(w.viewportHeight, 1))
+	w.followScrollCursor(true)
 	if w.onReachTop != nil {
 		w.onReachTop()
 	}
@@ -359,6 +360,36 @@ func (w *ChatView) pageUp() {
 func (w *ChatView) pageDown() {
 	w.vimStickOldest = false
 	w.bottomScroll.SetOffset(max(w.bottomScroll.Offset()-max(w.viewportHeight, 1), 0))
+	w.followScrollCursor(false)
+}
+
+// followScrollCursor moves focus to the message at the newly exposed viewport
+// edge. It is opt-in because page scrolling historically did not alter focus.
+func (w *ChatView) followScrollCursor(up bool) {
+	if !w.cursorFollowsScroll || len(w.focusStops) == 0 {
+		return
+	}
+	start := max(w.renderLineCount-w.viewportHeight-w.bottomScroll.Offset(), 0)
+	end := min(start+max(w.viewportHeight, 1), w.renderLineCount)
+	index := -1
+	if up {
+		for i, stop := range w.focusStops {
+			if stop.line >= start {
+				index = i
+				break
+			}
+		}
+	} else {
+		for i := len(w.focusStops) - 1; i >= 0; i-- {
+			if w.focusStops[i].line < end {
+				index = i
+				break
+			}
+		}
+	}
+	if index >= 0 {
+		w.setFocusStop(index)
+	}
 }
 
 func (w *ChatView) scrollDown() {

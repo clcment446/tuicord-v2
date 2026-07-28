@@ -275,6 +275,9 @@ type Accessibility struct {
 	VimNavigation           bool `toml:"vim_navigation"`
 	MouseBreakpointTracking bool `toml:"mouse_breakpoint_tracking"`
 	HighlightFocusBlock     bool `toml:"highlight_focus_block"`
+	// CursorFollowsScroll moves message focus to the newly visible edge after
+	// PageUp/PageDown, keeping the keyboard cursor synchronized with the viewport.
+	CursorFollowsScroll bool `toml:"cursor_follows_scroll"`
 }
 
 // SlashCommands controls experimental user-client application-command support.
@@ -798,6 +801,7 @@ focus_splits = false
 vim_navigation = false
 mouse_breakpoint_tracking = false
 highlight_focus_block = false
+cursor_follows_scroll = false
 
 [nitro]
 fake = true

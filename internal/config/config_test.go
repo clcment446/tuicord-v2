@@ -62,6 +62,21 @@ func TestLoadVimKeyOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadCursorFollowsScroll(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("[accessibility]\ncursor_follows_scroll = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := loadFrom(path)
+	if err != nil {
+		t.Fatalf("loadFrom: %v", err)
+	}
+	if !cfg.Accessibility.CursorFollowsScroll {
+		t.Fatal("cursor_follows_scroll = false, want true")
+	}
+}
+
 func TestLoadVimKeyEmptiesDisableIndividualAndAllActions(t *testing.T) {
 	t.Run("individual", func(t *testing.T) {
 		path := filepath.Join(t.TempDir(), "config.toml")

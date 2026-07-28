@@ -839,6 +839,38 @@ func TestChatViewPageKeysScrollByViewport(t *testing.T) {
 	}
 }
 
+func TestChatViewPageKeysCanMoveCursorWithViewport(t *testing.T) {
+	st := store.New(0)
+	for id := store.MessageID(1); id <= 10; id++ {
+		st.AppendMessage(store.Message{ID: id, ChannelID: 1, Author: "alice", Content: "line"})
+	}
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	view.SetCursorFollowsScroll(true)
+	buf := screen.NewBuffer(20, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyPageUp}) {
+		t.Fatal("PageUp was not handled")
+	}
+	if got := view.bottomScroll.Offset(); got != 4 {
+		t.Fatalf("PageUp offset = %d, want 4", got)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 3 {
+		t.Fatalf("PageUp focused message = %d, want 3", view.focusedMessage.ID)
+	}
+
+	if !view.Handle(input.KeyEvent{Key: input.KeyPageDown}) {
+		t.Fatal("PageDown was not handled")
+	}
+	if got := view.bottomScroll.Offset(); got != 0 {
+		t.Fatalf("PageDown offset = %d, want 0", got)
+	}
+	if !view.focusedMessageSet || view.focusedMessage.ID != 10 {
+		t.Fatalf("PageDown focused message = %d, want 10", view.focusedMessage.ID)
+	}
+}
+
 func TestChatViewVimGGAndGJumpToTranscriptBounds(t *testing.T) {
 	st := store.New(0)
 	for i := 0; i < 10; i++ {

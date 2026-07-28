@@ -45,6 +45,7 @@ type ChatView struct {
 	vimKeys                 config.VimKeys
 	vimPendingG             bool
 	vimStickOldest          bool
+	cursorFollowsScroll     bool
 	mouseBreakpointTracking bool
 	highlightFocusBlock     bool
 	focusKey                string
