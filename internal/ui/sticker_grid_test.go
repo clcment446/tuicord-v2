@@ -24,6 +24,10 @@ func TestStickerGridNavigatesThreeByThree(t *testing.T) {
 	if got := grid.Selected(); got != 9 {
 		t.Fatalf("page-down selected = %d, want 9", got)
 	}
+	start, end := grid.VisibleRange()
+	if start != 9 || end != 12 {
+		t.Fatalf("visible range = %d..%d, want 9..12", start, end)
+	}
 }
 
 func TestStickerGridRendersConfiguredBordersAndNineItems(t *testing.T) {

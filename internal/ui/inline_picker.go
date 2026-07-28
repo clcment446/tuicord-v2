@@ -30,12 +30,13 @@ type InlinePicker struct {
 	entries  []searchEntry
 	filtered []pickerEntry
 
-	list   *widget.ItemList
-	grid   *StickerGrid
-	header *widget.Text
-	hint   *widget.Text
-	body   *widget.Node
-	node   layout.Node
+	list          *widget.ItemList
+	grid          *StickerGrid
+	header        *widget.Text
+	hint          *widget.Text
+	matchesBorder *widget.Border
+	body          *widget.Node
+	node          layout.Node
 
 	onInsert         func(string)
 	onSticker        func(uint64)
@@ -85,7 +86,8 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 		matches = p.grid
 	}
 	p.entries = inlineEntries(st, active, activeChannel, nitro, fakeNitro, trigger)
-	p.body = widget.Column(titled(styles, title, p.header), titled(styles, "Matches", matches), p.hint)
+	p.matchesBorder = titled(styles, "Matches", matches)
+	p.body = widget.Column(titled(styles, title, p.header), p.matchesBorder, p.hint)
 	p.body.Children()[0].Layout().Basis = 3
 	p.body.Children()[0].Layout().Grow = 0
 	p.body.Children()[1].Layout().Grow = 1
@@ -103,8 +105,7 @@ func (p *InlinePicker) SetStickerGridBorderStyle(name string) {
 	selected := p.grid.Selected()
 	p.grid = NewStickerGrid(p.grid.items, p.styles, name)
 	p.grid.SetSelectedSilent(selected)
-	p.body.Children()[1] = titled(p.styles, "Matches", p.grid)
-	p.body.Children()[1].Layout().Grow = 1
+	p.matchesBorder.SetChild(p.grid)
 }
 
 // useReactionEntries replaces composer-oriented emoji inserts with values the
@@ -223,10 +224,15 @@ func (p *InlinePicker) refilter() {
 	}
 	items := make([]widget.Item, 0, len(matches))
 	thumbnailLoads := 0
-	for _, match := range matches {
+	visibleStart, visibleEnd := 0, len(matches)
+	if p.trigger == '%' {
+		visibleStart = max(0, selected/stickerGridPage*stickerGridPage)
+		visibleEnd = min(visibleStart+stickerGridPage, len(matches))
+	}
+	for index, match := range matches {
 		p.filtered = append(p.filtered, match.entry)
 		item := widget.Item{Label: match.entry.label}
-		if match.entry.mediaURL != "" && thumbnailLoads < maxPickerThumbnailLoad {
+		if match.entry.mediaURL != "" && index >= visibleStart && index < visibleEnd && thumbnailLoads < maxPickerThumbnailLoad {
 			thumbnailLoads++
 			img := p.emojiImage(match.entry.mediaURL)
 			if img != nil {
@@ -420,12 +426,24 @@ func (p *InlinePicker) Handle(ev tui.Event) bool {
 		return true
 	case input.KeyUp, input.KeyDown, input.KeyHome, input.KeyEnd, input.KeyPageUp, input.KeyPageDown:
 		if p.trigger == '%' {
-			return p.grid.Handle(ev)
+			before, _ := p.grid.VisibleRange()
+			handled := p.grid.Handle(ev)
+			after, _ := p.grid.VisibleRange()
+			if handled && before != after {
+				p.refilter()
+			}
+			return handled
 		}
 		return p.list.Handle(ev)
 	case input.KeyLeft, input.KeyRight:
 		if p.trigger == '%' {
-			return p.grid.Handle(ev)
+			before, _ := p.grid.VisibleRange()
+			handled := p.grid.Handle(ev)
+			after, _ := p.grid.VisibleRange()
+			if handled && before != after {
+				p.refilter()
+			}
+			return handled
 		}
 	case input.KeyBackspace:
 		if p.query == "" {

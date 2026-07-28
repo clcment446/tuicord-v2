@@ -59,6 +59,15 @@ func (g *StickerGrid) Selected() int {
 	return g.selected
 }
 
+// VisibleRange returns the current page as a half-open item interval.
+func (g *StickerGrid) VisibleRange() (int, int) {
+	if g == nil || len(g.items) == 0 {
+		return 0, 0
+	}
+	start := (g.selected / stickerGridPage) * stickerGridPage
+	return start, min(start+stickerGridPage, len(g.items))
+}
+
 func (g *StickerGrid) SetSelectedSilent(index int) {
 	if g == nil || len(g.items) == 0 {
 		return
