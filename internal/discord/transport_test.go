@@ -6,8 +6,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"awesomeProject/internal/telemetry"
 )
 
 func TestTransportAddsCoherentBrowserClientInfo(t *testing.T) {
@@ -56,6 +60,65 @@ func TestTransportAddsCoherentBrowserClientInfo(t *testing.T) {
 	}
 	if got := props["browser"]; got != clientBrowser {
 		t.Errorf("super-properties browser = %v, want %q", got, clientBrowser)
+	}
+}
+
+func TestTransportRecordsRedactedRequestResponseAndPermissions(t *testing.T) {
+	recorder, err := telemetry.New(filepath.Join(t.TempDir(), "telemetry"), "secret-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder.SetPermissionResolver(func(ids []uint64) []telemetry.PermissionSnapshot {
+		return []telemetry.PermissionSnapshot{{ChannelID: ids[0], Known: true, CanRead: true}}
+	})
+	transport := newTransportWithTelemetry(recorder)
+	transport.base = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{"X-Debug": {"visible"}, "Set-Cookie": {"secret"}}, Body: io.NopCloser(strings.NewReader(`{"error":"denied"}`)), Request: req}, nil
+	})
+	req, err := http.NewRequest(http.MethodPost, "https://discord.com/api/v9/channels/123/messages", strings.NewReader(`{"token":"secret-token","content":"hello"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "secret-token")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp.Body.Close()
+	if string(body) != `{"error":"denied"}` {
+		t.Fatalf("response body was not preserved: %s", body)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(recorder.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "secret-token") || strings.Contains(string(data), "Set-Cookie") && strings.Contains(string(data), "secret") {
+		t.Fatalf("telemetry leaked secret: %s", data)
+	}
+	var event telemetry.Event
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	for _, line := range lines {
+		var candidate telemetry.Event
+		if err := json.Unmarshal([]byte(line), &candidate); err != nil {
+			t.Fatal(err)
+		}
+		if candidate.Kind == "rest_request" {
+			event = candidate
+			break
+		}
+	}
+	if event.Endpoint != "/api/v9/channels/:id/messages" || event.Status != http.StatusForbidden || len(event.Permissions) != 1 || event.Permissions[0].ChannelID != 123 {
+		t.Fatalf("event = %+v", event)
+	}
+	if event.ResponseHeaders["X-Debug"] != "visible" || event.ResponseHeaders["Set-Cookie"] != "<redacted>" {
+		t.Fatalf("response headers = %#v", event.ResponseHeaders)
 	}
 }
 

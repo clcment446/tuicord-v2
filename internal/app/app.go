@@ -4,6 +4,7 @@ package app
 import (
 	clientdiscord "awesomeProject/internal/discord"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/telemetry"
 	"awesomeProject/internal/tui/tui"
 	"context"
 	"encoding/json"
@@ -367,6 +368,13 @@ const (
 // session (ningen does not change the REST surface), while gateway handler
 // registration and Connect go through ningen so its caches stay authoritative.
 func New(n *ningen.State, st *store.Store, ui *tui.App) *App {
+	return NewWithTelemetry(n, st, ui, nil)
+}
+
+// NewWithTelemetry wires the optional local diagnostics recorder to the app's
+// permission store so channel-related REST events include known permission
+// state without coupling the Discord transport to the store package.
+func NewWithTelemetry(n *ningen.State, st *store.Store, ui *tui.App, recorder *telemetry.Recorder) *App {
 	if st == nil {
 		st = store.New(0)
 	}
@@ -393,6 +401,25 @@ func New(n *ningen.State, st *store.Store, ui *tui.App) *App {
 		handle:              n,
 		commandCache:        make(map[CommandContext]commandCacheEntry),
 		now:                 time.Now,
+	}
+	if recorder != nil {
+		recorder.SetPermissionResolver(func(ids []uint64) []telemetry.PermissionSnapshot {
+			out := make([]telemetry.PermissionSnapshot, 0, len(ids))
+			for _, id := range ids {
+				ch, ok := a.store.Channel(store.ChannelID(id))
+				snapshot := telemetry.PermissionSnapshot{ChannelID: id, Known: ok}
+				if ok {
+					snapshot.GuildID = uint64(ch.GuildID)
+					perms := a.store.ChannelPermissions(ch.GuildID, a.selfID, ch.ID)
+					snapshot.Permissions = uint64(perms)
+					snapshot.CanRead = perms.Has(store.PermViewChannel)
+					snapshot.CanSend = perms.Has(store.PermSendMessages)
+					snapshot.CanManage = perms.Has(store.PermManageMessages) || perms.Has(store.PermManageChannels)
+				}
+				out = append(out, snapshot)
+			}
+			return out
+		})
 	}
 	return a
 }

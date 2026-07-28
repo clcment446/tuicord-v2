@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 
+	"awesomeProject/internal/telemetry"
 	"github.com/diamondburned/arikawa/v3/api"
 	"github.com/diamondburned/arikawa/v3/discord"
 	"github.com/diamondburned/arikawa/v3/gateway"
@@ -15,6 +16,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/utils/handler"
 	"github.com/diamondburned/arikawa/v3/utils/httputil"
 	"github.com/diamondburned/arikawa/v3/utils/httputil/httpdriver"
+	"github.com/diamondburned/arikawa/v3/utils/ws"
 	"github.com/diamondburned/ningen/v3"
 	"github.com/google/uuid"
 )
@@ -41,7 +43,17 @@ var errNoBuildNumber = errors.New("discord: build number not found in app page")
 
 // NewSession creates an arikawa Session configured like the old tuicord client.
 func NewSession(token string) (*session.Session, error) {
-	apiCl := newAPIClient(token)
+	return newSession(token, nil)
+}
+
+// NewSessionWithTelemetry creates a session whose REST and gateway lifecycle
+// diagnostics are recorded by recorder. The recorder remains local-only.
+func NewSessionWithTelemetry(token string, recorder *telemetry.Recorder) (*session.Session, error) {
+	return newSession(token, recorder)
+}
+
+func newSession(token string, recorder *telemetry.Recorder) (*session.Session, error) {
+	apiCl := newAPIClient(token, recorder)
 
 	cmd := gateway.DefaultIdentifyCommand(token)
 	cmd.Properties = identifyProperties()
@@ -62,6 +74,11 @@ func NewSession(token string) (*session.Session, error) {
 	// NewWithGateway creates a default REST client; retain the browser-shaped
 	// client used for the rest of tuicord's authenticated requests.
 	sess.Client = apiCl
+	if recorder != nil {
+		sess.AddHandler(func(ev *ws.CloseEvent) {
+			recorder.Record(telemetry.Event{Kind: "gateway_close", Status: ev.Code, Error: ev.Error()})
+		})
+	}
 	return sess, nil
 }
 
@@ -72,7 +89,12 @@ func NewSession(token string) (*session.Session, error) {
 // browser-shaped REST client from NewSession are all preserved — that identity
 // is load-bearing for the user-token (self-bot) model.
 func NewNingen(token string) (*ningen.State, error) {
-	sess, err := NewSession(token)
+	return NewNingenWithTelemetry(token, nil)
+}
+
+// NewNingenWithTelemetry is NewNingen with local diagnostics attached.
+func NewNingenWithTelemetry(token string, recorder *telemetry.Recorder) (*ningen.State, error) {
+	sess, err := newSession(token, recorder)
 	if err != nil {
 		return nil, err
 	}
@@ -96,12 +118,12 @@ func WrapSession(sess *session.Session) *ningen.State {
 // ticket exchange used by QR login; without them it tends to respond with a
 // captcha challenge.
 func NewUnauthenticatedClient() *api.Client {
-	return newAPIClient("")
+	return newAPIClient("", nil)
 }
 
-func newAPIClient(token string) *api.Client {
+func newAPIClient(token string, recorder *telemetry.Recorder) *api.Client {
 	httpCl := httputil.NewClient()
-	httpCl.Client = httpdriver.WrapClient(http.Client{Transport: newTransport()})
+	httpCl.Client = httpdriver.WrapClient(http.Client{Transport: newTransportWithTelemetry(recorder)})
 
 	apiCl := api.NewCustomClient(token, httpCl)
 	apiCl.UserAgent = clientBrowserUA
