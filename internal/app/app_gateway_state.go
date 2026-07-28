@@ -511,9 +511,6 @@ func (a *App) handleMessageCreate(e *gateway.MessageCreateEvent) {
 // counted, so local echoes cannot produce false sidebar notifications.
 func (a *App) messagePingsSelf(message discord.Message) bool {
 	channel, knownChannel := a.store.Channel(store.ChannelID(message.ChannelID))
-	if knownChannel && channel.Kind == store.ChannelDM {
-		return true
-	}
 	if message.MentionEveryone {
 		return true
 	}
@@ -521,6 +518,11 @@ func (a *App) messagePingsSelf(message discord.Message) bool {
 		if store.UserID(mentioned.ID) == a.selfID && a.selfID != 0 {
 			return true
 		}
+	}
+	if knownChannel && channel.Kind == store.ChannelDM {
+		// Direct messages are inherently addressed to the account, but a group
+		// DM only pings when Discord's structured mention fields say so.
+		return len(channel.RecipientIDs) <= 1
 	}
 	if message.GuildID == 0 || a.selfID == 0 {
 		return false
@@ -612,7 +614,13 @@ func (a *App) handleMessageUpdate(e *gateway.MessageUpdateEvent) {
 			// unfurls, edits) re-deliver it; keep whichever side has it so a
 			// partial payload never wipes an existing reply or forward.
 			if patch.Reply != nil {
-				m.Reply = patch.Reply
+				// Sparse MESSAGE_UPDATE payloads can retain the reply reference
+				// while omitting referenced_message. convertMessage represents that
+				// omission as Deleted, but it must not discard a valid preview
+				// already captured from MESSAGE_CREATE.
+				if !patch.Reply.Deleted || m.Reply == nil || m.Reply.Deleted || m.Reply.Unavailable {
+					m.Reply = patch.Reply
+				}
 			}
 			if len(patch.Forwards) > 0 {
 				m.Forwards = patch.Forwards

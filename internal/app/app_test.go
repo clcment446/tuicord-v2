@@ -906,6 +906,10 @@ func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
 	a.store.UpsertMember(1, store.Member{ID: 7, Name: "self", RoleIDs: []store.RoleID{99}})
 	a.store.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
 	a.store.UpsertChannel(store.Channel{ID: 11, GuildID: DirectMessagesGuildID, Name: "alice", Kind: store.ChannelDM})
+	a.store.UpsertChannel(store.Channel{
+		ID: 12, GuildID: DirectMessagesGuildID, Name: "group", Kind: store.ChannelDM,
+		RecipientIDs: []store.UserID{8, 9, 10},
+	})
 
 	// Ordinary unread messages do not get priority.
 	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{ID: 1, GuildID: 1, ChannelID: 10, Author: discord.User{ID: 8}, Content: "hello"}})
@@ -935,6 +939,21 @@ func TestMessageCreateTracksOnlyPingsForPriority(t *testing.T) {
 	}
 	if got := a.store.Pings(11); got != 1 {
 		t.Errorf("DM pings = %d, want 1", got)
+	}
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 6, ChannelID: 12, Author: discord.User{ID: 8}, Content: "group DM ordinary message",
+	}})
+	groupMessages := a.store.Messages(12)
+	if len(groupMessages) != 1 || groupMessages[0].PingsSelf {
+		t.Fatalf("ordinary group DM message = %+v, want PingsSelf=false", groupMessages)
+	}
+	a.handleMessageCreate(&gateway.MessageCreateEvent{Message: discord.Message{
+		ID: 7, ChannelID: 12, Author: discord.User{ID: 9},
+		Mentions: []discord.GuildUser{{User: discord.User{ID: 7}}},
+	}})
+	groupMessages = a.store.Messages(12)
+	if len(groupMessages) != 2 || !groupMessages[1].PingsSelf {
+		t.Fatalf("explicit group DM mention = %+v, want PingsSelf=true", groupMessages)
 	}
 	if got := a.store.GuildPings(1); got != 2 {
 		t.Errorf("guild pings = %d, want 2", got)

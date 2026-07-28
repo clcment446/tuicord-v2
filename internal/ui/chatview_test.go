@@ -124,6 +124,43 @@ func TestChatViewHighlightsMentionWithOwnRoleColor(t *testing.T) {
 	}
 }
 
+func TestChatViewMentionHighlightDoesNotBleedAcrossGroupedAuthorMessages(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID:        1,
+		ChannelID: 1,
+		AuthorID:  7,
+		Author:    "alice",
+		Content:   "ordinary message",
+	})
+	st.AppendMessage(store.Message{
+		ID:        2,
+		ChannelID: 1,
+		AuthorID:  7,
+		Author:    "alice",
+		Content:   "message with a mention",
+		PingsSelf: true,
+	})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	want := screen.RGB(0x12, 0x34, 0x56)
+	view.SetMentionColor(func(store.GuildID) uint32 { return 0x123456 })
+
+	lines := view.render(40)
+	if len(lines) != 3 {
+		t.Fatalf("rendered lines = %d, want grouped author plus two message lines", len(lines))
+	}
+	if lines[1].msg != 1 || lines[2].msg != 2 {
+		t.Fatalf("message ownership = %d,%d, want 1,2", lines[1].msg, lines[2].msg)
+	}
+	if got := lines[1].segments[0].style.Fg; got == want {
+		t.Fatalf("ordinary message inherited mention color %+v", got)
+	}
+	if got := lines[2].segments[0].style.Fg; got != want {
+		t.Fatalf("mentioned message fg = %+v, want %v", got, want)
+	}
+}
+
 func TestChatViewRendersSmallMarkupWithSmallStyle(t *testing.T) {
 	view := NewChatView(store.New(0), func() store.ChannelID { return 1 }, nil, Styles{
 		Cells: map[string]screen.Style{

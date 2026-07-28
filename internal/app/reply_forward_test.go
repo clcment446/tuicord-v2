@@ -7,6 +7,7 @@ import (
 	"awesomeProject/internal/store"
 
 	"github.com/diamondburned/arikawa/v3/discord"
+	"github.com/diamondburned/arikawa/v3/gateway"
 )
 
 func TestConvertMessageMapsReply(t *testing.T) {
@@ -127,5 +128,30 @@ func TestMessageUpdateKeepsReplyAndForwards(t *testing.T) {
 	msgs := st.Messages(3)
 	if len(msgs) != 1 || msgs[0].Reply == nil || msgs[0].Reply.Author != "bob" || len(msgs[0].Forwards) != 1 {
 		t.Fatalf("message after update = %+v", msgs)
+	}
+}
+
+func TestMessageUpdateDoesNotReplaceCachedReplyWithSparseDeletedMarker(t *testing.T) {
+	a := newTestApp(&fakeSender{})
+	a.store.AppendMessage(store.Message{
+		ID: 7, ChannelID: 3, Author: "alice",
+		Reply: &store.MessageReply{MessageID: 5, Author: "bob", Content: "original"},
+	})
+
+	// A later sparse update carries the reply reference but omits the embedded
+	// referenced message. That omission is not proof that the target was deleted;
+	// the original preview should remain visible.
+	a.handleMessageUpdate(&gateway.MessageUpdateEvent{Message: discord.Message{
+		ID:        7,
+		ChannelID: 3,
+		Type:      discord.InlinedReplyMessage,
+		Reference: &discord.MessageReference{
+			Type: discord.MessageReferenceTypeDefault, MessageID: 5, ChannelID: 3,
+		},
+	}})
+
+	got := a.store.Messages(3)[0]
+	if got.Reply == nil || got.Reply.Deleted || got.Reply.Content != "original" {
+		t.Fatalf("reply after sparse update = %+v, want cached preview", got.Reply)
 	}
 }

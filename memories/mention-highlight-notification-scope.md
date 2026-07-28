@@ -3,7 +3,7 @@ name: mention-highlight-notification-scope
 summary: Persist self-ping classification on messages and derive role-colored chat highlights without reading the UI-owned store off-goroutine.
 tags: [#mentions, #notifications, #unread, #chat, #tui, #race]
 impact: normal
-commit: 951f159 (dirty)
+commit: 0264283 (dirty)
 date: 2026-07-28
 created_at: 2026-07-28T09:24:00+02:00
 scope: internal/app/app_gateway_state.go, internal/app/app_history.go, internal/ui/chatview_transcript.go
@@ -19,7 +19,7 @@ Live notification classification already depended on structured Discord mention 
 
 ## Resolution
 
-`store.Message.PingsSelf` now carries the classification. Gateway and history paths assign it inside their posted UI closures. Chat rendering applies the configured mention style and the logged-in member's effective role color; sidebar channel badges show pings first and unread counts otherwise. Unknown guilds do not generate local notification state.
+`store.Message.PingsSelf` now carries the classification. Gateway and history paths assign it inside their posted UI closures. Direct messages retain inherent attention, while group-DM messages require a structured user/everyone mention; `Channel.RecipientIDs` distinguishes the two because both map to `ChannelDM`. Chat rendering applies the configured mention style and the logged-in member's effective role color; sidebar channel badges show pings first and unread counts otherwise. Unknown guilds do not generate local notification state.
 
 ## Notes
 

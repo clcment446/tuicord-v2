@@ -3,7 +3,7 @@ name: reply-forward-reference-rendering
 summary: convertMessage maps reply/forward snapshots, but an ephemeral reply with an omitted ReferencedMessage is unavailable—not deleted—and must render a distinct notice.
 tags: [#discord, #reply, #forward, #convert, #rendering, #chat]
 impact: high
-commit: ca044d1 (dirty)
+commit: 0264283 (dirty)
 date: 2026-07-27
 created_at: 2026-07-21T00:00:00+01:00
 scope: internal/app/convert.go, internal/ui/replyview.go, internal/store/store.go
@@ -31,7 +31,9 @@ rendered empty (#27): `convertMessage` dropped `Reference`,
   collide with the outer message.
 - `handleMessageUpdate` keeps `Reply`/`Forwards` (only overwrites when the
   patch carries them) — same class of bug as the earlier ComponentTree
-  omission in [[rich-v2-message-update-tree]].
+  omission in [[rich-v2-message-update-tree]]. A sparse update can carry the
+  reply reference without `ReferencedMessage`; its synthetic `Deleted` marker
+  must not replace an already valid cached preview.
 - Reply preview content is stored as raw Discord markup. Before collapsing it
   to one line, `renderReplyLine` must call `ChatView.displayContent`; otherwise
   mentions in the referenced message leak through as literal `<@user-id>`.
