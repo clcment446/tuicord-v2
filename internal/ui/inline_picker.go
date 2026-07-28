@@ -52,6 +52,7 @@ type InlinePicker struct {
 	media            map[string]*pickerMediaState
 	active           store.GuildID
 	activeChannel    store.ChannelID
+	fuzzyLevel       int
 	favoriteEmojis   map[string]bool
 	favoriteStickers map[uint64]bool
 }
@@ -61,7 +62,7 @@ type InlinePicker struct {
 func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activeChannel store.ChannelID, nitro, fakeNitro bool, trigger rune, query string, onInsert func(string), onSticker func(uint64), onClose func()) *InlinePicker {
 	p := &InlinePicker{
 		styles: styles, trigger: trigger, query: query, active: active, activeChannel: activeChannel, onInsert: onInsert,
-		onSticker: onSticker, onClose: onClose, list: widget.NewItemList(nil),
+		onSticker: onSticker, onClose: onClose, list: widget.NewItemList(nil), fuzzyLevel: 2,
 		header: widget.NewText(""), hint: widget.NewText(""), node: layout.Node{Grow: 1},
 	}
 	p.list.SetStyle(styles.Cell("picker"))
@@ -85,6 +86,13 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 	p.body.Children()[2].Layout().Grow = 0
 	p.refilter()
 	return p
+}
+
+// SetFuzzyLevel selects substring (0), subsequence (1), or ranked fuzzy (2)
+// matching. Values outside the supported range are clamped.
+func (p *InlinePicker) SetFuzzyLevel(level int) {
+	p.fuzzyLevel = clampFuzzyLevel(level)
+	p.refilter()
 }
 
 // useReactionEntries replaces composer-oriented emoji inserts with values the
@@ -230,18 +238,18 @@ func (p *InlinePicker) refilter() {
 // \server#channel requires independent fuzzy matches for both parts.
 func (p *InlinePicker) matchEntry(candidate searchEntry, query string) (int, bool) {
 	if p.trigger != '+' || !strings.HasPrefix(query, `\`) {
-		return fuzzyScore(candidate.key, query)
+		return matchScore(candidate.key, query, p.fuzzyLevel)
 	}
 	structured := strings.TrimSpace(strings.TrimPrefix(query, `\`))
 	serverQuery, channelQuery, hasChannel := strings.Cut(structured, "#")
-	serverScore, ok := fuzzyScore(candidate.guildKey, strings.TrimSpace(serverQuery))
+	serverScore, ok := matchScore(candidate.guildKey, strings.TrimSpace(serverQuery), p.fuzzyLevel)
 	if !ok {
 		return 0, false
 	}
 	if !hasChannel {
 		return serverScore, true
 	}
-	channelScore, ok := fuzzyScore(candidate.channelKey, strings.TrimSpace(channelQuery))
+	channelScore, ok := matchScore(candidate.channelKey, strings.TrimSpace(channelQuery), p.fuzzyLevel)
 	if !ok {
 		return 0, false
 	}
@@ -301,6 +309,41 @@ func fuzzyScore(candidate, query string) (int, bool) {
 		}
 	}
 	return score - pos, true
+}
+
+func clampFuzzyLevel(level int) int {
+	if level < 0 {
+		return 0
+	}
+	if level > 2 {
+		return 2
+	}
+	return level
+}
+
+func matchScore(candidate, query string, level int) (int, bool) {
+	query = strings.ReplaceAll(strings.ToLower(query), "*", "")
+	candidate = strings.ToLower(candidate)
+	if query == "" {
+		return 0, true
+	}
+	switch clampFuzzyLevel(level) {
+	case 0:
+		pos := strings.Index(candidate, query)
+		return -pos, pos >= 0
+	case 1:
+		pos := 0
+		for _, want := range query {
+			found := strings.IndexRune(candidate[pos:], want)
+			if found < 0 {
+				return 0, false
+			}
+			pos += found + len(string(want))
+		}
+		return -pos, true
+	default:
+		return fuzzyScore(candidate, query)
+	}
 }
 
 // SetQueryChange receives the current query after user edits it.

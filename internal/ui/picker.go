@@ -91,25 +91,27 @@ type Picker struct {
 	custom   []searchEntry
 	stickers []searchEntry
 
-	filtered         []pickerEntry
-	onInsert         func(string)
-	onClose          func()
-	onSticker        func(uint64)
-	onStickerRecent  func(uint64)
-	onFavorite       func(string, uint64)
-	favoriteEmojis   map[string]bool
-	favoriteStickers map[uint64]bool
-	mediaFetcher     *media.Fetcher
-	mediaCfg         media.Config
-	mediaCtx         context.Context
-	mediaCancel      context.CancelFunc
-	mediaJobs        chan string
-	mediaWG          sync.WaitGroup
-	post             func(func())
-	media            map[string]*pickerMediaState
-	searchGIF        GIFSearchFunc
-	gifQuery         string
-	gifResults       []pickerEntry
+	filtered          []pickerEntry
+	onInsert          func(string)
+	onClose           func()
+	onSticker         func(uint64)
+	onStickerRecent   func(uint64)
+	onFavorite        func(string, uint64)
+	favoriteEmojis    map[string]bool
+	favoriteStickers  map[uint64]bool
+	mediaFetcher      *media.Fetcher
+	mediaCfg          media.Config
+	mediaCtx          context.Context
+	mediaCancel       context.CancelFunc
+	mediaJobs         chan string
+	mediaWG           sync.WaitGroup
+	post              func(func())
+	media             map[string]*pickerMediaState
+	searchGIF         GIFSearchFunc
+	gifQuery          string
+	gifResults        []pickerEntry
+	emojiFuzzyLevel   int
+	stickerFuzzyLevel int
 
 	body *widget.Node
 	node layout.Node
@@ -120,14 +122,16 @@ type Picker struct {
 // fakeNitro come from READY and config respectively.
 func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fakeNitro bool, onInsert func(string), onClose func()) *Picker {
 	p := &Picker{
-		styles:    styles,
-		list:      widget.NewItemList(nil),
-		queryText: widget.NewText(""),
-		tabText:   widget.NewText(""),
-		hintText:  widget.NewText(""),
-		onInsert:  onInsert,
-		onClose:   onClose,
-		node:      layout.Node{Grow: 1},
+		styles:            styles,
+		list:              widget.NewItemList(nil),
+		queryText:         widget.NewText(""),
+		tabText:           widget.NewText(""),
+		hintText:          widget.NewText(""),
+		onInsert:          onInsert,
+		onClose:           onClose,
+		node:              layout.Node{Grow: 1},
+		emojiFuzzyLevel:   2,
+		stickerFuzzyLevel: 2,
 	}
 	p.list.SetStyle(styles.Cell("picker"))
 	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
@@ -158,6 +162,13 @@ func NewPicker(st *store.Store, styles Styles, active store.GuildID, nitro, fake
 
 	p.refilter()
 	return p
+}
+
+// SetFuzzyLevels configures matching for emoji/custom-emoji and sticker tabs.
+func (p *Picker) SetFuzzyLevels(emoji, stickers int) {
+	p.emojiFuzzyLevel = clampFuzzyLevel(emoji)
+	p.stickerFuzzyLevel = clampFuzzyLevel(stickers)
+	p.refilter()
 }
 
 // buildCustomEntries resolves every guild's custom emoji into insertable
@@ -297,7 +308,7 @@ func (p *Picker) refilter() {
 	p.filtered = p.filtered[:0]
 	switch p.tab {
 	case tabEmoji:
-		for _, e := range picker.FilterEmoji(p.query, 300) {
+		for _, e := range p.filterUnicodeEmoji(q, 300) {
 			p.filtered = append(p.filtered, pickerEntry{
 				label:  e.Char + "  :" + e.Name + ":",
 				insert: e.Char,
@@ -305,12 +316,12 @@ func (p *Picker) refilter() {
 			})
 		}
 	case tabCustom:
-		p.appendMatches(p.custom, q)
+		p.appendMatches(p.custom, q, p.emojiFuzzyLevel)
 	case tabGIF:
 		p.filtered = append(p.filtered, p.gifResults...)
 		p.searchGIFs(strings.TrimSpace(p.query))
 	case tabSticker:
-		p.appendMatches(p.stickers, q)
+		p.appendMatches(p.stickers, q, p.stickerFuzzyLevel)
 	}
 
 	p.prioritizeFavorites()
@@ -459,12 +470,44 @@ func (p *Picker) searchGIFs(query string) {
 	})
 }
 
-func (p *Picker) appendMatches(entries []searchEntry, q string) {
+func (p *Picker) appendMatches(entries []searchEntry, q string, level int) {
+	type scored struct {
+		entry pickerEntry
+		score int
+	}
+	matches := make([]scored, 0, len(entries))
 	for _, e := range entries {
-		if q == "" || strings.Contains(e.key, q) {
-			p.filtered = append(p.filtered, e.entry)
+		if score, ok := matchScore(e.key, q, level); ok {
+			matches = append(matches, scored{entry: e.entry, score: score})
 		}
 	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	for _, match := range matches {
+		p.filtered = append(p.filtered, match.entry)
+	}
+}
+
+func (p *Picker) filterUnicodeEmoji(q string, limit int) []picker.Emoji {
+	type scored struct {
+		emoji picker.Emoji
+		score int
+	}
+	var matches []scored
+	for _, emoji := range picker.Unicode() {
+		key := emoji.Name + " " + strings.Join(emoji.Keywords, " ")
+		if score, ok := matchScore(key, q, p.emojiFuzzyLevel); ok {
+			matches = append(matches, scored{emoji: emoji, score: score})
+		}
+	}
+	sort.SliceStable(matches, func(i, j int) bool { return matches[i].score > matches[j].score })
+	if limit > 0 && len(matches) > limit {
+		matches = matches[:limit]
+	}
+	out := make([]picker.Emoji, len(matches))
+	for i, match := range matches {
+		out[i] = match.emoji
+	}
+	return out
 }
 
 func (p *Picker) updateHeader() {

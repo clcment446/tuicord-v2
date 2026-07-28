@@ -27,6 +27,14 @@ tuicord.configure({
     video_seek_forward = "right",
     video_replay = "r",
   },
+  search = {
+    -- 0 = substring only, 1 = ordered subsequence, 2 = ranked fuzzy.
+    emoji = 2,
+    stickers = 2,
+    members = 2,
+    roles = 2,
+    channels = 2,
+  },
   plugins = {
     enabled = true,
     disabled = {},

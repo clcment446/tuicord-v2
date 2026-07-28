@@ -165,6 +165,42 @@ func TestFuzzyScoreTreatsStarAsWildcard(t *testing.T) {
 	}
 }
 
+func TestMatchScoreLevels(t *testing.T) {
+	tests := []struct {
+		name      string
+		level     int
+		candidate string
+		query     string
+		want      bool
+	}{
+		{name: "zero substring", level: 0, candidate: "party_blob", query: "blob", want: true},
+		{name: "zero rejects subsequence", level: 0, candidate: "party_blob", query: "ptb", want: false},
+		{name: "one subsequence", level: 1, candidate: "party_blob", query: "ptb", want: true},
+		{name: "two ranked fuzzy", level: 2, candidate: "party_blob", query: "ptb", want: true},
+		{name: "clamps high", level: 99, candidate: "party_blob", query: "ptb", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, got := matchScore(tt.candidate, tt.query, tt.level); got != tt.want {
+				t.Fatalf("matchScore(%q, %q, %d) matched=%v, want %v", tt.candidate, tt.query, tt.level, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInlinePickerFuzzyLevelZeroUsesSubstringMatching(t *testing.T) {
+	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, 0, false, true, ':', "ptb", func(string) {}, nil, func() {})
+	p.SetFuzzyLevel(0)
+	if len(p.filtered) != 0 {
+		t.Fatalf("level-zero results = %+v, want no subsequence match", p.filtered)
+	}
+	p.query = "blob"
+	p.refilter()
+	if len(p.filtered) == 0 {
+		t.Fatal("level-zero substring query did not match")
+	}
+}
+
 func TestInlinePickerMentionUsesActiveDMRecipients(t *testing.T) {
 	const dmGuild = ^store.GuildID(0)
 	st := store.New(0)
