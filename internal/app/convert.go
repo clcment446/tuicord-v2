@@ -192,9 +192,11 @@ func convertMessage(m discord.Message) store.Message {
 	}
 }
 
-// convertReply summarizes the replied-to message. A reply whose original was
-// deleted arrives with a Reference but a null ReferencedMessage; crossposts
-// also carry a Reference, so those are told apart by the message type.
+// convertReply summarizes the replied-to message. Ephemeral interaction
+// responses can omit ReferencedMessage even while their original still exists,
+// so only those absent snapshots are left unresolved rather than labelled
+// deleted. Crossposts also carry a Reference, so those are told apart by
+// message type.
 func convertReply(m discord.Message) *store.MessageReply {
 	if m.Reference == nil || m.Reference.Type != discord.MessageReferenceTypeDefault {
 		return nil
@@ -210,6 +212,13 @@ func convertReply(m discord.Message) *store.MessageReply {
 	}
 	if m.Type != discord.InlinedReplyMessage {
 		return nil
+	}
+	if m.Flags&discord.EphemeralMessage != 0 {
+		return &store.MessageReply{
+			MessageID:   store.MessageID(m.Reference.MessageID),
+			ChannelID:   store.ChannelID(m.Reference.ChannelID),
+			Unavailable: true,
+		}
 	}
 	return &store.MessageReply{
 		MessageID: store.MessageID(m.Reference.MessageID),

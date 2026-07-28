@@ -280,7 +280,7 @@ func NewShell(a *app.App, mv *MainView, cfg config.Config, styles Styles, cancel
 	mv.onForumHover = s.setForumHover
 	s.bindEditorState()
 	mv.SetComposerChange(s.composerChanged)
-	mv.composer.OnBackspaceEmpty(s.leaveInputMode)
+	mv.composer.OnBackspaceEmpty(s.handleComposerBackspaceEmpty)
 	mv.SetLocalCommandHandler(s.runLocalCommand)
 	mv.SetChannelChangeHandler(s.channelChanged)
 	mv.chat.OnMessageAction(s.handleMessageAction)
@@ -413,9 +413,20 @@ func (s *Shell) beginComposerInput(allowReplacement bool) bool {
 	return true
 }
 
-// leaveInputMode is an explicit Vim exit used by ;q and empty Backspace. It
-// preserves the draft, attachments, and reply/edit operation while returning
-// focus to message navigation.
+// handleComposerBackspaceEmpty removes staged attachments before leaving Vim
+// input mode. This makes Backspace undo the attachment staging action while
+// retaining the existing empty-composer exit behavior.
+func (s *Shell) handleComposerBackspaceEmpty() {
+	if s != nil && s.mv != nil && len(s.mv.attachments) > 0 {
+		s.mv.clearAttachments()
+		return
+	}
+	s.leaveInputMode()
+}
+
+// leaveInputMode is an explicit Vim exit used by ;q and empty Backspace when
+// there are no staged attachments. It preserves the draft, attachments, and
+// reply/edit operation while returning focus to message navigation.
 func (s *Shell) leaveInputMode() {
 	if s == nil || s.editor.phase == editorNormal {
 		return

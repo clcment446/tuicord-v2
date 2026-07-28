@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"reflect"
 	"testing"
 
 	"awesomeProject/internal/app"
@@ -61,6 +62,23 @@ func TestSidebarUsesPingBadgesForChannelsAndServers(t *testing.T) {
 	}
 	if got := mv.channelList.Items()[0].Badge; got != "2" {
 		t.Fatalf("channel badge = %q, want 2", got)
+	}
+}
+
+func TestSidebarUsesUnreadCountWhenChannelHasNoMentions(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	st.IncrementUnread(10)
+	st.IncrementUnread(10)
+
+	mv := &MainView{app: a, state: &uistate.State{}, guildList: widget.NewItemList(nil), channelList: widget.NewItemList(nil)}
+	mv.rebuildGuilds()
+	mv.refreshChannels()
+	if got := mv.channelList.Items()[0].Badge; got != "2" {
+		t.Fatalf("unread channel badge = %q, want 2", got)
 	}
 }
 
@@ -132,6 +150,57 @@ func TestRefreshChannelsPreservesBrowsedSelection(t *testing.T) {
 	mv.refreshChannels()
 	if got := mv.channelRows[mv.channelList.Selected()].ChannelID; got != 20 {
 		t.Fatalf("selected channel after refresh = %d, want 20", got)
+	}
+}
+
+func TestRefreshMembersKeepsMembersWithoutRolesAlphabetical(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertMember(1, store.Member{ID: 1, Name: "zoe"})
+	st.UpsertMember(1, store.Member{ID: 2, Name: "Alice"})
+	st.UpsertMember(1, store.Member{ID: 3, Name: "mike"})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	mv := &MainView{app: a, memberList: widget.NewItemList(nil)}
+
+	mv.refreshMembers(1)
+
+	items := mv.memberList.Items()
+	got := make([]string, len(items))
+	for i, item := range items {
+		got[i] = item.Label
+	}
+	want := []string{"Alice", "mike", "zoe"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("member rows = %v, want %v", got, want)
+	}
+}
+
+func TestRefreshMembersGroupsMembersByHighestHoistedRole(t *testing.T) {
+	st := store.New(0)
+	st.UpsertChannel(store.Channel{ID: 10, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertRole(1, store.Role{ID: 10, Name: "Moderators", Position: 20, Hoist: true})
+	st.UpsertRole(1, store.Role{ID: 20, Name: "Contributors", Position: 10, Hoist: true})
+	st.UpsertRole(1, store.Role{ID: 30, Name: "Unhoisted", Position: 30})
+	st.UpsertMember(1, store.Member{ID: 1, Name: "zoe", RoleIDs: []store.RoleID{10}})
+	st.UpsertMember(1, store.Member{ID: 2, Name: "Alice", RoleIDs: []store.RoleID{20, 30}})
+	st.UpsertMember(1, store.Member{ID: 3, Name: "mike", RoleIDs: []store.RoleID{20}})
+	st.UpsertMember(1, store.Member{ID: 4, Name: "bob", RoleIDs: []store.RoleID{30}})
+	st.UpsertMember(1, store.Member{ID: 5, Name: "Aaron", RoleIDs: []store.RoleID{20, 10}})
+	a := app.New(discord.WrapSession(session.New("")), st, tui.New())
+	a.SetActive(1, 10)
+	mv := &MainView{app: a, memberList: widget.NewItemList(nil)}
+
+	mv.refreshMembers(1)
+
+	items := mv.memberList.Items()
+	got := make([]string, len(items))
+	for i, item := range items {
+		got[i] = item.Label
+	}
+	want := []string{"Moderators", "Aaron", "zoe", "Contributors", "Alice", "mike", "Members", "bob"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("member rows = %v, want %v", got, want)
 	}
 }
 

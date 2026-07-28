@@ -62,7 +62,7 @@ func TestChatViewRendersConsecutiveMessagesFromAuthorAsOneBlock(t *testing.T) {
 	}
 }
 
-func TestChatViewMarksPendingAndFailed(t *testing.T) {
+func TestChatViewStylesPendingAuthorWithoutSendingLabel(t *testing.T) {
 	st := store.New(0)
 	st.AppendMessage(store.Message{ChannelID: 1, Author: "you", Content: "hi", Pending: true})
 
@@ -70,8 +70,11 @@ func TestChatViewMarksPendingAndFailed(t *testing.T) {
 	buf := screen.NewBuffer(30, 2)
 	view.Draw(buf.Clip(buf.Bounds()))
 
-	if !strings.Contains(rowText(buf, 0), "sending") {
-		t.Errorf("pending header = %q, want to contain 'sending'", rowText(buf, 0))
+	if got := rowText(buf, 0); got != "you" {
+		t.Errorf("pending header = %q, want author without a sending label", got)
+	}
+	if got := buf.Cell(0, 0).Style; got != view.styles.Cell("messages.pending") {
+		t.Errorf("pending author style = %+v, want %+v", got, view.styles.Cell("messages.pending"))
 	}
 }
 
@@ -98,6 +101,63 @@ func TestChatViewResolvesMarkup(t *testing.T) {
 	}
 	if got := buf.Cell(10, 1).Style.Attrs & screen.Bold; got == 0 {
 		t.Fatal("bold span was not drawn bold")
+	}
+}
+
+func TestChatViewHighlightsMentionWithOwnRoleColor(t *testing.T) {
+	st := store.New(0)
+	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})
+	st.UpsertChannel(store.Channel{ID: 1, GuildID: 1, Name: "general", Kind: store.ChannelText})
+	st.UpsertRole(1, store.Role{ID: 7, Position: 10, Color: 0x123456})
+	st.UpsertMember(1, store.Member{ID: 42, Name: "me", RoleIDs: []store.RoleID{7}})
+	st.AppendMessage(store.Message{ChannelID: 1, Author: "alice", Content: "ping", PingsSelf: true})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetMentionColor(func(guild store.GuildID) uint32 { return st.MemberColor(guild, 42) })
+	lines := view.render(40)
+	if len(lines) != 2 {
+		t.Fatalf("rendered lines = %d, want author and content", len(lines))
+	}
+	want := screen.RGB(0x12, 0x34, 0x56)
+	if got := lines[1].segments[0].style.Fg; got != want {
+		t.Fatalf("mention fg = %+v, want own role color %+v", got, want)
+	}
+}
+
+func TestChatViewMentionHighlightDoesNotBleedAcrossGroupedAuthorMessages(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{
+		ID:        1,
+		ChannelID: 1,
+		AuthorID:  7,
+		Author:    "alice",
+		Content:   "ordinary message",
+	})
+	st.AppendMessage(store.Message{
+		ID:        2,
+		ChannelID: 1,
+		AuthorID:  7,
+		Author:    "alice",
+		Content:   "message with a mention",
+		PingsSelf: true,
+	})
+
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	want := screen.RGB(0x12, 0x34, 0x56)
+	view.SetMentionColor(func(store.GuildID) uint32 { return 0x123456 })
+
+	lines := view.render(40)
+	if len(lines) != 3 {
+		t.Fatalf("rendered lines = %d, want grouped author plus two message lines", len(lines))
+	}
+	if lines[1].msg != 1 || lines[2].msg != 2 {
+		t.Fatalf("message ownership = %d,%d, want 1,2", lines[1].msg, lines[2].msg)
+	}
+	if got := lines[1].segments[0].style.Fg; got == want {
+		t.Fatalf("ordinary message inherited mention color %+v", got)
+	}
+	if got := lines[2].segments[0].style.Fg; got != want {
+		t.Fatalf("mentioned message fg = %+v, want %v", got, want)
 	}
 }
 
@@ -1306,6 +1366,27 @@ func TestChatViewWholeBlockHighlightSkipsEmptyRows(t *testing.T) {
 	}
 	if buf.Cell(0, 3).Style.Attrs&screen.Reverse == 0 {
 		t.Fatal("non-empty row after the blank line was not highlighted")
+	}
+}
+
+func TestFocusedStrikethroughDoesNotDecorateLinePadding(t *testing.T) {
+	st := store.New(0)
+	st.AppendMessage(store.Message{ID: 1, ChannelID: 1, Author: "alice", Content: "~~gone~~"})
+	view := NewChatView(st, func() store.ChannelID { return 1 }, nil, Styles{})
+	view.SetFocusOwner(true)
+	view.SetHighlightFocusBlock(true)
+	buf := screen.NewBuffer(30, 4)
+	view.Draw(buf.Clip(buf.Bounds()))
+
+	if buf.Cell(0, 1).Style.Attrs&screen.Strike == 0 {
+		t.Fatal("strikethrough message text lost its decoration")
+	}
+	padding := buf.Cell(20, 1).Style
+	if padding.Attrs&screen.Strike != 0 {
+		t.Fatal("focused line padding inherited strikethrough from message text")
+	}
+	if padding.Attrs&screen.Reverse == 0 {
+		t.Fatal("focused line padding lost its focus highlight")
 	}
 }
 

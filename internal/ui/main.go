@@ -180,6 +180,9 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	mv.accountList.SetVimKeys(cfg.Keys.Vim.ScrollDown, cfg.Keys.Vim.ScrollUp)
 
 	mv.chat = NewChatView(a.Store(), a.ActiveChannel, mv.resolver, styles)
+	mv.chat.SetMentionColor(func(guild store.GuildID) uint32 {
+		return mv.app.Store().MemberColor(guild, mv.app.SelfID())
+	})
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
@@ -936,7 +939,7 @@ func (mv *MainView) channelItem(row store.ChannelRow) widget.Item {
 	}
 	badge := ""
 	if row.Navigable() {
-		badge = unreadBadge(mv.app.Store().Pings(row.ChannelID))
+		badge = channelUnreadBadge(mv.app.Store().Unread(row.ChannelID), mv.app.Store().Pings(row.ChannelID))
 	}
 	return widget.Item{Label: label, Badge: badge}
 }
@@ -1105,9 +1108,10 @@ func (mv *MainView) channelBreadcrumb(id store.ChannelID) string {
 }
 
 // channelReadOnly reports whether the composer should be disabled for a channel:
-// no SEND_MESSAGES permission (rules channels, most announcement channels), or
-// an archived thread. DMs and forums are never read-only here (forums use the
-// post composer instead).
+// no SEND_MESSAGES permission (rules channels, most announcement channels),
+// no SEND_MESSAGES_IN_THREADS permission for a thread, or an archived thread.
+// DMs and forums are never read-only here (forums use the post composer
+// instead).
 func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
 	if id == 0 {
 		return false
@@ -1122,7 +1126,11 @@ func (mv *MainView) channelReadOnly(id store.ChannelID) bool {
 	if c.Kind == store.ChannelForum {
 		return false
 	}
-	if !mv.app.Store().ChannelCan(c.GuildID, mv.app.SelfID(), id, store.PermSendMessages) {
+	permission := store.PermSendMessages
+	if c.Kind == store.ChannelThread {
+		permission = store.PermSendMessagesInThreads
+	}
+	if !mv.app.Store().ChannelCan(c.GuildID, mv.app.SelfID(), id, permission) {
 		return true
 	}
 	if c.Kind == store.ChannelThread && c.Thread != nil && c.Thread.Archived {
@@ -1374,6 +1382,15 @@ func unreadBadge(n int) string {
 	}
 }
 
+// channelUnreadBadge gives mention counts precedence while retaining ordinary
+// new-message counts for channels without a ping.
+func channelUnreadBadge(unread, mentions int) string {
+	if mentions > 0 {
+		return unreadBadge(mentions)
+	}
+	return unreadBadge(unread)
+}
+
 func (mv *MainView) refreshMembers(guild store.GuildID) {
 	st := mv.app.Store()
 	members := st.Members(guild)
@@ -1381,12 +1398,77 @@ func (mv *MainView) refreshMembers(guild store.GuildID) {
 	// channel's recipient list (same fallback the @-mention menu uses).
 	if channel, ok := st.Channel(mv.app.ActiveChannel()); ok && channel.Kind == store.ChannelDM {
 		members = append([]store.Member(nil), channel.Recipients...)
+	} else {
+		mv.memberList.SetItems(memberSidebarItems(members, st.Roles(guild), mv.styles))
+		return
 	}
 	items := make([]widget.Item, 0, len(members))
 	for _, m := range members {
 		items = append(items, widget.Item{Label: m.Name})
 	}
 	mv.memberList.SetItems(items)
+}
+
+// memberSidebarItems groups guild members by their highest hoisted role. Roles
+// are supplied in display order (highest position first) by Store.Roles.
+func memberSidebarItems(members []store.Member, roles []store.Role, styles Styles) []widget.Item {
+	byRole := make(map[store.RoleID][]store.Member, len(roles))
+	ungrouped := make([]store.Member, 0, len(members))
+	for _, member := range members {
+		roleID, ok := highestHoistedRole(member, roles)
+		if !ok {
+			ungrouped = append(ungrouped, member)
+			continue
+		}
+		byRole[roleID] = append(byRole[roleID], member)
+	}
+
+	headerStyle := styles.Cell("muted")
+	headerStyle.Attrs |= screen.Bold
+	items := make([]widget.Item, 0, len(members)+len(roles)+1)
+	for _, role := range roles {
+		group := byRole[role.ID]
+		if !role.Hoist || len(group) == 0 {
+			continue
+		}
+		items = append(items, widget.Item{Label: role.Name, Style: headerStyle})
+		items = appendMemberItems(items, group)
+	}
+	if len(ungrouped) > 0 {
+		if len(items) > 0 {
+			items = append(items, widget.Item{Label: "Members", Style: headerStyle})
+		}
+		items = appendMemberItems(items, ungrouped)
+	}
+	return items
+}
+
+func highestHoistedRole(member store.Member, roles []store.Role) (store.RoleID, bool) {
+	for _, role := range roles {
+		if !role.Hoist {
+			continue
+		}
+		for _, memberRoleID := range member.RoleIDs {
+			if memberRoleID == role.ID {
+				return role.ID, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func appendMemberItems(items []widget.Item, members []store.Member) []widget.Item {
+	sort.Slice(members, func(i, j int) bool {
+		left, right := strings.ToLower(members[i].Name), strings.ToLower(members[j].Name)
+		if left != right {
+			return left < right
+		}
+		return members[i].ID < members[j].ID
+	})
+	for _, member := range members {
+		items = append(items, widget.Item{Label: member.Name})
+	}
+	return items
 }
 
 // resolver builds a markup resolver bound to the active guild, so mentions and

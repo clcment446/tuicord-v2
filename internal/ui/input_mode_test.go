@@ -215,6 +215,34 @@ func TestShellBackspaceOnEmptyComposerLeavesInputMode(t *testing.T) {
 	}
 }
 
+func TestShellBackspaceOnEmptyComposerClearsStagedAttachments(t *testing.T) {
+	cfg := vimTestConfig()
+	mv := &MainView{
+		cfg:            cfg,
+		composer:       widget.NewTextInput("Message"),
+		composerStatus: widget.NewText(""),
+		chat:           NewChatView(nil, nil, nil, Styles{}),
+		attachments: []queuedAttachment{
+			{meta: store.Attachment{Filename: "draft.png"}},
+		},
+	}
+	s := &Shell{mv: mv, cfg: cfg}
+	mv.composer.SetInputFocusEnabled(false)
+	mv.composer.OnBackspaceEmpty(s.handleComposerBackspaceEmpty)
+	if !s.Handle(input.KeyEvent{Key: input.KeyRune, Rune: 'i'}) {
+		t.Fatal("i did not enter input mode")
+	}
+	if !mv.composer.Handle(input.KeyEvent{Key: input.KeyBackspace}) {
+		t.Fatal("empty composer backspace was not consumed")
+	}
+	if len(mv.attachments) != 0 {
+		t.Fatalf("staged attachments after backspace = %d, want 0", len(mv.attachments))
+	}
+	if s.editor.phase == editorNormal || !mv.composer.CanFocus() {
+		t.Fatalf("backspace left input mode: phase %v canFocus %v", s.editor.phase, mv.composer.CanFocus())
+	}
+}
+
 func TestVimInputFocusMovementExitsWithoutOverridingDestination(t *testing.T) {
 	tests := []struct {
 		name string

@@ -222,11 +222,14 @@ type Message struct {
 	Flags         uint64
 	Pending       bool
 	Failed        bool
-	Attachments   []Attachment
-	Embeds        []Embed
-	Stickers      []Sticker
-	Reactions     []Reaction
-	Components    []Component
+	// PingsSelf marks a message whose structured Discord mentions target the
+	// logged-in account, allowing live and history messages to render alike.
+	PingsSelf   bool
+	Attachments []Attachment
+	Embeds      []Embed
+	Stickers    []Sticker
+	Reactions   []Reaction
+	Components  []Component
 	// ComponentTree preserves Discord's hierarchical Components V2 layout.
 	ComponentTree []ComponentNode
 	Pinned        bool
@@ -248,14 +251,16 @@ type Message struct {
 
 // MessageReply is the referenced-message summary a reply carries. Deleted
 // marks a reply whose original message no longer exists (Discord sends a null
-// referenced_message for those).
+// referenced_message for those). Unavailable marks an ephemeral reply whose
+// snapshot was omitted, which is not evidence that its original was deleted.
 type MessageReply struct {
-	MessageID MessageID
-	ChannelID ChannelID
-	AuthorID  UserID
-	Author    string
-	Content   string
-	Deleted   bool
+	MessageID   MessageID
+	ChannelID   ChannelID
+	AuthorID    UserID
+	Author      string
+	Content     string
+	Deleted     bool
+	Unavailable bool
 }
 
 // ForwardedMessage is the partial snapshot Discord attaches to a forwarded

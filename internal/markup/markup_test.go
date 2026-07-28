@@ -161,6 +161,12 @@ func TestParseMarkedFakeNitroLinks(t *testing.T) {
 	assertSpans(t, spans, want)
 }
 
+func TestParseBareDiscordEmojiCDNURLAsInlineEmoji(t *testing.T) {
+	url := "https://cdn.discordapp.com/emojis/1523268701749510214.webp?size=48&name=DuDuStare&lossless=true"
+	spans := Parse(url, Resolver{})
+	assertSpans(t, spans, []Span{{Kind: Kind_FakeEmoji, Text: "DuDuStare", URL: url}})
+}
+
 func TestParseMarkerLookingOrdinaryLinks(t *testing.T) {
 	tests := []struct {
 		name  string

@@ -188,7 +188,7 @@ func (p *ProfilePopup) Draw(r screen.Region) {
 	selected.Attrs |= screen.Reverse
 	box.Fill(screen.Rect{W: rect.W, H: rect.H}, screen.Cell{Content: " ", Style: base})
 	drawProfileBorder(box, rect.W, rect.H, border)
-	drawPreviewText(box, 2, 0, " Profile · drag ", rect.W-4, title)
+	drawPreviewText(box, 2, 0, " Profile ", rect.W-4, title)
 	name := p.details.Name
 	if name == "" {
 		name = p.details.Username

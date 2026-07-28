@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"awesomeProject/internal/accounts"
@@ -19,6 +20,7 @@ import (
 	"awesomeProject/internal/discord"
 	"awesomeProject/internal/keyring"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/telemetry"
 	"awesomeProject/internal/tui/tui"
 	"awesomeProject/internal/ui"
 	"awesomeProject/internal/uistate"
@@ -40,7 +42,15 @@ func main() {
 
 func run() error {
 	clearTokens := flag.Bool("clear", false, "remove saved account tokens from the OS keyring and exit")
+	exportTelemetry := flag.String("export-telemetry", "", "export the latest local telemetry session to PATH and exit")
 	flag.Parse()
+	if *exportTelemetry != "" {
+		dir, err := config.Dir()
+		if err != nil {
+			return fmt.Errorf("resolve telemetry directory: %w", err)
+		}
+		return telemetry.ExportLatest(filepath.Join(dir, "telemetry"), *exportTelemetry)
+	}
 
 	cfg, startup, err := config.LoadStartup()
 	if err != nil {
@@ -139,7 +149,20 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("resolve token: %w", err)
 	}
-	ning, err := discord.NewNingen(token)
+	var recorder *telemetry.Recorder
+	if dir, dirErr := config.Dir(); dirErr == nil {
+		recorder, err = telemetry.New(filepath.Join(dir, "telemetry"), token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "tuicord: warning: disable local telemetry:", err)
+			recorder = nil
+		}
+	} else {
+		fmt.Fprintln(os.Stderr, "tuicord: warning: disable local telemetry:", dirErr)
+	}
+	if recorder != nil {
+		defer recorder.Close()
+	}
+	ning, err := discord.NewNingenWithTelemetry(token, recorder)
 	if err != nil {
 		return fmt.Errorf("create session: %w", err)
 	}
@@ -152,7 +175,7 @@ func run() error {
 		tui.WithVimKeys(cfg.Keys.Vim.FocusPrev, cfg.Keys.Vim.FocusNext, cfg.Keys.Vim.PanelPrev, cfg.Keys.Vim.PanelNext),
 	)
 	st := store.New(0)
-	orch := app.New(ning, st, uiApp)
+	orch := app.NewWithTelemetry(ning, st, uiApp, recorder)
 	mv := ui.NewMainViewWithState(orch, cfg, styles, state)
 	shell = ui.NewShell(orch, mv, cfg, styles, stop)
 	mv.OnPersistError(func(err error) { shell.ShowToast("View state", err) })
