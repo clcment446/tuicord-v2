@@ -31,6 +31,7 @@ type InlinePicker struct {
 	filtered []pickerEntry
 
 	list   *widget.ItemList
+	grid   *StickerGrid
 	header *widget.Text
 	hint   *widget.Text
 	body   *widget.Node
@@ -66,6 +67,7 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 	}
 	p.list.SetStyle(styles.Cell("picker"))
 	p.list.SetSelectedStyle(styles.Cell("picker.selected"))
+	p.grid = NewStickerGrid(nil, styles, "square")
 	p.header.SetStyle(styles.Cell("picker"))
 	p.header.SetWrap(false)
 	p.hint.SetStyle(styles.Cell("picker.hint"))
@@ -76,8 +78,14 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 		title = "Jump to channel"
 		p.hint.SetContent(`fuzzy search · \server · \server#channel · ↑/↓ move · enter jump`)
 	}
+	var matches tui.Widget = p.list
+	if trigger == '%' {
+		title = "Sticker preview"
+		p.hint.SetContent("type to search · arrows move · enter send · esc close")
+		matches = p.grid
+	}
 	p.entries = inlineEntries(st, active, activeChannel, nitro, fakeNitro, trigger)
-	p.body = widget.Column(titled(styles, title, p.header), titled(styles, "Matches", p.list), p.hint)
+	p.body = widget.Column(titled(styles, title, p.header), titled(styles, "Matches", matches), p.hint)
 	p.body.Children()[0].Layout().Basis = 3
 	p.body.Children()[0].Layout().Grow = 0
 	p.body.Children()[1].Layout().Grow = 1
@@ -85,6 +93,18 @@ func NewInlinePicker(st *store.Store, styles Styles, active store.GuildID, activ
 	p.body.Children()[2].Layout().Grow = 0
 	p.refilter()
 	return p
+}
+
+// SetStickerGridBorderStyle applies one of the shared TUI border presets.
+func (p *InlinePicker) SetStickerGridBorderStyle(name string) {
+	if p.trigger != '%' {
+		return
+	}
+	selected := p.grid.Selected()
+	p.grid = NewStickerGrid(p.grid.items, p.styles, name)
+	p.grid.SetSelectedSilent(selected)
+	p.body.Children()[1] = titled(p.styles, "Matches", p.grid)
+	p.body.Children()[1].Layout().Grow = 1
 }
 
 // useReactionEntries replaces composer-oriented emoji inserts with values the
@@ -175,7 +195,7 @@ func inlineEntries(st *store.Store, active store.GuildID, activeChannel store.Ch
 func idString(id uint64) string { return strconv.FormatUint(id, 10) }
 
 func (p *InlinePicker) refilter() {
-	selected := p.list.Selected()
+	selected := p.selected()
 	type scored struct {
 		entry pickerEntry
 		score int
@@ -222,6 +242,8 @@ func (p *InlinePicker) refilter() {
 	}
 	p.list.SetItems(items)
 	p.list.SetSelectedSilent(selected)
+	p.grid.SetItems(items)
+	p.grid.SetSelectedSilent(selected)
 	p.header.SetContent(string(p.trigger) + p.query + "▏")
 }
 
@@ -397,7 +419,14 @@ func (p *InlinePicker) Handle(ev tui.Event) bool {
 		p.pick()
 		return true
 	case input.KeyUp, input.KeyDown, input.KeyHome, input.KeyEnd, input.KeyPageUp, input.KeyPageDown:
+		if p.trigger == '%' {
+			return p.grid.Handle(ev)
+		}
 		return p.list.Handle(ev)
+	case input.KeyLeft, input.KeyRight:
+		if p.trigger == '%' {
+			return p.grid.Handle(ev)
+		}
 	case input.KeyBackspace:
 		if p.query == "" {
 			if p.onTriggerDelete != nil {
@@ -427,7 +456,7 @@ func (p *InlinePicker) queryChanged() {
 	}
 }
 func (p *InlinePicker) pick() {
-	i := p.list.Selected()
+	i := p.selected()
 	if i < 0 || i >= len(p.filtered) {
 		return
 	}
@@ -446,4 +475,11 @@ func (p *InlinePicker) pick() {
 		p.onInsert(e.insert)
 	}
 	p.onClose()
+}
+
+func (p *InlinePicker) selected() int {
+	if p.trigger == '%' {
+		return p.grid.Selected()
+	}
+	return p.list.Selected()
 }

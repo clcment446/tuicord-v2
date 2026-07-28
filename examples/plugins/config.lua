@@ -27,6 +27,9 @@ tuicord.configure({
     video_seek_forward = "right",
     video_replay = "r",
   },
+  sticker_preview = {
+    border_style = "square",
+  },
   plugins = {
     enabled = true,
     disabled = {},

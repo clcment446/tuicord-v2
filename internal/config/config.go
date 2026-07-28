@@ -145,6 +145,13 @@ type Nitro struct {
 	Fake bool `toml:"fake"`
 }
 
+// StickerPreview controls the inline % sticker grid.
+type StickerPreview struct {
+	// BorderStyle uses the TUI border presets: rounded, square, heavy, double,
+	// or ascii.
+	BorderStyle string `toml:"border_style"`
+}
+
 // Media controls network, decode, cache, and player resource limits. Byte and
 // pixel values are direct limits so operators can audit the exact bounds.
 type Media struct {
@@ -305,16 +312,17 @@ type Plugins struct {
 
 // Config is the full user configuration.
 type Config struct {
-	Layout        Layout        `toml:"layout"`
-	Keys          Keys          `toml:"keys"`
-	Colors        Colors        `toml:"colors"`
-	Nitro         Nitro         `toml:"nitro"`
-	Media         Media         `toml:"media"`
-	Privacy       Privacy       `toml:"privacy"`
-	Display       Display       `toml:"display"`
-	Auth          Auth          `toml:"auth"`
-	Accessibility Accessibility `toml:"accessibility"`
-	Integrations  Integrations  `toml:"integrations"`
+	Layout         Layout         `toml:"layout"`
+	Keys           Keys           `toml:"keys"`
+	Colors         Colors         `toml:"colors"`
+	Nitro          Nitro          `toml:"nitro"`
+	StickerPreview StickerPreview `toml:"sticker_preview"`
+	Media          Media          `toml:"media"`
+	Privacy        Privacy        `toml:"privacy"`
+	Display        Display        `toml:"display"`
+	Auth           Auth           `toml:"auth"`
+	Accessibility  Accessibility  `toml:"accessibility"`
+	Integrations   Integrations   `toml:"integrations"`
 	// Plugins is held by pointer so Config stays comparable (its Disabled slice
 	// and Grants map are not). A nil pointer means "plugins enabled, none
 	// disabled, no grants" — see PluginsEnabled/PluginDisabled/PluginGrants.
@@ -413,7 +421,8 @@ func Default() Config {
 				FocusPrev: "h", FocusNext: "l", PanelPrev: "H", PanelNext: "L",
 			},
 		},
-		Nitro: Nitro{Fake: true},
+		Nitro:          Nitro{Fake: true},
+		StickerPreview: StickerPreview{BorderStyle: "square"},
 		Media: Media{
 			Enabled:                  true,
 			AnimateGIFs:              true,
@@ -801,6 +810,9 @@ highlight_focus_block = false
 
 [nitro]
 fake = true
+
+[sticker_preview]
+border_style = "square"
 
 [media]
 enabled = true

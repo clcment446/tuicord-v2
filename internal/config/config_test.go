@@ -398,6 +398,13 @@ func TestDefaultBorderStyleIsRounded(t *testing.T) {
 	}
 }
 
+func TestDefaultStickerPreviewBorderIsSquarePlain(t *testing.T) {
+	got := Default().StickerPreview
+	if got.BorderStyle != "square" {
+		t.Fatalf("default sticker preview = %+v, want square", got)
+	}
+}
+
 func TestLoadFromRoleGradientDisplayOptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[display]\nrole_gradients = true\nrole_gradient_animations = true\n"), 0o644); err != nil {
