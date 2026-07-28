@@ -185,6 +185,7 @@ func NewMainViewWithState(a *app.App, cfg config.Config, styles Styles, state *u
 	})
 	mv.chat.SetRoleGradients(cfg.Display.RoleGradients, cfg.Display.RoleGradientAnimations)
 	mv.chat.SetStickyAnchor(cfg.Display.StickyAnchor)
+	mv.chat.SetCursorFollowsScroll(cfg.Accessibility.CursorFollowsScroll)
 	mv.chat.SetVimNavigation(cfg.Accessibility.VimNavigation)
 	mv.chat.SetVimKeys(cfg.Keys.Vim)
 	mv.chat.SetMouseBreakpointTracking(cfg.Accessibility.MouseBreakpointTracking)
@@ -1170,6 +1171,7 @@ func (mv *MainView) openForum(id store.ChannelID) {
 		mv.forumView.onFilterMenu = mv.onForumFilter
 		mv.forumView.onNavigate = mv.navigateForum
 		mv.forumPreview = NewChatView(mv.app.Store(), func() store.ChannelID { return mv.forumPreviewID }, mv.resolver, mv.styles)
+		mv.forumPreview.SetCursorFollowsScroll(mv.cfg.Accessibility.CursorFollowsScroll)
 		mv.forumPreview.SetVimKeys(mv.cfg.Keys.Vim)
 		if fetcher := newChatMediaFetcher(mv.mediaCfg); fetcher != nil {
 			mv.forumPreview.SetMedia(fetcher, mv.mediaCfg, mv.app.Post)

@@ -187,6 +187,7 @@ tuicord.configure({
     vim_navigation = false,
     mouse_breakpoint_tracking = false,
     highlight_focus_block = false,
+    cursor_follows_scroll = false,
   },
 })
 
