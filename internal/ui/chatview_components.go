@@ -68,6 +68,21 @@ func (w *ChatView) foldFocusedHeader() bool {
 	return true
 }
 
+// ToggleFocusedRichContent hides or restores all non-text rich blocks for the
+// focused message: attachments, stickers, legacy embeds, and Components V2.
+func (w *ChatView) ToggleFocusedRichContent() bool {
+	if w == nil || !w.focusedMessageSet {
+		return false
+	}
+	if w.hiddenRichContent == nil {
+		w.hiddenRichContent = map[string]bool{}
+	}
+	key := messagePlacementPrefix(w.focusedMessage)
+	w.hiddenRichContent[key] = !w.hiddenRichContent[key]
+	w.invalidateBodies()
+	return true
+}
+
 func (w *ChatView) enableComponentMulti(action componentAction) {
 	if w.multiPickers == nil {
 		w.multiPickers = map[string]bool{}

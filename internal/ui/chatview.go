@@ -37,6 +37,7 @@ type ChatView struct {
 	componentFlashes        map[string]time.Time
 	expandedComponents      map[string]bool
 	collapsedHeaders        map[string]bool
+	hiddenRichContent       map[string]bool
 	focusedMessage          store.Message
 	focusedMessageSet       bool
 	focusedExplicit         bool
@@ -611,12 +612,12 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 		}
 		// 'p' plays the focused message's video; 'o' opens its media (video →
 		// player, image/GIF → enlarged viewer) in the full-screen overlay.
-		if ev.Key == input.KeyRune && (ev.Rune == 'p' || ev.Rune == 'o') && w.keyboardFocused && w.focusedMessageSet {
+		if ev.Key == input.KeyRune && (ev.Rune == 'p' || ev.Rune == 'o' || ev.Rune == 'O') && w.keyboardFocused && w.focusedMessageSet {
 			if w.playingVideo != "" {
 				w.stopVideoRequest()
 				return true
 			}
-			if ev.Rune == 'o' {
+			if ev.Rune == 'o' || ev.Rune == 'O' {
 				if w.openFocusedMedia() {
 					return true
 				}
@@ -675,7 +676,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 				if w.foldFocusedHeader() {
 					return true
 				}
-			case vimAct(ev, w.vimKeys.Delete), vimAct(ev, w.vimKeys.Reply), vimAct(ev, w.vimKeys.Edit), vimAct(ev, w.vimKeys.AddReaction), vimAct(ev, w.vimKeys.Profile):
+			case vimAct(ev, w.vimKeys.Delete), vimAct(ev, w.vimKeys.Reply), vimAct(ev, w.vimKeys.AddReaction), vimAct(ev, w.vimKeys.Edit), vimAct(ev, w.vimKeys.Profile), vimAct(ev, w.vimKeys.HideEmbeds):
 				if w.keyboardFocused && w.focusedMessageSet && w.onMessageAction != nil {
 					action := unicode.ToLower(ev.Rune)
 					for _, candidate := range []struct {
@@ -683,7 +684,7 @@ func (w *ChatView) Handle(ev tui.Event) bool {
 						action rune
 					}{
 						{w.vimKeys.Delete, 'd'}, {w.vimKeys.Reply, 'r'}, {w.vimKeys.Edit, 'e'},
-						{w.vimKeys.AddReaction, 'a'}, {w.vimKeys.Profile, 'u'},
+						{w.vimKeys.AddReaction, 'e'}, {w.vimKeys.Edit, 'E'}, {w.vimKeys.Profile, 'u'}, {w.vimKeys.HideEmbeds, 'h'},
 					} {
 						if vimAct(ev, candidate.spec) {
 							action = candidate.action

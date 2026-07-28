@@ -4,6 +4,7 @@ import (
 	"awesomeProject/internal/config"
 	"awesomeProject/internal/media"
 	"awesomeProject/internal/store"
+	"awesomeProject/internal/tui/input"
 	"awesomeProject/internal/tui/layout"
 	"awesomeProject/internal/tui/tui"
 	"context"
@@ -148,6 +149,14 @@ func (w *ChatView) SetVimKeys(keys config.VimKeys) {
 	}
 }
 
+// VimConsumesKey reports whether a focused chat message action should claim a
+// key before the runtime's global panel traversal. This lets the default H
+// hide-rich-content action coexist with the legacy panel-previous binding.
+func (w *ChatView) VimConsumesKey(ev input.KeyEvent) bool {
+	return w != nil && w.vimNavigation && w.keyboardFocused && w.focusedMessageSet &&
+		vimAct(ev, w.vimKeys.HideEmbeds)
+}
+
 // SetMouseBreakpointTracking opts pointer motion into changing the keyboard
 // stopping point. Click activation remains available regardless of this flag.
 func (w *ChatView) SetMouseBreakpointTracking(enabled bool) {
@@ -172,6 +181,23 @@ func (w *ChatView) OnMessageCopy(fn func([]store.Message)) { w.onMessageCopy = f
 
 // OnMessageFocus receives the message under the keyboard or mouse focus bar.
 func (w *ChatView) OnMessageFocus(fn func(store.Message)) { w.onMessageFocus = fn }
+
+// SetFocusedMessage selects a message for actions initiated outside the chat
+// key path, such as the context menu.
+func (w *ChatView) SetFocusedMessage(msg store.Message) {
+	if w == nil {
+		return
+	}
+	w.focusedMessage, w.focusedMessageSet, w.focusKey = msg, true, messagePlacementPrefix(msg)
+}
+
+// OpenMessageMedia opens the first attachment/embed media belonging to msg.
+func (w *ChatView) OpenMessageMedia(msg store.Message) bool {
+	if w == nil {
+		return false
+	}
+	return w.openMessageMedia(msg)
+}
 
 // OnPlayVideo registers the callback that starts inline video playback. The
 // region is in absolute terminal cells.

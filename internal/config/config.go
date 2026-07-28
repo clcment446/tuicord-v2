@@ -135,6 +135,7 @@ type VimKeys struct {
 	Reply       string `toml:"reply"`
 	Edit        string `toml:"edit"`
 	AddReaction string `toml:"add_reaction"`
+	HideEmbeds  string `toml:"hide_embeds"`
 	FocusPrev   string `toml:"focus_previous"`
 	FocusNext   string `toml:"focus_next"`
 	PanelPrev   string `toml:"panel_previous"`
@@ -413,7 +414,7 @@ func Default() Config {
 				Insert: "i", ExitInput: "esc", ScrollDown: "j", ScrollUp: "k",
 				JumpOldest: "g", JumpNewest: "G", NextMessage: "J", PrevMessage: "K",
 				Select: "V", Copy: "Y", Fold: "-", Profile: "u", Delete: "d",
-				Reply: "r", Edit: "e", AddReaction: "a",
+				Reply: "r", Edit: "ctrl+e", AddReaction: "e", HideEmbeds: "H",
 				FocusPrev: "h", FocusNext: "l", PanelPrev: "H", PanelNext: "L",
 			},
 		},

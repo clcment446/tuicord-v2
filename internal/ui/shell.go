@@ -305,6 +305,8 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 		s.mv.BeginReply(msg, true)
 		s.focusComposer()
 	case 'e':
+		s.openReactionPicker(msg)
+	case 'E':
 		if s.app != nil && msg.AuthorID != 0 && msg.AuthorID == s.app.SelfID() {
 			s.mv.BeginEdit(msg)
 			s.focusComposer()
@@ -319,6 +321,8 @@ func (s *Shell) handleMessageAction(action rune, msg store.Message) {
 		}
 	case 'a':
 		s.openReactionPicker(msg)
+	case 'h':
+		s.mv.chat.ToggleFocusedRichContent()
 	}
 }
 
@@ -1903,6 +1907,20 @@ func (s *Shell) openMessageMenu(msg store.Message, x, y int) {
 	canThread := ch.Kind == store.ChannelText || ch.Kind == store.ChannelAnnouncement
 	isAnnouncement := ch.Kind == store.ChannelAnnouncement
 	items := []widget.MenuItem{
+		{Label: "Add reaction", OnSelect: func() {
+			s.closePopup()
+			s.openReactionPicker(msg)
+		}},
+		{Label: "Hide embeds", OnSelect: func() {
+			s.closePopup()
+			s.mv.chat.SetFocusedMessage(msg)
+			s.mv.chat.ToggleFocusedRichContent()
+		}},
+		{Label: "Open attachment", OnSelect: func() {
+			s.closePopup()
+			s.mv.chat.OpenMessageMedia(msg)
+		}},
+		{Separator: true},
 		{Label: "Reply", OnSelect: func() {
 			s.closePopup()
 			s.mv.BeginReply(msg, true)

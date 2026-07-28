@@ -3,6 +3,7 @@ package ui
 import (
 	"awesomeProject/internal/markup"
 	"awesomeProject/internal/media"
+	"awesomeProject/internal/store"
 	"awesomeProject/internal/tui/screen"
 	"awesomeProject/internal/tui/widget"
 	"context"
@@ -79,10 +80,16 @@ func (w *ChatView) openFocusedMedia() bool {
 	if !w.focusedMessageSet {
 		return false
 	}
-	if w.playFocusedVideo() {
-		return true
+	return w.openMessageMedia(w.focusedMessage)
+}
+
+func (w *ChatView) openMessageMedia(msg store.Message) bool {
+	for _, h := range w.videoHits {
+		if strings.HasPrefix(h.placementKey, messagePlacementPrefix(msg)+":") {
+			return w.playVideoHit(h)
+		}
 	}
-	prefix := w.focusKey + ":"
+	prefix := messagePlacementPrefix(msg) + ":"
 	for _, line := range w.visibleLines {
 		b := line.media
 		if b == nil || b.video() || b.img == nil {

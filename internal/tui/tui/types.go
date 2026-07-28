@@ -122,6 +122,12 @@ type VimFocusTraverser interface {
 	HandleVimFocus(forward bool) bool
 }
 
+// VimKeyConsumer lets a focused widget claim a key before global Vim panel
+// traversal gets a chance to consume it.
+type VimKeyConsumer interface {
+	VimConsumesKey(input.KeyEvent) bool
+}
+
 // FocusChangeReason identifies what moved keyboard focus. Roots can use the
 // reason to distinguish a render-time replacement from explicit user
 // navigation while still observing every actual owner change.
