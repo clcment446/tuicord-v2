@@ -396,6 +396,13 @@ func (p *InlinePicker) Handle(ev tui.Event) bool {
 	case input.KeyEnter:
 		p.pick()
 		return true
+	case input.KeyTab:
+		if key.Mods&input.Shift != 0 {
+			p.list.Handle(input.KeyEvent{Key: input.KeyUp})
+		} else {
+			p.pick()
+		}
+		return true
 	case input.KeyUp, input.KeyDown, input.KeyHome, input.KeyEnd, input.KeyPageUp, input.KeyPageDown:
 		return p.list.Handle(ev)
 	case input.KeyBackspace:
