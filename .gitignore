@@ -6,4 +6,4 @@ __pycache__/
 .claude
 # Built binaries
 /tuicord
-ignored
+cmd/ignored
