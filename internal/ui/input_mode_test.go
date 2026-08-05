@@ -42,6 +42,72 @@ func TestShellInputModeIAndComposerSemicolonQ(t *testing.T) {
 	}
 }
 
+func TestAltModeCharacterInsertsConfiguredEscapePrefix(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keys.ModeEscape = "\\"
+	mv := &MainView{cfg: cfg, composer: widget.NewTextInput("Message")}
+	s := &Shell{mv: mv, cfg: cfg}
+
+	if !s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("Alt+% was not handled")
+	}
+	if got := mv.composer.Value(); got != `\%` {
+		t.Fatalf("composer value = %q, want escaped mode character", got)
+	}
+	if _, _, _, ok := completionToken(mv.composer.Value(), mv.composer.Cursor()); ok {
+		t.Fatal("escaped mode character opened autocomplete")
+	}
+}
+
+func TestAltModeCharacterDoesNothingWhenEscapeDisabled(t *testing.T) {
+	cfg := config.Default()
+	mv := &MainView{cfg: cfg, composer: widget.NewTextInput("Message")}
+	s := &Shell{mv: mv, cfg: cfg}
+	if s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("Alt+% was claimed while mode escaping was disabled")
+	}
+}
+
+func TestAltModeCharacterRespectsReadOnlyAndVimNormalMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.Keys.ModeEscape = "\\"
+	composer := widget.NewTextInput("Message")
+	composer.SetReadOnly(true)
+	mv := &MainView{cfg: cfg, composer: composer}
+	s := &Shell{mv: mv, cfg: cfg}
+	if s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("read-only composer accepted Alt+%")
+	}
+
+	cfg.Accessibility.VimNavigation = true
+	composer.SetReadOnly(false)
+	composer.SetInputFocusEnabled(false)
+	s.cfg, mv.cfg = cfg, cfg
+	if s.HandleOverlay(input.KeyEvent{Key: input.KeyRune, Rune: '%', Mods: input.Alt}) {
+		t.Fatal("Vim normal mode accepted Alt+%")
+	}
+}
+
+func TestUnescapeModeCharacters(t *testing.T) {
+	got := unescapeModeCharacters(`literal \% \@ \\% and \x`, "\\")
+	want := `literal % @ \% and \x`
+	if got != want {
+		t.Fatalf("unescaped = %q, want %q", got, want)
+	}
+}
+
+func TestArbitraryModeEscapeAvoidsParserAndTriggerCollisions(t *testing.T) {
+	if got := unescapeModeCharacters("$%", "$"); got != "%" {
+		t.Fatalf("dollar escape = %q, want literal percent", got)
+	}
+	if trigger, _, _, ok := completionTokenWithEscape("%%", 2, "%"); ok {
+		t.Fatalf("same-as-trigger escape opened picker for %q", trigger)
+	}
+	if !startsEscapedModeCharacter(`\;command`, "\\") {
+		t.Fatal("escaped semicolon was not recognized before local-command dispatch")
+	}
+}
+
 func TestVimITransfersRuntimeFocusToNewlyEnabledComposer(t *testing.T) {
 	cfg := vimTestConfig()
 	st := store.New(0)

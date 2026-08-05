@@ -101,6 +101,10 @@ type Keys struct {
 	FocusComposer string `toml:"focus_composer"`
 	// Picker opens the emoji/sticker picker over the composer.
 	Picker string `toml:"picker"`
+	// ModeEscape enables literal autocomplete trigger characters. It must be
+	// empty (disabled) or exactly one character. Alt+<trigger> inserts the
+	// prefix and trigger; the prefix is removed before the message is sent.
+	ModeEscape string `toml:"mode_escape"`
 	// PasteImage attaches an image from the system clipboard. Defaults to
 	// ctrl+v; terminals' text paste is ctrl+shift+v, so this does not shadow it.
 	// Also available as the ;paste command.
@@ -761,6 +765,9 @@ focus_composer = "esc"
 # Attach an image from the clipboard (also available as ;paste). Set empty to
 # disable; text paste (ctrl+shift+v) is unaffected either way.
 paste_image = "ctrl+v"
+# Optional one-character prefix for literal mode triggers. When set, Alt+%
+# inserts an escaped percent; the prefix is removed before sending.
+mode_escape = ""
 # Video overlay controls.
 video_pause = "space"
 video_seek_backward = "left"

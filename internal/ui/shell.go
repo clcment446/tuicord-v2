@@ -1134,6 +1134,16 @@ func (s *Shell) HandleOverlay(ev tui.Event) bool {
 	if s.overlay != nil {
 		return false
 	}
+	if key.Key == input.KeyRune && key.Mods&input.Alt != 0 && key.Mods&(input.Ctrl|input.Super) == 0 &&
+		strings.ContainsRune("/;:%#@&+", key.Rune) {
+		inputActive := !s.cfg.Accessibility.VimNavigation || s.editor.phase == editorInput
+		if escape, ok := modeEscapeRune(s.cfg.Keys.ModeEscape); ok && s.composerWritable() && s.mv.composer.CanFocus() && inputActive {
+			s.completionSync = true
+			s.mv.InsertIntoComposer(string(escape) + string(key.Rune))
+			s.completionSync = false
+			return true
+		}
+	}
 	// Configured focus claims are global on the main surface. Handling them here
 	// prevents a plain-rune binding from being inserted into the composer or
 	// consumed as a chat Vim motion. Overlay-local widgets still get first claim
@@ -1661,7 +1671,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 		}
 		return
 	}
-	trigger, start, query, ok := completionToken(value, cursor)
+	trigger, start, query, ok := completionTokenWithEscape(value, cursor, s.cfg.Keys.ModeEscape)
 	if !ok {
 		switch s.overlay.(type) {
 		case *InlinePicker, *CommandPicker, *LocalCommandPicker:
@@ -1804,6 +1814,10 @@ func (s *Shell) replaceCompletion(start int, insert string) {
 // completionToken returns the current non-whitespace composer token when its
 // first rune is one of the autocomplete triggers.
 func completionToken(value string, cursor int) (rune, int, string, bool) {
+	return completionTokenWithEscape(value, cursor, "")
+}
+
+func completionTokenWithEscape(value string, cursor int, escapeValue string) (rune, int, string, bool) {
 	if cursor < 0 || cursor > len(value) {
 		return 0, 0, "", false
 	}
@@ -1822,11 +1836,55 @@ func completionToken(value string, cursor int) (rune, int, string, bool) {
 	if start == cursor {
 		return 0, 0, "", false
 	}
+	if escape, ok := modeEscapeRune(escapeValue); ok {
+		first, firstSize := utf8.DecodeRuneInString(value[start:])
+		if first == escape && start+firstSize < cursor {
+			next, _ := utf8.DecodeRuneInString(value[start+firstSize:])
+			if strings.ContainsRune("/;:%#@&+", next) {
+				return 0, 0, "", false
+			}
+		}
+	}
 	trigger, size := utf8.DecodeRuneInString(value[start:])
 	if !strings.ContainsRune("/;:%#@&+", trigger) {
 		return 0, 0, "", false
 	}
 	return trigger, start, value[start+size : cursor], true
+}
+
+func startsEscapedModeCharacter(value, escapeValue string) bool {
+	escape, ok := modeEscapeRune(escapeValue)
+	if !ok {
+		return false
+	}
+	runes := []rune(value)
+	return len(runes) >= 2 && runes[0] == escape && strings.ContainsRune("/;:%#@&+", runes[1])
+}
+
+func modeEscapeRune(value string) (rune, bool) {
+	runes := []rune(value)
+	if len(runes) != 1 || unicode.IsSpace(runes[0]) {
+		return 0, false
+	}
+	return runes[0], true
+}
+
+func unescapeModeCharacters(value, escapeValue string) string {
+	escape, ok := modeEscapeRune(escapeValue)
+	if !ok || value == "" {
+		return value
+	}
+	runes := []rune(value)
+	var out strings.Builder
+	for i := 0; i < len(runes); i++ {
+		if runes[i] == escape && i+1 < len(runes) && strings.ContainsRune("/;:%#@&+", runes[i+1]) {
+			i++
+			out.WriteRune(runes[i])
+			continue
+		}
+		out.WriteRune(runes[i])
+	}
+	return out.String()
 }
 
 func (s *Shell) openMessageMenu(msg store.Message, x, y int) {

@@ -171,6 +171,9 @@ tuicord.configure({
     members_auto_hide = true,
     members_hide_below = 120,
   },
+  keys = {
+    mode_escape = "",
+  },
   display = {
     border_style = "rounded",
     ascii = false,
