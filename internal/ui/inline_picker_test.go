@@ -89,6 +89,16 @@ func TestInlinePickerNativeStickerSelectsSticker(t *testing.T) {
 	}
 }
 
+func TestInlinePickerStickerBorderReplacementKeepsLayoutInSync(t *testing.T) {
+	p := NewInlinePicker(newTestPickerStore(), Styles{}, 1, 0, false, true, '%', "", func(string) {}, nil, func() {})
+	p.SetStickerGridBorderStyle("double")
+	children := p.body.Children()
+	layoutChildren := p.body.Layout().Children
+	if len(children) != len(layoutChildren) || children[1].Layout() != layoutChildren[1] {
+		t.Fatal("sticker-grid child and retained layout tree diverged")
+	}
+}
+
 func TestInlinePickerOrdersCustomEmojiByFavoriteThenActiveGuild(t *testing.T) {
 	st := store.New(0)
 	st.UpsertGuild(store.Guild{ID: 1, Name: "Home"})

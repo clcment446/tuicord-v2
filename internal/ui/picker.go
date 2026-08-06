@@ -206,7 +206,7 @@ func buildStickerEntries(st *store.Store, active store.GuildID, nitro, fakeNitro
 			}
 			out = append(out, searchEntry{
 				key:   strings.ToLower(s.Name),
-				entry: pickerEntry{label: label, insert: text, usable: ok, stickerID: stickerID, recentStickerID: s.ID, favoriteStickerID: s.ID, guildID: g.ID},
+				entry: pickerEntry{label: label, insert: text, usable: ok, stickerID: stickerID, recentStickerID: s.ID, favoriteStickerID: s.ID, guildID: g.ID, mediaURL: picker.StickerCDNURL(s.ID)},
 			})
 		}
 	}

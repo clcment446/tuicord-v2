@@ -189,6 +189,9 @@ tuicord.configure({
     highlight_focus_block = false,
     cursor_follows_scroll = false,
   },
+  sticker_preview = {
+    border_style = "square",
+  },
 })
 
 -- Themes may use the old flat seven-color table, but the nested form also

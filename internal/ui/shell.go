@@ -1702,6 +1702,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 		},
 		s.closeOverlay,
 	)
+	p.SetStickerGridBorderStyle(s.cfg.StickerPreview.BorderStyle)
 	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers())
 	p.SetQueryChange(func(next string) {
 		s.completionSync = true
