@@ -181,6 +181,13 @@ tuicord.configure({
     no_animations_over_ssh = true,
     sticky_anchor = true,
   },
+  search = {
+    emoji = 2,
+    stickers = 2,
+    members = 2,
+    roles = 2,
+    channels = 2,
+  },
   accessibility = {
     mouse_on = true,
     focus_splits = false,

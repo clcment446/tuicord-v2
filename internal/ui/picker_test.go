@@ -40,6 +40,22 @@ func TestPickerEmojiFilter(t *testing.T) {
 	}
 }
 
+func TestPickerFuzzyLevelZeroUsesSubstringMatching(t *testing.T) {
+	p := NewPicker(newTestPickerStore(), Styles{}, 1, false, true, func(string) {}, func() {})
+	p.SetFuzzyLevels(0, 0)
+	p.setTab(tabCustom)
+	p.query = "hmb"
+	p.refilter()
+	if len(p.filtered) != 0 {
+		t.Fatalf("level-zero custom results = %+v, want no subsequence match", p.filtered)
+	}
+	p.query = "blob"
+	p.refilter()
+	if len(p.filtered) != 1 {
+		t.Fatalf("level-zero substring results = %+v, want one", p.filtered)
+	}
+}
+
 func TestPickerCustomTabNativeAndFakeNitro(t *testing.T) {
 	// active guild 1, no nitro, fake-nitro on.
 	p := NewPicker(newTestPickerStore(), Styles{}, 1, false, true, func(string) {}, func() {})

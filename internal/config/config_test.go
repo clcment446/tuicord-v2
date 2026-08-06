@@ -413,6 +413,13 @@ func TestDefaultBorderStyleIsRounded(t *testing.T) {
 	}
 }
 
+func TestDefaultSearchFuzzyLevelsAreRanked(t *testing.T) {
+	got := Default().Search
+	if got.Emoji != 2 || got.Stickers != 2 || got.Members != 2 || got.Roles != 2 || got.Channels != 2 {
+		t.Fatalf("default search levels = %+v, want all 2", got)
+	}
+}
+
 func TestLoadFromRoleGradientDisplayOptions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.toml")
 	if err := os.WriteFile(path, []byte("[display]\nrole_gradients = true\nrole_gradient_animations = true\n"), 0o644); err != nil {

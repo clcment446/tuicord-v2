@@ -1596,6 +1596,7 @@ func (s *Shell) openQuickSwitcher() {
 func (s *Shell) openHotSwitch() {
 	p := NewInlinePicker(s.app.Store(), s.styles, s.app.ActiveGuild(), s.app.ActiveChannel(), s.app.Store().HasNitro(), s.cfg.Nitro.Fake,
 		'+', "", func(string) {}, nil, s.closeOverlay)
+	p.SetFuzzyLevel(s.cfg.Search.Channels)
 	p.SetSwitch(func(guild store.GuildID, channel store.ChannelID) {
 		s.mv.setActive(guild, channel)
 		s.mv.Refresh()
@@ -1618,6 +1619,7 @@ func (s *Shell) openReactionPicker(msg store.Message) {
 		':', "", func(emoji string) {
 			s.app.AddReaction(msg.ChannelID, msg.ID, emoji)
 		}, nil, s.closeOverlay)
+	p.SetFuzzyLevel(s.cfg.Search.Emoji)
 	p.useReactionEntries(st, s.app.ActiveGuild(), st.HasNitro())
 	if s.mv != nil && s.mv.state != nil {
 		p.SetFavorites(s.mv.favoriteEmojis(), nil)
@@ -1635,6 +1637,7 @@ func (s *Shell) openPicker() {
 		s.closeOverlay,
 	)
 	p.SetGIFSearch(s.app.SearchGIFs)
+	p.SetFuzzyLevels(s.cfg.Search.Emoji, s.cfg.Search.Stickers)
 	p.SetRecentStickers(s.mv.recentStickers())
 	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers(), s.mv.toggleFavorite)
 	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
@@ -1702,6 +1705,7 @@ func (s *Shell) composerChanged(value string, cursor int) {
 		},
 		s.closeOverlay,
 	)
+	p.SetFuzzyLevel(s.fuzzyLevelForTrigger(trigger))
 	p.SetFavorites(s.mv.favoriteEmojis(), s.mv.favoriteStickers())
 	p.SetQueryChange(func(next string) {
 		s.completionSync = true
@@ -1724,6 +1728,23 @@ func (s *Shell) composerChanged(value string, cursor int) {
 	})
 	p.SetMedia(newChatMediaFetcher(s.mediaCfg), s.mediaCfg, s.app.Post)
 	s.setComposerOverlay(p)
+}
+
+func (s *Shell) fuzzyLevelForTrigger(trigger rune) int {
+	switch trigger {
+	case ':':
+		return s.cfg.Search.Emoji
+	case '%':
+		return s.cfg.Search.Stickers
+	case '@':
+		return s.cfg.Search.Members
+	case '&':
+		return s.cfg.Search.Roles
+	case '#', '+':
+		return s.cfg.Search.Channels
+	default:
+		return 2
+	}
 }
 
 func (s *Shell) openCommandPicker(query string) {

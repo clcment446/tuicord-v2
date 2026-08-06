@@ -145,6 +145,17 @@ type Nitro struct {
 	Fake bool `toml:"fake"`
 }
 
+// Search controls fuzzy matching independently for each picker catalog.
+// Levels are clamped to 0..2: 0 is substring-only, 1 is ordered subsequence,
+// and 2 uses ranked fuzzy matching.
+type Search struct {
+	Emoji    int `toml:"emoji"`
+	Stickers int `toml:"stickers"`
+	Members  int `toml:"members"`
+	Roles    int `toml:"roles"`
+	Channels int `toml:"channels"`
+}
+
 // Media controls network, decode, cache, and player resource limits. Byte and
 // pixel values are direct limits so operators can audit the exact bounds.
 type Media struct {
@@ -312,6 +323,7 @@ type Config struct {
 	Keys          Keys          `toml:"keys"`
 	Colors        Colors        `toml:"colors"`
 	Nitro         Nitro         `toml:"nitro"`
+	Search        Search        `toml:"search"`
 	Media         Media         `toml:"media"`
 	Privacy       Privacy       `toml:"privacy"`
 	Display       Display       `toml:"display"`
@@ -417,6 +429,9 @@ func Default() Config {
 			},
 		},
 		Nitro: Nitro{Fake: true},
+		Search: Search{
+			Emoji: 2, Stickers: 2, Members: 2, Roles: 2, Channels: 2,
+		},
 		Media: Media{
 			Enabled:                  true,
 			AnimateGIFs:              true,
@@ -805,6 +820,14 @@ cursor_follows_scroll = false
 
 [nitro]
 fake = true
+
+[search]
+# 0 = substring only, 1 = ordered subsequence, 2 = ranked fuzzy matching.
+emoji = 2
+stickers = 2
+members = 2
+roles = 2
+channels = 2
 
 [media]
 enabled = true
